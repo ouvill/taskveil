@@ -190,7 +190,12 @@ class FlutterLocalReminderNotificationGateway
           MacOSFlutterLocalNotificationsPlugin
         >()
         ?.requestPermissions(alert: true, badge: false, sound: true);
-    return ios ?? macos ?? true;
+    final android = await _plugin
+        .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin
+        >()
+        ?.requestNotificationsPermission();
+    return ios ?? macos ?? android ?? true;
   }
 
   @override
@@ -207,17 +212,24 @@ class FlutterLocalReminderNotificationGateway
       title: content.title,
       body: content.body,
       scheduledDate: scheduled,
-      notificationDetails: const NotificationDetails(
-        iOS: DarwinNotificationDetails(
+      notificationDetails: NotificationDetails(
+        iOS: const DarwinNotificationDetails(
           categoryIdentifier: reminderNotificationCategoryId,
         ),
-        macOS: DarwinNotificationDetails(
+        macOS: const DarwinNotificationDetails(
           categoryIdentifier: reminderNotificationCategoryId,
         ),
         android: AndroidNotificationDetails(
           'taskveil_reminders',
           'Taskveil reminders',
           channelDescription: 'Local reminders scheduled by Taskveil',
+          actions: [
+            AndroidNotificationAction(
+              reminderSnoozeActionId,
+              content.snoozeActionTitle,
+              showsUserInterface: true,
+            ),
+          ],
         ),
       ),
       androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
@@ -286,8 +298,12 @@ class ReminderNotificationService {
     }
   }
 
-  Future<bool> requestPermissions() {
-    return gateway.requestPermissions();
+  Future<bool> requestPermissions() async {
+    try {
+      return await gateway.requestPermissions();
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<void> scheduleReminder({

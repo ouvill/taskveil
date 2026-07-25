@@ -1203,7 +1203,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get billingSubscriptionBody =>
-      'Pro includes E2EE sync and encrypted cloud backup. Cancel anytime in Apple subscriptions.';
+      'Pro includes E2EE sync and encrypted cloud backup. Cancel anytime in your device\'s subscription settings.';
 
   @override
   String get billingStatusFree => 'Free';
@@ -1246,7 +1246,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get billingPending =>
-      'Purchase pending. Pro will activate after Apple confirms payment.';
+      'Purchase pending. Pro will activate after your app store confirms payment.';
 
   @override
   String get billingFailed => 'Purchase couldn\'t be completed.';

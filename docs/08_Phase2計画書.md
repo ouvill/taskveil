@@ -41,7 +41,7 @@ E2EE Todoアプリ「Taskveil」のPhase 2を、実装可能なマイルスト�
 | 領域 | 現状 | Phase 2への影響 |
 |---|---|---|
 | `core/sync` | protocol v5、HLC / field LWW、outbox、full resync、continuity、timer recordまで実装済み | Canonical Inbox convergenceがmaintenance backlog |
-| `server/` | OPAQUE認証、Postgres同期、RLS、continuity / resync routeを実装済み。billing routeはTODOのみ | 課金release gateでbilling eventとentitlementを実装する |
+| `server/` | OPAQUE認証、Postgres同期、RLS、continuity / resync route、RevenueCat billing event / entitlementを実装済み | 外部store / provider設定とsandbox E2Eを課金release gateで完了する |
 | OPAQUE / account | 登録・ログイン・session復元・MK / DEK接続を実装済み | 本番デプロイと実端末の最終確認が残る |
 | ローカルDB | SQLCipher schema v18。同期、期限、計画属性、timerまでmigration済み | 課金状態をlocal authorityにせず、必要なcacheだけを後続設計する |
 | 削除モデル | ADR-016とtask-98でarchive-first、terminal tombstone、expired-device rebaseを実装済み | 実本番環境での運用観測が残る |
@@ -94,7 +94,7 @@ E2EE Todoアプリ「Taskveil」のPhase 2を、実装可能なマイルスト�
 |---|---|---|---|
 | P2-M5-01 | Archive-first削除同期を裁定する | P2-M4 | ADR-016がAcceptedとなり、bounded tombstone、server-trusted continuity、expired-device rebase、late descendant収束が決定していること（完了） |
 | P2-M5-02 | ADR-016の削除同期を実装する | P2-M5-01 | terminal deletion、history purge、pull-before-push、continuity、expired rebase、late descendant cascadeが自動テストで確認できること（task-98で完了） |
-| P2-M5-03 | Android build、macOS / iOS動作を検証する | P2-M4、P2-M5-02 | macOSとiOS Simulatorの主要動線、Android Rust FFI / Flutter build、Android Keystore、Android実機同期が確認され、既知差分が記録されること（Android Rust FFI / release APK build / Keystore実装、Pixel 7a / Android 16接続実機のKeystore / Device Key rotation / DB reopenは完了。Android実機同期は未完） |
+| P2-M5-03 | Android build、macOS / iOS動作を検証する | P2-M4、P2-M5-02 | macOSとiOS Simulatorの主要動線、Android Rust FFI / Flutter build、Android Keystore、Android同期が確認され、既知差分が記録されること（Android Rust FFI / release APK・AAB build / Keystore実装、Pixel 7a / Android 16接続実機のKeystore / Device Key rotation / DB reopenは完了。Android Emulator上の通知・主要UI・登録・ログイン・2 profile双方向同期を自動化し、接続実機での最終確認はrelease gateとして維持する） |
 | P2-M5-04 | Phase 2完了前の品質ゲートを通す | P2-M5-03 | Rust/Flutterの品質ゲート、ハードコード文字列検出、主要同期テスト、Postgres統合テストが通ること |
 
 ### P2-M6: カレンダー表示
@@ -145,21 +145,21 @@ E2EE Todoアプリ「Taskveil」のPhase 2を、実装可能なマイルスト�
 | HLC実装の仕様逸脱 | 収束性、冪等性、未来HLC拒否が壊れる | 固定幅エンコード、受信merge、proptest、サーバー未来拒否テストを分けて検証する |
 | E2EE blobのメタデータ漏洩 | サーバーが不要な平文情報を知る | record_id、collection、seq、HLC、blobサイズ以外をサーバー側メタデータに増やさない |
 | Lambda/Neon本番デプロイ | クレデンシャル、課金、WAF/API Gateway判断が必要 | Docker / local Postgres検証と本番deployを分離し、課金release gate合格後のリリース列で実施する |
-| 課金外部E2E未完 | 購入・server-side entitlement・失効認可のコードと価格承認は完了したが、provider設定、App Store商品設定、実機sandbox証跡が未完である | Billing foundation release gateを完了するまでstore提出、release tag、公開告知を行わない |
-| ローカル通知体験 | 同期導入後も通知はサーバーpushではなくローカル通知である | iOS実機で通知登録・取消・snoozeを最終確認し、同期サーバーから通知時刻を扱わない |
+| 課金外部E2E未完 | iOS / Android購入client、server-side entitlement、失効認可のコードは完了したが、provider設定、App Store / Google Play商品設定、各store sandbox証跡が未完である | Billing foundation release gateを完了するまでstore提出、release tag、公開告知を行わない |
+| ローカル通知体験 | 同期導入後も通知はサーバーpushではなくローカル通知である | iOS / Android接続実機で通知登録・取消・snoozeを最終確認し、同期サーバーから通知時刻を扱わない |
 | カレンダーのドラッグ操作 | モバイル、デスクトップ、アクセシビリティで操作品質が割れる | ドラッグだけを唯一の操作にせず、詳細編集または日付変更メニューを同等経路として用意する |
 | タイマーの圧迫感 | Pomodoroやstreakがスコア化されるとTaskveilの静かな体験から外れる | `docs/design/visual-direction.md` のFocus Timer方針を正とし、宣言的で可逆な操作、静かな記録に留める |
 | 繰り返しタスクの重複生成 | 複数端末、オフライン復帰、時刻境界で同じインスタンスを重複作成する恐れがある | RRULE instance keyを定義し、ローカル生成と同期マージで冪等性をテストする |
 
 ## 6. Release gateと人間確認
 
-- 課金provider、product、価格、trial / grace、restore方針は承認済みで、Billing foundationのコード実装と独立検証は完了した。RevenueCat Test Store、App Store商品設定、Apple sandbox実機E2Eを完了する。
+- 課金provider、product、trial / grace、restore方針とiOS / Android client実装は揃っている。RevenueCat環境別mobile app、App Store / Google Play商品設定、各store sandbox E2Eを完了する。具体価格を含むstorefront設定は人間承認を正本とする。
 - AWS/ECR/Lambda/Neon本番デプロイの実行、クレデンシャル投入、WAF/API GatewayまたはCloudFront前段の判断。
-- iOS実機でKeychainゼロプロンプト、通知、購入・復元、同期を通し確認し、Android実機でアカウント登録・ログインと別端末との同期を確認する。AndroidのKeystore / Device Key rotation / DB reopenはPixel 7a / Android 16で確認済みである。
+- iOS実機でKeychainゼロプロンプト、通知、購入・復元、同期を通し確認する。AndroidはEmulator自動E2Eに加えて、接続実機で通知、Google Play購入・復元、アカウント登録・ログイン、別端末同期を最終確認する。AndroidのKeystore / Device Key rotation / DB reopenはPixel 7a / Android 16で確認済みである。
 - 課金、実機、本番運用、法務・コンプライアンスの各ゲート合格後にrelease branch / tag、ストア提出、公開告知を行う。
 
 ## 7. 既存仕様書との差異・確認事項
 
-- `docs/01_企画書.md` §8のうち、同期、アカウント、カレンダー、Pomodoro、テンプレート / 繰り返し、Android Flutter release APK build、Android Keystoreは実装済みである。P2-M5のAndroid接続実機ではKeystore / Device Key rotation / DB reopenまで完了し、Android実機同期と課金release gateが残る。
+- `docs/01_企画書.md` §8のうち、同期、アカウント、カレンダー、Pomodoro、テンプレート / 繰り返し、Android Flutter release APK / AAB build、Android Keystore、通知permission / snooze、Google Play購入clientは実装済みである。Android Emulatorの主要UI・登録・ログイン・双方向同期を継続的に検証し、接続実機の通知・同期とApp Store / Google Play外部課金E2Eをrelease gateとして残す。
 - 旧Turso route TODOはPostgres統合済みの`server/src/routes/auth.rs` / `sync.rs`へ置き換えられた。`server/src/routes/billing.rs`もRevenueCat adapter、webhook、billing GET / refresh、同期認可を実装済みで、外部sandbox E2EはactiveなBilling foundation work itemで追跡する。
 - 削除同期の再設計待ちはADR-016とtask-98で解消済みであり、task-95のfull resync / GC horizon、task-96のRLS hardeningも完了した。

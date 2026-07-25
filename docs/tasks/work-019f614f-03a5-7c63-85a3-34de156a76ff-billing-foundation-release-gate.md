@@ -240,3 +240,10 @@ request-time同期許可predicateは次のすべてを満たす場合だけtrue�
 - clientは引き続きStoreのlocalized metadataだけを表示し、価格をDart / Rustへ埋め込まない。価格改定でもproduct ID、RevenueCat offering / entitlement、server認可契約を変更しない。
 - 独立レビューでlegacy `BACKLOG.md`に残った承認待ち表現をP2として検出し、未完の外部設定・sandbox E2Eだけへ修正した。再レビューはPASSで、未解消のP1 / P2 / P3指摘はない。
 - 価格承認の停止条件は解消した。RevenueCat / App Store product設定とsandbox実機E2Eが未完のため、work itemは`active`を維持する。
+
+### 9.7 Android client同等化（2026-07-25）
+
+- プロダクトオーナーのAndroid / iOS実装同等化承認に基づき、`work-019f9947-43fe-7fd0-804d-13f7b5beb01f-android-ios-parity`でRevenueCat Android public SDK key、Google Play購入・復元・subscription管理URL、store障害時も最新server entitlementを保持するclient境界を追加した。
+- 認可の正本、custom App User ID、environment分離、購入後のserver refresh、local-only継続契約はiOSと同一であり、Google Playのclient receiptやSDK表示を認可へ使用しない。
+- 本work itemの初回iOS実装記録は履歴として維持するが、一般リリースgateはApp StoreとGoogle Playの各sandbox E2Eを要求する。RevenueCat Android app、Google Play商品、upload signing、sandbox購入・復元・更新・失効・返金・再有効化は外部作業であり、Emulator testや固定test entitlementで成功扱いにしない。
+- App Store / Google Play双方の外部gateが未完のため、work itemは引き続き`active`とし、store提出、release tag、公開告知へ進まない。

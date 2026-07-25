@@ -158,6 +158,65 @@ void main() {
     },
   );
 
+  test(
+    'store configuration failure keeps the latest server entitlement',
+    () async {
+      final bridge = _BillingBridge()
+        ..cachedState = _billingState(
+          status: 'in_grace_period',
+          syncAllowed: true,
+        );
+      final store = _FakeBillingStore()..throwOnConfigure = true;
+      final container = ProviderContainer(
+        overrides: [
+          bridgeServiceProvider.overrideWithValue(bridge),
+          billingStoreProvider.overrideWithValue(store),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container
+          .read(accountProvider.notifier)
+          .login(email: 'alice@example.com', password: 'correct password');
+
+      final latest = await container.read(billingProvider.future);
+
+      expect(latest?.entitlement.status, 'free');
+      expect(latest?.entitlement.syncAllowed, isFalse);
+      expect(latest?.products, isEmpty);
+      expect(container.read(billingProvider).hasValue, isTrue);
+    },
+  );
+
+  test(
+    'catalog failure after server refresh keeps the refreshed entitlement',
+    () async {
+      final bridge = _BillingBridge();
+      final store = _FakeBillingStore();
+      final container = ProviderContainer(
+        overrides: [
+          bridgeServiceProvider.overrideWithValue(bridge),
+          billingStoreProvider.overrideWithValue(store),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container
+          .read(accountProvider.notifier)
+          .login(email: 'alice@example.com', password: 'correct password');
+      await container.read(billingProvider.future);
+      store.throwOnProducts = true;
+
+      await container.read(billingProvider.notifier).refreshFromServer();
+
+      final latest = container.read(billingProvider);
+      expect(latest.hasValue, isTrue);
+      expect(latest.value?.entitlement.status, 'active');
+      expect(latest.value?.entitlement.syncAllowed, isTrue);
+      expect(latest.value?.products, isEmpty);
+      expect(latest.value?.busy, isFalse);
+      expect(bridge.refreshCalls, 1);
+    },
+  );
+
   testWidgets('Pro section is localized and remains readable at large type', (
     tester,
   ) async {
@@ -194,9 +253,7 @@ void main() {
 
     expect(find.text('Pro'), findsOneWidget);
     expect(
-      find.text(
-        'ProではE2EE同期と暗号化クラウドバックアップを利用できます。Appleのサブスクリプション画面からいつでも解約できます。',
-      ),
+      find.text('ProではE2EE同期と暗号化クラウドバックアップを利用できます。端末のサブスクリプション設定からいつでも解約できます。'),
       findsOneWidget,
     );
     expect(find.textContaining('トライアル'), findsNothing);
@@ -266,6 +323,8 @@ class _FakeBillingStore implements BillingStore {
   String? configuredAppUserId;
   String? configuredEnvironment;
   BillingPurchaseOutcome purchaseOutcome = BillingPurchaseOutcome.purchased;
+  bool throwOnConfigure = false;
+  bool throwOnProducts = false;
   bool throwOnPurchase = false;
 
   @override
@@ -275,18 +334,22 @@ class _FakeBillingStore implements BillingStore {
   }) async {
     configuredAppUserId = appUserId;
     configuredEnvironment = environment;
+    if (throwOnConfigure) throw StateError('store unavailable');
   }
 
   @override
-  Future<List<BillingProduct>> products() async => const [
-    BillingProduct(
-      identifier: 'com.taskveil.app.pro.monthly',
-      title: 'Taskveil Pro Monthly',
-      description: 'Monthly Pro',
-      price: 'Localized monthly price',
-      isAnnual: false,
-    ),
-  ];
+  Future<List<BillingProduct>> products() async {
+    if (throwOnProducts) throw StateError('catalog unavailable');
+    return const [
+      BillingProduct(
+        identifier: 'com.taskveil.app.pro.monthly',
+        title: 'Taskveil Pro Monthly',
+        description: 'Monthly Pro',
+        price: 'Localized monthly price',
+        isAnnual: false,
+      ),
+    ];
+  }
 
   @override
   Future<BillingPurchaseOutcome> purchase(String productIdentifier) async {
