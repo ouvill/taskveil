@@ -125,7 +125,7 @@ local development、SQLx prepareでmigration管理方式が一致していない
 - 品質ゲート: `cargo fmt --all -- --check`、`cargo clippy --workspace -- -D warnings`、
   `cargo test --workspace`、client boundary check / test、`bash -n tool/dev_server.sh`、
   `git diff --check`が成功した。Flutter変更はないためFlutter gateは対象外とした。
-- Commit: 未コミット
+- Commit: `d087af069a778038ded14be556ae56864b11f1d0`
 - 未解決: なし
 
 ### 独立検証
