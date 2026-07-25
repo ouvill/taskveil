@@ -14,12 +14,15 @@ void main() {
   ) async {
     await RustLib.init();
     final support = await getApplicationSupportDirectory();
-    final profile = Directory('${support.path}/dk-rotation-platform-test-v3');
+    final profile = Directory('${support.path}/dk-rotation-platform-test-v4');
+    final restartSentinel = File('${profile.path}/first-rotation-complete');
+    final reopeningAfterRestart = await restartSentinel.exists();
     await profile.create(recursive: true);
     await initCore(dbDir: profile.path, defaultInboxName: 'Inbox');
 
     final generation = await rotateDeviceKey();
-    expect(generation, greaterThan(1));
+    expect(generation, greaterThan(reopeningAfterRestart ? 2 : 1));
     expect(await getLists(), isNotEmpty);
+    await restartSentinel.writeAsString('$generation\n', flush: true);
   });
 }

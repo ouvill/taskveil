@@ -1,7 +1,9 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "android")]
+use std::os::fd::AsRawFd;
 use std::{
-    fs::{File, OpenOptions, TryLockError},
+    fs::{File, OpenOptions, TryLockError as FileTryLockError},
     ops::Deref,
 };
 use taskveil_crypto::{
@@ -1734,10 +1736,33 @@ pub(super) fn acquire_session_token_set_lock(
         .truncate(false)
         .open(db_dir.join(SESSION_TOKEN_SET_LOCK_FILE_NAME))
         .map_err(ClientError::Io)?;
-    match lock_file.try_lock() {
+    match try_lock_session_file(&lock_file) {
         Ok(()) => Ok(lock_file),
-        Err(TryLockError::WouldBlock) => Err(ClientError::Busy),
-        Err(TryLockError::Error(error)) => Err(ClientError::Io(error)),
+        Err(FileTryLockError::WouldBlock) => Err(ClientError::Busy),
+        Err(FileTryLockError::Error(error)) => Err(ClientError::Io(error)),
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn try_lock_session_file(lock_file: &File) -> Result<(), FileTryLockError> {
+    lock_file.try_lock()
+}
+
+#[cfg(target_os = "android")]
+fn try_lock_session_file(lock_file: &File) -> Result<(), FileTryLockError> {
+    // Android's libc provides process-wide advisory flock even though
+    // std::fs::File::try_lock currently reports Unsupported on this target.
+    // The lock is released by the kernel when the returned File is dropped.
+    let result = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(code) if code == libc::EAGAIN || code == libc::EWOULDBLOCK => {
+            Err(FileTryLockError::WouldBlock)
+        }
+        _ => Err(FileTryLockError::Error(error)),
     }
 }
 

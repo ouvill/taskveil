@@ -1,7 +1,90 @@
+import java.util.Properties
+import org.gradle.api.GradleException
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+}
+
+fun strictBooleanFlag(name: String, value: String?): Boolean? =
+    value?.let {
+        it.toBooleanStrictOrNull()
+            ?: throw GradleException("$name must be either true or false")
+    }
+
+val taskveilStoreBuild =
+    strictBooleanFlag(
+        "Gradle property taskveilStoreBuild",
+        providers.gradleProperty("taskveilStoreBuild").orNull,
+    )
+        ?: strictBooleanFlag(
+            "TASKVEIL_ANDROID_STORE_BUILD",
+            System.getenv("TASKVEIL_ANDROID_STORE_BUILD"),
+        )
+        ?: false
+
+val taskveilKeyPropertiesFile = rootProject.file(
+    providers.gradleProperty("taskveilKeyProperties").orNull
+        ?: System.getenv("TASKVEIL_ANDROID_KEY_PROPERTIES")
+        ?: "key.properties",
+)
+val taskveilKeyProperties = Properties()
+if (taskveilStoreBuild && taskveilKeyPropertiesFile.isFile) {
+    taskveilKeyPropertiesFile.inputStream().use(taskveilKeyProperties::load)
+}
+
+fun taskveilSigningValue(environmentName: String, propertyName: String): String? =
+    System.getenv(environmentName)?.trim()?.takeIf(String::isNotEmpty)
+        ?: taskveilKeyProperties.getProperty(propertyName)?.trim()?.takeIf(String::isNotEmpty)
+
+val taskveilStoreFilePath = if (taskveilStoreBuild) {
+    taskveilSigningValue("TASKVEIL_ANDROID_KEYSTORE_PATH", "storeFile")
+} else {
+    null
+}
+val taskveilStorePassword = if (taskveilStoreBuild) {
+    taskveilSigningValue("TASKVEIL_ANDROID_KEYSTORE_PASSWORD", "storePassword")
+} else {
+    null
+}
+val taskveilKeyAlias = if (taskveilStoreBuild) {
+    taskveilSigningValue("TASKVEIL_ANDROID_KEY_ALIAS", "keyAlias")
+} else {
+    null
+}
+val taskveilKeyPassword = if (taskveilStoreBuild) {
+    taskveilSigningValue("TASKVEIL_ANDROID_KEY_PASSWORD", "keyPassword")
+} else {
+    null
+}
+val taskveilMissingSigningValues = if (taskveilStoreBuild) {
+    listOfNotNull(
+        "TASKVEIL_ANDROID_KEYSTORE_PATH/storeFile".takeIf {
+            taskveilStoreFilePath == null
+        },
+        "TASKVEIL_ANDROID_KEYSTORE_PASSWORD/storePassword".takeIf {
+            taskveilStorePassword == null
+        },
+        "TASKVEIL_ANDROID_KEY_ALIAS/keyAlias".takeIf {
+            taskveilKeyAlias == null
+        },
+        "TASKVEIL_ANDROID_KEY_PASSWORD/keyPassword".takeIf {
+            taskveilKeyPassword == null
+        },
+    )
+} else {
+    emptyList()
+}
+if (taskveilMissingSigningValues.isNotEmpty()) {
+    throw GradleException(
+        "Store release signing requires all configured values; missing: " +
+            taskveilMissingSigningValues.joinToString(),
+    )
+}
+val taskveilStoreFile = taskveilStoreFilePath?.let(rootProject::file)
+if (taskveilStoreBuild && taskveilStoreFile?.isFile != true) {
+    throw GradleException("Store release signing keystore file does not exist")
 }
 
 android {
@@ -27,11 +110,27 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        if (taskveilStoreBuild) {
+            create("taskveilStore") {
+                storeFile = requireNotNull(taskveilStoreFile)
+                storePassword = requireNotNull(taskveilStorePassword)
+                keyAlias = requireNotNull(taskveilKeyAlias)
+                keyPassword = requireNotNull(taskveilKeyPassword)
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            // An ordinary release build is intentionally unsigned and is only a
+            // package/JNI validation artifact. Store signing is opt-in so a
+            // missing production keystore can never fall back to the debug key.
+            signingConfig = if (taskveilStoreBuild) {
+                signingConfigs.getByName("taskveilStore")
+            } else {
+                null
+            }
         }
     }
 }

@@ -87,20 +87,20 @@ flutter run -d macos
 
 ### Android emulatorを使う場合
 
-Android emulatorからホストMacのサーバーへアクセスする場合、サーバーURLは `http://10.0.2.2:8080` を使う。iOSシミュレータとmacOSアプリは `http://localhost:8080` でよい。
+credential issuerはHTTPSを必須とし、HTTPはloopbackだけを許可する。Android emulatorからホストのlocal serverへ接続する場合は、先にADB reverseを設定する。
+
+```sh
+adb -s <ANDROID_EMULATOR_DEVICE_ID> reverse tcp:8080 tcp:8080
+```
+
+そのうえでAndroid、iOS Simulator、macOSのすべてに `http://127.0.0.1:8080` を設定する。Androidのhost alias `http://10.0.2.2:8080` はloopback originではないため、認証credentialのissuerには使用しない。
 
 ## 3. アカウント画面でサーバーURLを設定する
 
 各クライアントでアカウント画面を開き、Server URLに次を入力して保存する。
 
 ```text
-http://localhost:8080
-```
-
-Android emulatorだけは次を入力する。
-
-```text
-http://10.0.2.2:8080
+http://127.0.0.1:8080
 ```
 
 ## 4. 1台目で登録する

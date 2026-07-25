@@ -3557,6 +3557,7 @@ dependencies = [
  "base64",
  "chrono",
  "iana-time-zone",
+ "libc",
  "serde",
  "serde_json",
  "taskveil-crypto",
