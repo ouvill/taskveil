@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH expired AS (\n             SELECT at.id, at.expires_at\n             FROM access_tokens at\n             JOIN session_families sf ON sf.id = at.family_id\n             JOIN devices d ON d.id = sf.device_id\n             WHERE at.expires_at <= now()\n                OR sf.absolute_expires_at <= now()\n                OR (\n                    d.certificate IS NULL\n                    AND d.certified_at IS NULL\n                    AND d.enrollment_challenge_expires_at <= now()\n                )\n             ORDER BY at.expires_at, at.id\n             LIMIT $1\n         )\n         DELETE FROM access_tokens\n         USING expired\n         WHERE access_tokens.id = expired.id",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7d7a700abb521e126a273251f1bdfffaba5cbc9e9bbc5d80edcaccd2ca49238d"
+}

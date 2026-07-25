@@ -4,14 +4,18 @@ use axum::{
     Router,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use chrono::Utc;
 use serde_json::Value;
 use sqlx_core::{query::query, raw_sql::raw_sql, row::Row};
 use sqlx_postgres::{PgPool, Postgres};
 use taskveil_server::{
+    auth,
     billing::{BillingEnvironment, BillingService},
     build_router, db, AppState,
 };
-use taskveil_sync::account::{unwrap_login_key_bundle, AccountClient, AccountKeyBundleDto};
+use taskveil_sync::account::{
+    unwrap_login_key_bundle, AccountClient, AccountClientError, AccountKeyBundleDto,
+};
 use testcontainers_modules::{
     postgres,
     testcontainers::{runners::AsyncRunner, ContainerAsync},
@@ -49,6 +53,7 @@ async fn setup() -> TestApp {
     let app = build_router(AppState {
         pool: application_pool,
         billing: BillingService::unavailable_for_tests(BillingEnvironment::Sandbox),
+        auth_issuer: "http://localhost".to_string(),
     });
     TestApp {
         app,
@@ -58,7 +63,7 @@ async fn setup() -> TestApp {
 }
 
 #[tokio::test]
-async fn account_register_login_logout_and_key_bundles_remain_available() {
+async fn account_register_login_refresh_reuse_and_revocation_are_enforced() {
     let test = setup().await;
     let health = test
         .app
@@ -99,6 +104,19 @@ async fn account_register_login_logout_and_key_bundles_remain_available() {
     });
 
     let client = AccountClient::new(&server_url).unwrap();
+    let metadata = reqwest::get(format!(
+        "{server_url}/.well-known/oauth-authorization-server"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(metadata.status(), StatusCode::OK);
+    let metadata: Value = metadata.json().await.unwrap();
+    assert_eq!(metadata["issuer"], "http://localhost");
+    assert_eq!(metadata["token_endpoint"], "http://localhost/v1/auth/token");
+    assert_eq!(
+        metadata["revocation_endpoint"],
+        "http://localhost/v1/auth/revoke"
+    );
     let registered = client
         .register(
             "account-v2@example.com",
@@ -108,6 +126,18 @@ async fn account_register_login_logout_and_key_bundles_remain_available() {
         )
         .await
         .unwrap();
+    let now_ms = Utc::now().timestamp_millis();
+    assert_eq!(registered.session.tokens.access_token.len(), 43);
+    assert_eq!(registered.session.tokens.refresh_token.len(), 43);
+    assert!(
+        registered.session.tokens.access_expires_at_ms > now_ms + 14 * 60 * 1_000
+            && registered.session.tokens.access_expires_at_ms <= now_ms + 15 * 60 * 1_000
+    );
+    assert!(
+        registered.session.tokens.refresh_expires_at_ms > now_ms + 29 * 24 * 60 * 60 * 1_000
+            && registered.session.tokens.refresh_expires_at_ms
+                <= now_ms + 30 * 24 * 60 * 60 * 1_000
+    );
     assert_eq!(registered.recovery_key.split_whitespace().count(), 24);
     assert!(client
         .register(
@@ -141,7 +171,7 @@ async fn account_register_login_logout_and_key_bundles_remain_available() {
     assert!(unwrap_login_key_bundle(&stored, user_id, tenant_id, b"wrong export key").is_err());
 
     let logged_in = client
-        .login(
+        .begin_login(
             "account-v2@example.com",
             "correct horse battery staple",
             Some("second device"),
@@ -149,6 +179,11 @@ async fn account_register_login_logout_and_key_bundles_remain_available() {
         )
         .await
         .unwrap();
+    client.certify_login(&logged_in).await.unwrap();
+    client
+        .certify_login(&logged_in)
+        .await
+        .expect("device certification retry is idempotent");
     assert_eq!(*registered.keys.master_key, *logged_in.keys.master_key);
     assert_eq!(
         registered.keys.account_root_public,
@@ -159,7 +194,7 @@ async fn account_register_login_logout_and_key_bundles_remain_available() {
         *logged_in.keys.tenant_root_dek
     );
     assert!(client
-        .login(
+        .begin_login(
             "account-v2@example.com",
             "wrong password",
             Some("wrong device"),
@@ -168,8 +203,90 @@ async fn account_register_login_logout_and_key_bundles_remain_available() {
         .await
         .is_err());
 
+    let original_refresh = logged_in.session.tokens.refresh_token.to_string();
+    assert_eq!(
+        request_status(
+            &test.app,
+            Method::GET,
+            format!("/v2/tenants/{tenant_id}/pull?since=0&limit=1"),
+            Some(&original_refresh),
+            None,
+        )
+        .await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(matches!(
+        client.refresh(&logged_in.session.tokens.access_token).await,
+        Err(AccountClientError::InvalidGrant)
+    ));
+    let near_absolute_now_ms = Utc::now().timestamp_millis();
+    query::<Postgres>(
+        "UPDATE session_families
+         SET absolute_expires_at = now() + interval '5 minutes'
+         WHERE device_id = $1",
+    )
+    .bind(Uuid::parse_str(&logged_in.session.device_id).unwrap())
+    .execute(&test.pool)
+    .await
+    .unwrap();
+    let rotated = reqwest::Client::new()
+        .post(format!("{server_url}/v1/auth/token"))
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", original_refresh.as_str()),
+            ("client_id", "taskveil-native"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rotated.status(), StatusCode::OK);
+    let rotated: Value = rotated.json().await.unwrap();
+    let rotated_expires_in = rotated["expires_in"].as_u64().unwrap();
+    assert!((240..=300).contains(&rotated_expires_in));
+    let rotated_access_expires_at =
+        chrono::DateTime::parse_from_rfc3339(rotated["access_expires_at"].as_str().unwrap())
+            .unwrap()
+            .timestamp_millis();
+    assert!(rotated_access_expires_at > near_absolute_now_ms + 4 * 60 * 1_000);
+    assert!(rotated_access_expires_at <= near_absolute_now_ms + 5 * 60 * 1_000 + 5_000);
+    let rotated_refresh = rotated["refresh_token"].as_str().unwrap();
+    let rotated_access = rotated["access_token"].as_str().unwrap();
+    assert!(rotated_refresh != original_refresh);
+    assert!(rotated_access != logged_in.session.tokens.access_token.as_str());
+    assert_eq!(
+        request_status(
+            &test.app,
+            Method::GET,
+            format!("/v2/tenants/{tenant_id}/pull?since=0&limit=1"),
+            Some(rotated_access),
+            None,
+        )
+        .await,
+        StatusCode::PAYMENT_REQUIRED
+    );
+    assert!(matches!(
+        client.refresh(&original_refresh).await,
+        Err(AccountClientError::InvalidGrant)
+    ));
+    assert_eq!(
+        request_status(
+            &test.app,
+            Method::GET,
+            format!("/v2/tenants/{tenant_id}/pull?since=0&limit=1"),
+            Some(rotated_access),
+            None,
+        )
+        .await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(matches!(
+        client.refresh(rotated_refresh).await,
+        Err(AccountClientError::InvalidGrant)
+    ));
+
+    client.logout("unknown-token").await.unwrap();
     client
-        .logout(&logged_in.session.session_token)
+        .logout(&registered.session.tokens.refresh_token)
         .await
         .unwrap();
     assert_eq!(
@@ -177,13 +294,100 @@ async fn account_register_login_logout_and_key_bundles_remain_available() {
             &test.app,
             Method::GET,
             format!("/v2/tenants/{tenant_id}/pull?since=0&limit=1"),
-            Some(&logged_in.session.session_token),
+            Some(&registered.session.tokens.access_token),
             None,
         )
         .await,
         StatusCode::UNAUTHORIZED
     );
 
+    let concurrent = client
+        .begin_login(
+            "account-v2@example.com",
+            "correct horse battery staple",
+            Some("concurrent refresh device"),
+            &[0x55; 32],
+        )
+        .await
+        .unwrap();
+    client.certify_login(&concurrent).await.unwrap();
+    let concurrent_refresh = concurrent.session.tokens.refresh_token.to_string();
+    let http = reqwest::Client::new();
+    let refresh_request = || {
+        http.post(format!("{server_url}/v1/auth/token")).form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", concurrent_refresh.as_str()),
+            ("client_id", "taskveil-native"),
+        ])
+    };
+    let (first, second) = tokio::join!(refresh_request().send(), refresh_request().send());
+    let first = first.unwrap();
+    let second = second.unwrap();
+    assert!(
+        (first.status() == StatusCode::OK && second.status() == StatusCode::BAD_REQUEST)
+            || (second.status() == StatusCode::OK && first.status() == StatusCode::BAD_REQUEST)
+    );
+    let successful_rotation: Value = if first.status() == StatusCode::OK {
+        first.json().await.unwrap()
+    } else {
+        second.json().await.unwrap()
+    };
+    assert_eq!(
+        request_status(
+            &test.app,
+            Method::GET,
+            format!("/v2/tenants/{tenant_id}/pull?since=0&limit=1"),
+            successful_rotation["access_token"].as_str(),
+            None,
+        )
+        .await,
+        StatusCode::UNAUTHORIZED
+    );
+
+    let refresh_revoke = client
+        .begin_login(
+            "account-v2@example.com",
+            "correct horse battery staple",
+            Some("refresh revoke race device"),
+            &[0x56; 32],
+        )
+        .await
+        .unwrap();
+    client.certify_login(&refresh_revoke).await.unwrap();
+    let refresh_revoke_token = refresh_revoke.session.tokens.refresh_token.to_string();
+    let (refresh_result, revoke_result) = tokio::join!(
+        client.refresh(&refresh_revoke_token),
+        client.logout(&refresh_revoke_token)
+    );
+    revoke_result.unwrap();
+    if let Ok(tokens) = refresh_result {
+        assert_eq!(
+            request_status(
+                &test.app,
+                Method::GET,
+                format!("/v2/tenants/{tenant_id}/pull?since=0&limit=1"),
+                Some(&tokens.access_token),
+                None,
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert!(matches!(
+        client.refresh(&refresh_revoke_token).await,
+        Err(AccountClientError::InvalidGrant)
+    ));
+
+    let abandoned = client
+        .begin_login(
+            "account-v2@example.com",
+            "correct horse battery staple",
+            Some("abandoned provisional device"),
+            &[0x57; 32],
+        )
+        .await
+        .unwrap();
+    let abandoned_device_id = Uuid::parse_str(&abandoned.session.device_id).unwrap();
     let device_count: i64 =
         query::<Postgres>("SELECT count(*) AS count FROM devices WHERE user_id = $1")
             .bind(user_id)
@@ -192,7 +396,18 @@ async fn account_register_login_logout_and_key_bundles_remain_available() {
             .unwrap()
             .try_get("count")
             .unwrap();
-    assert_eq!(device_count, 2);
+    assert_eq!(device_count, 5);
+    let certified_device_count: i64 = query::<Postgres>(
+        "SELECT count(*) AS count FROM devices
+         WHERE user_id = $1 AND certificate IS NOT NULL AND certified_at IS NOT NULL",
+    )
+    .bind(user_id)
+    .fetch_one(&test.pool)
+    .await
+    .unwrap()
+    .try_get("count")
+    .unwrap();
+    assert_eq!(certified_device_count, 4);
     let revoked_device_count: i64 = query::<Postgres>(
         "SELECT count(*) AS count FROM devices WHERE user_id = $1 AND revoked_at IS NOT NULL",
     )
@@ -203,6 +418,135 @@ async fn account_register_login_logout_and_key_bundles_remain_available() {
     .try_get("count")
     .unwrap();
     assert_eq!(revoked_device_count, 0);
+    let refresh_reuse_families: i64 = query::<Postgres>(
+        "SELECT count(*) AS count FROM session_families
+         WHERE user_id = $1 AND revocation_reason = 'refresh_reuse'",
+    )
+    .bind(user_id)
+    .fetch_one(&test.pool)
+    .await
+    .unwrap()
+    .try_get("count")
+    .unwrap();
+    assert_eq!(refresh_reuse_families, 2);
+    query::<Postgres>(
+        "UPDATE devices
+         SET enrollment_challenge_expires_at = now() - interval '1 second'
+         WHERE id = $1",
+    )
+    .bind(abandoned_device_id)
+    .execute(&test.pool)
+    .await
+    .unwrap();
+    for _ in 0..4 {
+        if query::<Postgres>("SELECT count(*) AS count FROM devices WHERE id = $1")
+            .bind(abandoned_device_id)
+            .fetch_one(&test.pool)
+            .await
+            .unwrap()
+            .try_get::<i64, _>("count")
+            .unwrap()
+            == 0
+        {
+            break;
+        }
+        assert!(auth::cleanup_expired_auth_state(&test.pool).await.unwrap() > 0);
+    }
+    let abandoned_device_count: i64 =
+        query::<Postgres>("SELECT count(*) AS count FROM devices WHERE id = $1")
+            .bind(abandoned_device_id)
+            .fetch_one(&test.pool)
+            .await
+            .unwrap()
+            .try_get("count")
+            .unwrap();
+    assert_eq!(abandoned_device_count, 0);
+    query::<Postgres>(
+        "UPDATE access_tokens
+         SET expires_at = now() - interval '1 second'
+         WHERE family_id IN (
+             SELECT id FROM session_families WHERE device_id = $1
+         )",
+    )
+    .bind(Uuid::parse_str(&registered.session.device_id).unwrap())
+    .execute(&test.pool)
+    .await
+    .unwrap();
+    let registered_family_id: Uuid =
+        query::<Postgres>("SELECT id FROM session_families WHERE device_id = $1")
+            .bind(Uuid::parse_str(&registered.session.device_id).unwrap())
+            .fetch_one(&test.pool)
+            .await
+            .unwrap()
+            .try_get("id")
+            .unwrap();
+    for index in 0u64..130 {
+        let mut token_hash = vec![0xA5; 32];
+        token_hash[..8].copy_from_slice(&index.to_be_bytes());
+        query::<Postgres>(
+            "INSERT INTO access_tokens (id, family_id, token_hash, expires_at)
+             VALUES ($1, $2, $3, now() - interval '1 second')",
+        )
+        .bind(Uuid::now_v7())
+        .bind(registered_family_id)
+        .bind(token_hash)
+        .execute(&test.pool)
+        .await
+        .unwrap();
+    }
+    assert_eq!(
+        auth::cleanup_expired_auth_state(&test.pool).await.unwrap(),
+        128
+    );
+    assert_eq!(
+        auth::cleanup_expired_auth_state(&test.pool).await.unwrap(),
+        3
+    );
+    query::<Postgres>(
+        "UPDATE session_families
+         SET absolute_expires_at = now() - interval '1 second'
+         WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .execute(&test.pool)
+    .await
+    .unwrap();
+    for _ in 0..4 {
+        let family_count: i64 = query::<Postgres>("SELECT count(*) AS count FROM session_families")
+            .fetch_one(&test.pool)
+            .await
+            .unwrap()
+            .try_get("count")
+            .unwrap();
+        if family_count == 0 {
+            break;
+        }
+        assert!(auth::cleanup_expired_auth_state(&test.pool).await.unwrap() > 0);
+    }
+    let remaining_access_tokens: i64 =
+        query::<Postgres>("SELECT count(*) AS count FROM access_tokens")
+            .fetch_one(&test.pool)
+            .await
+            .unwrap()
+            .try_get("count")
+            .unwrap();
+    let remaining_refresh_tokens: i64 =
+        query::<Postgres>("SELECT count(*) AS count FROM refresh_tokens")
+            .fetch_one(&test.pool)
+            .await
+            .unwrap()
+            .try_get("count")
+            .unwrap();
+    let remaining_session_families: i64 =
+        query::<Postgres>("SELECT count(*) AS count FROM session_families")
+            .fetch_one(&test.pool)
+            .await
+            .unwrap()
+            .try_get("count")
+            .unwrap();
+    assert_eq!(remaining_access_tokens, 0);
+    assert_eq!(remaining_refresh_tokens, 0);
+    assert_eq!(remaining_session_families, 0);
     let obsolete_public_key_columns: i64 = query::<Postgres>(
         "SELECT count(*) AS count FROM information_schema.columns
          WHERE table_schema = current_schema()

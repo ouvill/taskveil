@@ -11,6 +11,7 @@ use crate::{
 
 const DATABASE_URL: &str = "DATABASE_URL";
 const BILLING_ENVIRONMENT: &str = "TASKVEIL_BILLING_ENVIRONMENT";
+const AUTH_ISSUER: &str = "TASKVEIL_AUTH_ISSUER";
 const RUNTIME_SECRET_ID: &str = "TASKVEIL_RUNTIME_SECRET_ID";
 const EXTENSION_PORT: &str = "PARAMETERS_SECRETS_EXTENSION_HTTP_PORT";
 const AWS_SESSION_TOKEN: &str = "AWS_SESSION_TOKEN";
@@ -19,6 +20,7 @@ pub struct RuntimeConfig {
     pub database_url: String,
     pub billing: BillingService,
     pub realtime: RealtimeGateway,
+    pub auth_issuer: String,
 }
 
 #[derive(Debug, Error)]
@@ -29,6 +31,8 @@ pub enum RuntimeConfigError {
     Billing(#[from] BillingConfigurationError),
     #[error("invalid realtime configuration: {0}")]
     Realtime(#[from] RealtimeConfigError),
+    #[error("authorization server issuer is invalid")]
+    InvalidAuthIssuer,
     #[error("runtime secret extension request failed")]
     ExtensionRequest,
     #[error("runtime secret payload is invalid")]
@@ -65,7 +69,15 @@ impl RuntimeConfig {
     {
         if let Some(secret_id) = secret_id {
             let values = fetch(secret_id).await?;
-            Self::from_values(environment, |name| values.get(name).cloned())
+            Self::from_values(environment, |name| {
+                values.get(name).cloned().or_else(|| {
+                    if name == AUTH_ISSUER {
+                        local_lookup(name)
+                    } else {
+                        None
+                    }
+                })
+            })
         } else {
             Self::from_values(environment, local_lookup)
         }
@@ -85,14 +97,31 @@ impl RuntimeConfig {
         lookup: impl Fn(&'static str) -> Option<String> + Copy,
     ) -> Result<Self, RuntimeConfigError> {
         let database_url = lookup(DATABASE_URL).ok_or(RuntimeConfigError::Missing(DATABASE_URL))?;
+        let auth_issuer = lookup(AUTH_ISSUER).ok_or(RuntimeConfigError::Missing(AUTH_ISSUER))?;
+        validate_auth_issuer(&auth_issuer)?;
         let billing = BillingService::from_values(environment, lookup)?;
         let realtime = RealtimeGateway::from_string_values(lookup)?;
         Ok(Self {
             database_url,
             billing,
             realtime,
+            auth_issuer,
         })
     }
+}
+
+fn validate_auth_issuer(issuer: &str) -> Result<(), RuntimeConfigError> {
+    let url = Url::parse(issuer).map_err(|_| RuntimeConfigError::InvalidAuthIssuer)?;
+    let local_http =
+        url.scheme() == "http" && matches!(url.host_str(), Some("127.0.0.1" | "localhost"));
+    if (url.scheme() != "https" && !local_http)
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.path() != "/"
+    {
+        return Err(RuntimeConfigError::InvalidAuthIssuer);
+    }
+    Ok(())
 }
 
 fn billing_environment() -> Result<BillingEnvironment, RuntimeConfigError> {
@@ -134,6 +163,7 @@ mod tests {
     fn sandbox_secret() -> &'static str {
         r#"{
             "DATABASE_URL":"postgres://runtime:redacted@example.invalid/taskveil",
+            "TASKVEIL_AUTH_ISSUER":"https://api.staging.taskveil.example",
             "REVENUECAT_SANDBOX_PROJECT_ID":"sandbox-project",
             "REVENUECAT_SANDBOX_APP_ID":"sandbox-app",
             "REVENUECAT_SANDBOX_SECRET_KEY":"sandbox-secret",
@@ -145,6 +175,7 @@ mod tests {
     fn production_secret() -> &'static str {
         r#"{
             "DATABASE_URL":"postgres://runtime:redacted@example.invalid/taskveil",
+            "TASKVEIL_AUTH_ISSUER":"https://api.taskveil.example",
             "REVENUECAT_PRODUCTION_PROJECT_ID":"production-project",
             "REVENUECAT_PRODUCTION_APP_ID":"production-app",
             "REVENUECAT_PRODUCTION_SECRET_KEY":"production-secret",
@@ -220,5 +251,19 @@ mod tests {
             .expect("malformed secret");
         assert_eq!(error.to_string(), "runtime secret payload is invalid");
         assert!(!error.to_string().contains("do-not-log-me"));
+    }
+
+    #[test]
+    fn authorization_server_issuer_rejects_insecure_remote_and_non_root_urls() {
+        assert!(matches!(
+            validate_auth_issuer("http://api.taskveil.example"),
+            Err(RuntimeConfigError::InvalidAuthIssuer)
+        ));
+        assert!(matches!(
+            validate_auth_issuer("https://api.taskveil.example/auth"),
+            Err(RuntimeConfigError::InvalidAuthIssuer)
+        ));
+        validate_auth_issuer("https://api.taskveil.example").expect("production issuer");
+        validate_auth_issuer("http://127.0.0.1:3000").expect("local development issuer");
     }
 }

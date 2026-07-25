@@ -18,6 +18,8 @@ pub mod organization;
 pub mod protocol;
 pub mod resync;
 pub mod rotation;
+mod secret;
+mod server_origin;
 
 pub use apply::{
     run_sync_now, run_sync_now_with_key_refresh, run_sync_now_with_key_refresh_and_pre_push,
@@ -59,6 +61,8 @@ pub use merge::{merge_lww, MergeResult};
 pub use protocol::SyncCollection;
 pub use resync::{delta_reached_closure, full_resync_reason, FullResyncReason};
 pub use rotation::{DeviceContinuity, RotationCoordinator, RotationError, HISTORY_RETENTION_DAYS};
+pub use secret::SecretString;
+pub use server_origin::{canonical_server_origin, ServerOriginError};
 
 #[cfg(test)]
 mod convergence_tests {

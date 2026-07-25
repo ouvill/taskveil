@@ -33,10 +33,14 @@ use crate::{KeyManifest, KeyManifestError, RotationStatus};
 pub enum AccountClientError {
     #[error("server URL is empty")]
     EmptyServerUrl,
+    #[error("server URL is not a secure origin")]
+    InvalidServerOrigin,
     #[error("HTTP request failed")]
     Http(#[from] reqwest::Error),
     #[error("server returned account error with HTTP status {0}")]
     Server(u16),
+    #[error("remote session is no longer refreshable")]
+    InvalidGrant,
     #[error("a Pro entitlement is required")]
     EntitlementRequired,
     #[error("invalid base64 field")]
@@ -68,11 +72,13 @@ pub struct AccountRegisterOutcome {
     pub device_identity: DeviceIdentity,
 }
 
-pub struct AccountLoginOutcome {
+pub struct AccountLoginProvisional {
     pub session: AccountSession,
     pub local_wrapped_master_key: Vec<u8>,
     pub keys: AccountKeyMaterial,
     pub device_identity: DeviceIdentity,
+    pub enrollment: DeviceEnrollmentDto,
+    pub challenge_expires_at_ms: i64,
 }
 
 pub struct AccountSession {
@@ -80,9 +86,17 @@ pub struct AccountSession {
     pub tenant_id: String,
     pub device_id: String,
     pub email: String,
-    pub session_token: Zeroizing<String>,
-    pub expires_at_ms: i64,
+    pub tokens: AccountTokenSet,
 }
+
+pub struct AccountTokenSet {
+    pub access_token: Zeroizing<String>,
+    pub access_expires_at_ms: i64,
+    pub refresh_token: Zeroizing<String>,
+    pub refresh_expires_at_ms: i64,
+}
+
+const NATIVE_CLIENT_ID: &str = "taskveil-native";
 
 pub struct AccountKeyMaterial {
     pub generation: u64,
@@ -430,13 +444,13 @@ impl AccountClient {
         })
     }
 
-    pub async fn login(
+    pub async fn begin_login(
         &self,
         email: &str,
         password: &str,
         device_name: Option<&str>,
         device_key: &[u8; KEY_LEN],
-    ) -> Result<AccountLoginOutcome, AccountClientError> {
+    ) -> Result<AccountLoginProvisional, AccountClientError> {
         let mut rng = OsRng;
         let password = Zeroizing::new(password.as_bytes().to_vec());
         let client_start = ClientLogin::<TaskveilCipherSuite>::start(&mut rng, &password)
@@ -497,12 +511,6 @@ impl AccountClient {
         let challenge = decode_fixed_array::<DEVICE_CHALLENGE_LEN>(&response.device_challenge)?;
         let proof = create_device_proof(&device_keys.private, &certificate, &challenge)?;
         let enrollment = device_enrollment_dto(&keys.account_root_public, &certificate, &proof)?;
-        self.post_json::<LogoutResponse>(
-            "/v1/auth/device/certify",
-            &enrollment,
-            Some(&response.session.session_token),
-        )
-        .await?;
         let device_identity = DeviceIdentity::new(device_keys.private, certificate)?;
         let local_wrapped_master_key = wrap_master_key_with_device_key(
             response.session.user_id,
@@ -511,21 +519,70 @@ impl AccountClient {
             device_key,
         )?;
 
-        Ok(AccountLoginOutcome {
+        Ok(AccountLoginProvisional {
             session: response.session.into_account_session(email),
             local_wrapped_master_key,
             keys,
             device_identity,
+            enrollment,
+            challenge_expires_at_ms: response.device_challenge_expires_at.timestamp_millis(),
         })
     }
 
-    pub async fn logout(&self, session_token: &str) -> Result<(), AccountClientError> {
+    pub async fn certify_login(
+        &self,
+        provisional: &AccountLoginProvisional,
+    ) -> Result<(), AccountClientError> {
         self.post_json::<LogoutResponse>(
-            "/v1/auth/logout",
-            &serde_json::json!({}),
-            Some(session_token),
+            "/v1/auth/device/certify",
+            &provisional.enrollment,
+            Some(&provisional.session.tokens.access_token),
         )
         .await?;
+        Ok(())
+    }
+
+    pub async fn refresh(
+        &self,
+        refresh_token: &str,
+    ) -> Result<AccountTokenSet, AccountClientError> {
+        let response = self
+            .http
+            .post(format!("{}{}", self.base_url, "/v1/auth/token"))
+            .form(&TokenRequest {
+                grant_type: "refresh_token",
+                refresh_token,
+                client_id: NATIVE_CLIENT_ID,
+            })
+            .send()
+            .await?;
+        if response.status() == reqwest::StatusCode::BAD_REQUEST {
+            return Err(AccountClientError::InvalidGrant);
+        }
+        if !response.status().is_success() {
+            return Err(account_response_error(response.status()));
+        }
+        response
+            .json::<TokenResponse>()
+            .await
+            .map(TokenResponse::into_account_token_set)
+            .map_err(AccountClientError::Http)
+    }
+
+    pub async fn logout(&self, refresh_token: &str) -> Result<(), AccountClientError> {
+        let response = self
+            .http
+            .post(format!("{}{}", self.base_url, "/v1/auth/revoke"))
+            .form(&RevocationRequest {
+                token: refresh_token,
+                token_type_hint: "refresh_token",
+                client_id: NATIVE_CLIENT_ID,
+            })
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(account_response_error(response.status()));
+        }
         Ok(())
     }
 
@@ -1139,11 +1196,11 @@ fn build_registration_key_bundle(
 }
 
 fn normalize_base_url(mut value: String) -> Result<String, AccountClientError> {
-    value = value.trim().trim_end_matches('/').to_string();
+    value = value.trim().to_string();
     if value.is_empty() {
         return Err(AccountClientError::EmptyServerUrl);
     }
-    Ok(value)
+    crate::canonical_server_origin(&value).map_err(|_| AccountClientError::InvalidServerOrigin)
 }
 
 fn account_response_error(status: reqwest::StatusCode) -> AccountClientError {
@@ -1341,21 +1398,50 @@ struct LoginFinishRequest {
     message: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct LoginFinishResponse {
     #[serde(flatten)]
     session: SessionResponse,
     key_bundle: AccountKeyBundleDto,
     device_challenge: String,
+    device_challenge_expires_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct SessionResponse {
     user_id: Uuid,
     tenant_id: Uuid,
     device_id: Uuid,
-    session_token: String,
-    expires_at: DateTime<Utc>,
+    #[serde(flatten)]
+    tokens: TokenResponse,
+}
+
+#[derive(Deserialize)]
+struct TokenResponse {
+    access_token: String,
+    #[allow(dead_code)]
+    token_type: String,
+    #[allow(dead_code)]
+    expires_in: u64,
+    access_expires_at: DateTime<Utc>,
+    refresh_token: String,
+    #[allow(dead_code)]
+    refresh_token_expires_in: u64,
+    refresh_expires_at: DateTime<Utc>,
+}
+
+#[derive(Serialize)]
+struct TokenRequest<'a> {
+    grant_type: &'static str,
+    refresh_token: &'a str,
+    client_id: &'static str,
+}
+
+#[derive(Serialize)]
+struct RevocationRequest<'a> {
+    token: &'a str,
+    token_type_hint: &'static str,
+    client_id: &'static str,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1385,8 +1471,18 @@ impl SessionResponse {
             tenant_id: self.tenant_id.to_string(),
             device_id: self.device_id.to_string(),
             email: email.to_string(),
-            session_token: Zeroizing::new(self.session_token),
-            expires_at_ms: self.expires_at.timestamp_millis(),
+            tokens: self.tokens.into_account_token_set(),
+        }
+    }
+}
+
+impl TokenResponse {
+    fn into_account_token_set(self) -> AccountTokenSet {
+        AccountTokenSet {
+            access_token: Zeroizing::new(self.access_token),
+            access_expires_at_ms: self.access_expires_at.timestamp_millis(),
+            refresh_token: Zeroizing::new(self.refresh_token),
+            refresh_expires_at_ms: self.refresh_expires_at.timestamp_millis(),
         }
     }
 }

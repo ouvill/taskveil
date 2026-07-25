@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (\n             SELECT 1 FROM devices d\n             JOIN tenant_members m ON m.user_id = d.user_id AND m.tenant_id = $1\n             WHERE d.revoked_at IS NULL\n               AND d.certificate IS NOT NULL\n               AND d.certified_at IS NOT NULL\n               AND (d.key_expires_at IS NULL OR d.key_expires_at > now())\n               AND NOT EXISTS (\n                   SELECT 1 FROM key_generation_acks a\n                   WHERE a.tenant_id = $1 AND a.generation = $2 AND a.device_id = d.id\n               )\n         ) AS \"missing!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "missing!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "cea69c7c47c1481f29b18486005ea3e2c5d06f1481277cb8307389873e16e715"
+}

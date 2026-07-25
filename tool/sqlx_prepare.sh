@@ -15,10 +15,10 @@ MODE="${1:-prepare}"
 
 case "$MODE" in
   prepare)
-    PREPARE_ARGS=()
+    CHECK_MODE=false
     ;;
   --check)
-    PREPARE_ARGS=(--check)
+    CHECK_MODE=true
     ;;
   *)
     echo "usage: $0 [--check]" >&2
@@ -76,8 +76,12 @@ POSTGRES_PORT="$(
     -f '{{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort}}' \
     "$CONTAINER_ID"
 )"
-export DATABASE_URL="postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:${POSTGRES_PORT}/${POSTGRES_DB}"
+export DATABASE_URL="postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:${POSTGRES_PORT}/${POSTGRES_DB}?sslmode=disable"
 unset SQLX_OFFLINE
 
 cargo sqlx migrate run --source server/migrations
-cargo sqlx prepare "${PREPARE_ARGS[@]}" --workspace -- --all-targets
+if [ "$CHECK_MODE" = true ]; then
+  cargo sqlx prepare --check --workspace -- --all-targets
+else
+  cargo sqlx prepare --workspace -- --all-targets
+fi

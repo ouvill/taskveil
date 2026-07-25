@@ -297,13 +297,16 @@ async fn ack_continuity(
 pub(super) fn bearer_token(headers: &HeaderMap) -> Result<&str, AppError> {
     let value = headers
         .get(axum::http::header::AUTHORIZATION)
-        .ok_or_else(AppError::unauthorized)?
+        .ok_or_else(AppError::invalid_bearer_token)?
         .to_str()
-        .map_err(|_| AppError::unauthorized())?;
-    value
-        .strip_prefix("Bearer ")
-        .filter(|token| !token.is_empty())
-        .ok_or_else(AppError::unauthorized)
+        .map_err(|_| AppError::invalid_bearer_token())?;
+    let (scheme, token) = value
+        .split_once(' ')
+        .ok_or_else(AppError::invalid_bearer_token)?;
+    if !scheme.eq_ignore_ascii_case("bearer") || token.is_empty() || token.contains(' ') {
+        return Err(AppError::invalid_bearer_token());
+    }
+    Ok(token)
 }
 
 fn require_current_protocol(headers: &HeaderMap) -> Result<(), AppError> {
@@ -320,7 +323,26 @@ fn require_current_protocol(headers: &HeaderMap) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::{header, HeaderValue};
     use taskveil_sync::protocol::{PushResult, SyncCollection};
+
+    #[test]
+    fn bearer_scheme_is_case_insensitive_and_rejects_ambiguous_values() {
+        for scheme in ["Bearer", "bearer", "BEARER"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::AUTHORIZATION,
+                HeaderValue::from_str(&format!("{scheme} test-token")).unwrap(),
+            );
+            assert_eq!(bearer_token(&headers).ok(), Some("test-token"));
+        }
+
+        for value in ["Basic test-token", "Bearer", "Bearer ", "Bearer one two"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::AUTHORIZATION, HeaderValue::from_str(value).unwrap());
+            assert!(bearer_token(&headers).is_err());
+        }
+    }
 
     #[test]
     fn publish_is_attempted_only_when_at_least_one_result_is_accepted() {

@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE devices d\n         SET key_expires_at = $3\n         WHERE d.id = $2\n           AND d.certificate IS NOT NULL\n           AND d.certified_at IS NOT NULL\n           AND EXISTS (\n               SELECT 1 FROM tenant_members m\n               WHERE m.tenant_id = $1 AND m.user_id = d.user_id\n           )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1f8a63e6833bc908833f23146418ce39fa782dc785118660ad15f49211a920dc"
+}

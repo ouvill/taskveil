@@ -1,9 +1,15 @@
-use axum::{extract::State, http::HeaderMap, routing::post, Json, Router};
+use axum::{
+    extract::{Form, State},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
+    routing::post,
+    Json, Router,
+};
 
 use crate::{
     auth::{
-        self, LoginFinishRequest, LoginSessionResponse, LogoutResponse, OpaqueStartRequest,
-        OpaqueStartResponse, RegisterFinishRequest, SessionResponse,
+        self, AuthorizationServerMetadata, LoginFinishRequest, LoginSessionResponse,
+        LogoutResponse, OpaqueStartRequest, OpaqueStartResponse, RegisterFinishRequest,
+        RevocationRequest, SessionResponse, TokenRequest, TokenResponse,
     },
     AppError, SharedState,
 };
@@ -15,8 +21,15 @@ pub fn router() -> Router<SharedState> {
         .route("/login/start", post(login_start))
         .route("/login/finish", post(login_finish))
         .route("/device/certify", post(certify_device))
-        .route("/logout", post(logout))
+        .route("/token", post(refresh_session))
+        .route("/revoke", post(revoke_token))
         .route("/key-wrappers", post(update_key_wrappers))
+}
+
+pub async fn authorization_server_metadata(
+    State(state): State<SharedState>,
+) -> Json<AuthorizationServerMetadata> {
+    Json(auth::authorization_server_metadata(&state.auth_issuer))
 }
 
 async fn certify_device(
@@ -51,8 +64,10 @@ async fn register_start(
 async fn register_finish(
     State(state): State<SharedState>,
     Json(request): Json<RegisterFinishRequest>,
-) -> Result<Json<SessionResponse>, AppError> {
-    auth::register_finish(&state.pool, request).await.map(Json)
+) -> Result<(HeaderMap, Json<SessionResponse>), AppError> {
+    auth::register_finish(&state.pool, request)
+        .await
+        .map(|response| (token_response_headers(), Json(response)))
 }
 
 async fn login_start(
@@ -65,26 +80,48 @@ async fn login_start(
 async fn login_finish(
     State(state): State<SharedState>,
     Json(request): Json<LoginFinishRequest>,
-) -> Result<Json<LoginSessionResponse>, AppError> {
-    auth::login_finish(&state.pool, request).await.map(Json)
+) -> Result<(HeaderMap, Json<LoginSessionResponse>), AppError> {
+    auth::login_finish(&state.pool, request)
+        .await
+        .map(|response| (token_response_headers(), Json(response)))
 }
 
-async fn logout(
+async fn refresh_session(
     State(state): State<SharedState>,
-    headers: HeaderMap,
-) -> Result<Json<LogoutResponse>, AppError> {
-    let token = bearer_token(&headers)?;
-    auth::logout(&state.pool, token).await.map(Json)
+    Form(request): Form<TokenRequest>,
+) -> Result<(HeaderMap, Json<TokenResponse>), AppError> {
+    auth::refresh_session(&state.pool, request)
+        .await
+        .map(|response| (token_response_headers(), Json(response)))
+}
+
+async fn revoke_token(
+    State(state): State<SharedState>,
+    Form(request): Form<RevocationRequest>,
+) -> Result<(HeaderMap, StatusCode), AppError> {
+    auth::revoke_token(&state.pool, request)
+        .await
+        .map(|_| (token_response_headers(), StatusCode::OK))
+}
+
+fn token_response_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+    headers
 }
 
 fn bearer_token(headers: &HeaderMap) -> Result<&str, AppError> {
     let value = headers
         .get(axum::http::header::AUTHORIZATION)
-        .ok_or_else(AppError::unauthorized)?
+        .ok_or_else(AppError::invalid_bearer_token)?
         .to_str()
-        .map_err(|_| AppError::unauthorized())?;
-    value
-        .strip_prefix("Bearer ")
-        .filter(|token| !token.is_empty())
-        .ok_or_else(AppError::unauthorized)
+        .map_err(|_| AppError::invalid_bearer_token())?;
+    let (scheme, token) = value
+        .split_once(' ')
+        .ok_or_else(AppError::invalid_bearer_token)?;
+    if !scheme.eq_ignore_ascii_case("bearer") || token.is_empty() || token.contains(' ') {
+        return Err(AppError::invalid_bearer_token());
+    }
+    Ok(token)
 }

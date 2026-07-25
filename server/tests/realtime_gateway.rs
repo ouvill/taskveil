@@ -146,13 +146,25 @@ impl Fixture {
         .execute(&admin_pool)
         .await
         .unwrap();
+        let family_id = Uuid::now_v7();
         query(
-            "INSERT INTO sessions (id, user_id, device_id, token_hash, expires_at)
-             VALUES ($1, $2, $3, $4, $5)",
+            "INSERT INTO session_families
+                (id, user_id, device_id, client_id, absolute_expires_at)
+             VALUES ($1, $2, $3, 'taskveil-native', $4)",
         )
-        .bind(Uuid::now_v7())
+        .bind(family_id)
         .bind(user_id)
         .bind(device_id)
+        .bind(Utc::now() + Duration::days(1))
+        .execute(&admin_pool)
+        .await
+        .unwrap();
+        query(
+            "INSERT INTO access_tokens (id, family_id, token_hash, expires_at)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(family_id)
         .bind(Sha256::digest(token.as_bytes()).to_vec())
         .bind(Utc::now() + Duration::days(1))
         .execute(&admin_pool)
@@ -187,6 +199,7 @@ impl Fixture {
         build_router(AppState {
             pool: self.application_pool.clone(),
             billing: BillingService::unavailable_for_tests(BillingEnvironment::Sandbox),
+            auth_issuer: "http://localhost".to_string(),
         })
     }
 
@@ -195,6 +208,7 @@ impl Fixture {
             AppState {
                 pool: self.application_pool.clone(),
                 billing: BillingService::unavailable_for_tests(BillingEnvironment::Sandbox),
+                auth_issuer: "http://localhost".to_string(),
             },
             RealtimeGateway::from_settings(settings()).unwrap(),
         )

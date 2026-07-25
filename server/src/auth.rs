@@ -23,7 +23,15 @@ use uuid::Uuid;
 use crate::{db, AppError};
 
 const OPAQUE_STATE_TTL_MINUTES: i64 = 10;
-const SESSION_TTL_DAYS: i64 = 30;
+const ACCESS_TOKEN_TTL_MINUTES: i64 = 15;
+const REFRESH_TOKEN_IDLE_TTL_DAYS: i64 = 30;
+const SESSION_FAMILY_TTL_DAYS: i64 = 90;
+const AUTH_GC_ACCESS_TOKEN_BATCH_SIZE: i64 = 128;
+const AUTH_GC_REFRESH_TOKEN_BATCH_SIZE: i64 = 128;
+const AUTH_GC_SESSION_FAMILY_BATCH_SIZE: i64 = 16;
+const AUTH_GC_PENDING_DEVICE_BATCH_SIZE: i64 = 16;
+const AUTH_GC_OPAQUE_STATE_BATCH_SIZE: i64 = 128;
+pub const NATIVE_CLIENT_ID: &str = "taskveil-native";
 
 type TaskveilServerSetup = ServerSetup<TaskveilCipherSuite>;
 type TaskveilServerRegistration = ServerRegistration<TaskveilCipherSuite>;
@@ -69,21 +77,57 @@ pub struct LoginFinishRequest {
     pub message: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct SessionResponse {
     pub user_id: Uuid,
     pub tenant_id: Uuid,
     pub device_id: Uuid,
-    pub session_token: String,
-    pub expires_at: DateTime<Utc>,
+    #[serde(flatten)]
+    pub tokens: TokenResponse,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
+pub struct TokenResponse {
+    pub access_token: String,
+    pub token_type: String,
+    pub expires_in: u64,
+    pub access_expires_at: DateTime<Utc>,
+    pub refresh_token: String,
+    pub refresh_token_expires_in: u64,
+    pub refresh_expires_at: DateTime<Utc>,
+}
+
+#[derive(Deserialize)]
+pub struct TokenRequest {
+    pub grant_type: String,
+    pub refresh_token: String,
+    pub client_id: String,
+}
+
+#[derive(Deserialize)]
+pub struct RevocationRequest {
+    pub token: String,
+    pub token_type_hint: Option<String>,
+    pub client_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuthorizationServerMetadata {
+    pub issuer: String,
+    pub token_endpoint: String,
+    pub revocation_endpoint: String,
+    pub grant_types_supported: Vec<&'static str>,
+    pub token_endpoint_auth_methods_supported: Vec<&'static str>,
+    pub revocation_endpoint_auth_methods_supported: Vec<&'static str>,
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct LoginSessionResponse {
     #[serde(flatten)]
     pub session: SessionResponse,
     pub key_bundle: AccountKeyBundleDto,
     pub device_challenge: String,
+    pub device_challenge_expires_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -106,6 +150,7 @@ pub async fn register_start(
     let registration_request =
         RegistrationRequest::<TaskveilCipherSuite>::deserialize(&client_message)
             .map_err(|_| AppError::bad_request("invalid opaque message"))?;
+    cleanup_expired_auth_state(pool).await?;
     let server_setup = get_or_create_server_setup(pool).await?;
     let server_start =
         ServerRegistration::start(&server_setup, registration_request, email.as_bytes())
@@ -222,15 +267,14 @@ pub async fn register_finish(
     .await?;
     insert_account_key_bundle(&mut tx, user_id, tenant_id, key_bundle).await?;
     insert_certified_device(&mut tx, device_id, user_id, &state.device_name, &enrollment).await?;
-    let session = create_session(&mut tx, user_id, device_id).await?;
+    let tokens = create_session(&mut tx, user_id, device_id).await?;
     tx.commit().await?;
 
     Ok(SessionResponse {
         user_id,
         tenant_id,
         device_id,
-        session_token: session.token,
-        expires_at: session.expires_at,
+        tokens,
     })
 }
 
@@ -244,6 +288,7 @@ pub async fn login_start(
     let client_message = decode_opaque_message(&request.message)?;
     let credential_request = CredentialRequest::<TaskveilCipherSuite>::deserialize(&client_message)
         .map_err(|_| AppError::bad_request("invalid opaque message"))?;
+    cleanup_expired_auth_state(pool).await?;
 
     let row = sqlx::query!(
         "SELECT u.id, u.opaque_record, u.opaque_suite_id
@@ -340,7 +385,7 @@ pub async fn login_finish(
     db::set_tenant_context(&mut tx, tenant_id).await?;
     let key_bundle = load_account_key_bundle(&mut tx, state.user_id, tenant_id).await?;
     let device_id = state.device_id;
-    insert_pending_device(
+    let device_challenge_expires_at = insert_pending_device(
         &mut tx,
         device_id,
         state.user_id,
@@ -348,7 +393,7 @@ pub async fn login_finish(
         &state.device_challenge,
     )
     .await?;
-    let session = create_session(&mut tx, state.user_id, device_id).await?;
+    let tokens = create_session(&mut tx, state.user_id, device_id).await?;
     tx.commit().await?;
 
     Ok(LoginSessionResponse {
@@ -356,29 +401,12 @@ pub async fn login_finish(
             user_id: state.user_id,
             tenant_id,
             device_id,
-            session_token: session.token,
-            expires_at: session.expires_at,
+            tokens,
         },
         key_bundle,
         device_challenge: STANDARD.encode(state.device_challenge),
+        device_challenge_expires_at,
     })
-}
-
-pub async fn logout(pool: &PgPool, bearer_token: &str) -> Result<LogoutResponse, AppError> {
-    let token_hash = hash_token(bearer_token);
-    let rows = sqlx::query!(
-        "UPDATE sessions
-         SET revoked_at = now()
-         WHERE token_hash = $1 AND revoked_at IS NULL",
-        token_hash.as_slice(),
-    )
-    .execute(pool)
-    .await?
-    .rows_affected();
-    if rows == 0 {
-        return Err(AppError::unauthorized());
-    }
-    Ok(LogoutResponse {})
 }
 
 pub async fn certify_device(
@@ -389,22 +417,48 @@ pub async fn certify_device(
     let token_hash = hash_token(bearer_token);
     let mut tx = pool.begin().await?;
     let row = sqlx::query!(
-        "SELECT s.user_id, s.device_id, d.enrollment_challenge,
-                d.enrollment_challenge_expires_at, u.account_root_public
-         FROM sessions s
-         JOIN devices d ON d.id = s.device_id AND d.user_id = s.user_id
-         JOIN users u ON u.id = s.user_id
-         WHERE s.token_hash = $1 AND s.expires_at > now()
-           AND s.revoked_at IS NULL AND d.revoked_at IS NULL
-           AND d.certificate IS NULL
-           AND d.enrollment_challenge_expires_at > now()",
+        "SELECT sf.user_id, sf.device_id, d.enrollment_challenge,
+                d.enrollment_challenge_expires_at, d.certificate,
+                d.certificate_fingerprint, u.account_root_public
+         FROM access_tokens at
+         JOIN session_families sf ON sf.id = at.family_id
+         JOIN devices d ON d.id = sf.device_id AND d.user_id = sf.user_id
+         JOIN users u ON u.id = sf.user_id
+         WHERE at.token_hash = $1 AND at.expires_at > now()
+           AND at.revoked_at IS NULL
+           AND sf.revoked_at IS NULL AND sf.absolute_expires_at > now()
+           AND d.revoked_at IS NULL",
         token_hash.as_slice(),
     )
     .fetch_optional(&mut *tx)
     .await?
-    .ok_or_else(AppError::unauthorized)?;
+    .ok_or_else(AppError::invalid_bearer_token)?;
     let user_id = row.user_id;
     let device_id = row.device_id;
+    if let Some(stored_certificate) = row.certificate {
+        let submitted_root = STANDARD
+            .decode(&enrollment.account_root_public)
+            .map_err(|_| AppError::bad_request("invalid account root"))?;
+        let submitted_certificate = STANDARD
+            .decode(&enrollment.device_certificate)
+            .map_err(|_| AppError::bad_request("invalid device certificate"))?;
+        let submitted_fingerprint = STANDARD
+            .decode(&enrollment.certificate_fingerprint)
+            .map_err(|_| AppError::bad_request("invalid device fingerprint"))?;
+        if submitted_root == row.account_root_public
+            && submitted_certificate == stored_certificate
+            && row.certificate_fingerprint.as_deref() == Some(submitted_fingerprint.as_slice())
+        {
+            return Ok(LogoutResponse {});
+        }
+        return Err(AppError::conflict("device enrollment changed"));
+    }
+    if row
+        .enrollment_challenge_expires_at
+        .is_none_or(|expires_at| expires_at <= Utc::now())
+    {
+        return Err(AppError::invalid_bearer_token());
+    }
     let challenge: [u8; DEVICE_CHALLENGE_LEN] = row
         .enrollment_challenge
         .ok_or_else(AppError::internal)?
@@ -469,18 +523,21 @@ pub async fn update_key_wrappers(
     let token_hash = hash_token(bearer_token);
     let mut tx = pool.begin().await?;
     let session = sqlx::query!(
-        "SELECT s.user_id
-         FROM sessions s
-         JOIN devices d ON d.id = s.device_id AND d.user_id = s.user_id
-         WHERE s.token_hash = $1 AND s.expires_at > now()
-           AND s.revoked_at IS NULL AND d.revoked_at IS NULL
+        "SELECT sf.user_id
+         FROM access_tokens at
+         JOIN session_families sf ON sf.id = at.family_id
+         JOIN devices d ON d.id = sf.device_id AND d.user_id = sf.user_id
+         WHERE at.token_hash = $1 AND at.expires_at > now()
+           AND at.revoked_at IS NULL
+           AND sf.revoked_at IS NULL AND sf.absolute_expires_at > now()
+           AND d.revoked_at IS NULL
            AND d.certificate IS NOT NULL AND d.certified_at IS NOT NULL
            AND (d.key_expires_at IS NULL OR d.key_expires_at > now())",
         token_hash.as_slice(),
     )
     .fetch_optional(&mut *tx)
     .await?
-    .ok_or_else(AppError::unauthorized)?;
+    .ok_or_else(AppError::invalid_bearer_token)?;
     let user_id = session.user_id;
     db::set_user_context(&mut tx, user_id).await?;
     let generation = i64::try_from(request.generation)
@@ -522,12 +579,15 @@ pub async fn authenticate(
     let token_hash = hash_token(bearer_token);
     let mut tx = pool.begin().await?;
     let row = sqlx::query!(
-        "SELECT s.user_id, s.device_id
-         FROM sessions s
-         JOIN devices d ON d.id = s.device_id AND d.user_id = s.user_id
-         WHERE s.token_hash = $1
-           AND s.expires_at > now()
-           AND s.revoked_at IS NULL
+        "SELECT sf.user_id, sf.device_id, sf.id AS family_id
+         FROM access_tokens at
+         JOIN session_families sf ON sf.id = at.family_id
+         JOIN devices d ON d.id = sf.device_id AND d.user_id = sf.user_id
+         WHERE at.token_hash = $1
+           AND at.expires_at > now()
+           AND at.revoked_at IS NULL
+           AND sf.absolute_expires_at > now()
+           AND sf.revoked_at IS NULL
            AND d.revoked_at IS NULL
            AND d.certificate IS NOT NULL AND d.certified_at IS NOT NULL
            AND (d.key_expires_at IS NULL OR d.key_expires_at > now())",
@@ -535,7 +595,7 @@ pub async fn authenticate(
     )
     .fetch_optional(&mut *tx)
     .await?
-    .ok_or_else(AppError::unauthorized)?;
+    .ok_or_else(AppError::invalid_bearer_token)?;
 
     let user_id = row.user_id;
     let device_id = row.device_id;
@@ -550,12 +610,18 @@ pub async fn authenticate(
     .fetch_optional(&mut *tx)
     .await?;
     if membership.is_none() {
-        return Err(AppError::unauthorized());
+        return Err(AppError::invalid_bearer_token());
     }
     db::set_tenant_context(&mut tx, tenant_id).await?;
     sqlx::query!(
-        "UPDATE sessions SET last_seen_at = now() WHERE token_hash = $1",
-        token_hash.as_slice()
+        "UPDATE access_tokens SET last_seen_at = now() WHERE token_hash = $1",
+        token_hash.as_slice(),
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!(
+        "UPDATE session_families SET last_seen_at = now() WHERE id = $1",
+        row.family_id,
     )
     .execute(&mut *tx)
     .await?;
@@ -564,17 +630,317 @@ pub async fn authenticate(
     Ok(AuthContext { user_id, device_id })
 }
 
+pub fn authorization_server_metadata(issuer: &str) -> AuthorizationServerMetadata {
+    let issuer = issuer.trim_end_matches('/').to_string();
+    AuthorizationServerMetadata {
+        token_endpoint: format!("{issuer}/v1/auth/token"),
+        revocation_endpoint: format!("{issuer}/v1/auth/revoke"),
+        issuer,
+        grant_types_supported: vec!["refresh_token"],
+        token_endpoint_auth_methods_supported: vec!["none"],
+        revocation_endpoint_auth_methods_supported: vec!["none"],
+    }
+}
+
+pub async fn refresh_session(
+    pool: &PgPool,
+    request: TokenRequest,
+) -> Result<TokenResponse, AppError> {
+    if request.grant_type != "refresh_token" {
+        return Err(AppError::bad_request("unsupported_grant_type"));
+    }
+    validate_native_client(&request.client_id)?;
+    cleanup_expired_auth_state(pool).await?;
+
+    let token_hash = hash_token(&request.refresh_token);
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query!(
+        r#"SELECT rt.id, rt.family_id, rt.generation, rt.expires_at,
+                  rt.consumed_at AS "consumed_at?", rt.revoked_at AS "token_revoked_at?",
+                  sf.absolute_expires_at,
+                  sf.revoked_at AS "family_revoked_at?",
+                  d.revoked_at AS "device_revoked_at?",
+                  d.certificate AS "device_certificate?",
+                  d.certified_at AS "device_certified_at?",
+                  d.key_expires_at AS "device_key_expires_at?"
+           FROM refresh_tokens rt
+           JOIN session_families sf ON sf.id = rt.family_id
+           JOIN devices d ON d.id = sf.device_id AND d.user_id = sf.user_id
+           WHERE rt.token_hash = $1 AND sf.client_id = $2
+           FOR UPDATE OF rt, sf"#,
+        token_hash.as_slice(),
+        NATIVE_CLIENT_ID,
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(AppError::invalid_grant)?;
+
+    if row.consumed_at.is_some() {
+        if row.family_revoked_at.is_none() {
+            revoke_family(&mut tx, row.family_id, "refresh_reuse").await?;
+        }
+        tx.commit().await?;
+        return Err(AppError::invalid_grant());
+    }
+
+    let now = Utc::now();
+    if row.family_revoked_at.is_some() || row.token_revoked_at.is_some() || row.expires_at <= now {
+        tx.commit().await?;
+        return Err(AppError::invalid_grant());
+    }
+    if row.absolute_expires_at <= now {
+        revoke_family(&mut tx, row.family_id, "absolute_expiry").await?;
+        tx.commit().await?;
+        return Err(AppError::invalid_grant());
+    }
+    if row.device_revoked_at.is_some() {
+        revoke_family(&mut tx, row.family_id, "device_revocation").await?;
+        tx.commit().await?;
+        return Err(AppError::invalid_grant());
+    }
+    if row.device_certificate.is_none()
+        || row.device_certified_at.is_none()
+        || row
+            .device_key_expires_at
+            .is_some_and(|expires_at| expires_at <= now)
+    {
+        if row.device_certificate.is_some() {
+            revoke_family(&mut tx, row.family_id, "device_key_expiry").await?;
+        }
+        tx.commit().await?;
+        return Err(AppError::invalid_grant());
+    }
+
+    let refresh_expires_at = std::cmp::min(
+        now + Duration::days(REFRESH_TOKEN_IDLE_TTL_DAYS),
+        row.absolute_expires_at,
+    );
+    let tokens = insert_token_pair(
+        &mut tx,
+        row.family_id,
+        row.generation + 1,
+        refresh_expires_at,
+        Some(row.id),
+        now,
+    )
+    .await?;
+    sqlx::query!(
+        "UPDATE session_families SET last_seen_at = $2 WHERE id = $1",
+        row.family_id,
+        now,
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(tokens)
+}
+
+pub async fn revoke_token(
+    pool: &PgPool,
+    request: RevocationRequest,
+) -> Result<LogoutResponse, AppError> {
+    validate_native_client(&request.client_id)?;
+    if request.token.is_empty() {
+        return Err(AppError::bad_request("invalid_request"));
+    }
+    if let Some(hint) = request.token_type_hint.as_deref() {
+        if hint != "access_token" && hint != "refresh_token" {
+            return Err(AppError::bad_request("unsupported_token_type"));
+        }
+    }
+
+    let token_hash = hash_token(&request.token);
+    let mut tx = pool.begin().await?;
+    let family_id = sqlx::query_scalar!(
+        "SELECT family_id FROM refresh_tokens WHERE token_hash = $1",
+        token_hash.as_slice(),
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(family_id) = family_id {
+        revoke_family(&mut tx, family_id, "client_revocation").await?;
+        tx.commit().await?;
+        return Ok(LogoutResponse {});
+    }
+
+    sqlx::query!(
+        "UPDATE access_tokens
+         SET revoked_at = coalesce(revoked_at, now())
+         WHERE token_hash = $1",
+        token_hash.as_slice(),
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(LogoutResponse {})
+}
+
+async fn revoke_family(
+    tx: &mut PgTransaction<'_>,
+    family_id: Uuid,
+    reason: &'static str,
+) -> Result<(), AppError> {
+    sqlx::query!(
+        "UPDATE session_families
+         SET revoked_at = coalesce(revoked_at, now()),
+             revocation_reason = coalesce(revocation_reason, $2)
+         WHERE id = $1",
+        family_id,
+        reason,
+    )
+    .execute(&mut **tx)
+    .await?;
+    // Every authorization and refresh query checks the family row. Keeping
+    // family revocation O(1) avoids unbounded fan-out across a long rotation
+    // history; bounded GC removes child rows later.
+    Ok(())
+}
+
+fn validate_native_client(client_id: &str) -> Result<(), AppError> {
+    if client_id != NATIVE_CLIENT_ID {
+        return Err(AppError::bad_request("invalid_client"));
+    }
+    Ok(())
+}
+
 pub async fn cleanup_expired_opaque_states(pool: &PgPool) -> Result<u64, AppError> {
-    let registration =
-        sqlx::query!("DELETE FROM opaque_registration_states WHERE expires_at <= now()")
-            .execute(pool)
-            .await?
-            .rows_affected();
-    let login = sqlx::query!("DELETE FROM opaque_login_states WHERE expires_at <= now()")
-        .execute(pool)
-        .await?
-        .rows_affected();
+    let registration = sqlx::query!(
+        "WITH expired AS (
+             SELECT id FROM opaque_registration_states
+             WHERE expires_at <= now()
+             ORDER BY expires_at, id
+             LIMIT $1
+         )
+         DELETE FROM opaque_registration_states
+         USING expired
+         WHERE opaque_registration_states.id = expired.id",
+        AUTH_GC_OPAQUE_STATE_BATCH_SIZE,
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
+    let login = sqlx::query!(
+        "WITH expired AS (
+             SELECT id FROM opaque_login_states
+             WHERE expires_at <= now()
+             ORDER BY expires_at, id
+             LIMIT $1
+         )
+         DELETE FROM opaque_login_states
+         USING expired
+         WHERE opaque_login_states.id = expired.id",
+        AUTH_GC_OPAQUE_STATE_BATCH_SIZE,
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
     Ok(registration + login)
+}
+
+pub async fn cleanup_expired_auth_state(pool: &PgPool) -> Result<u64, AppError> {
+    let expired_access_tokens = sqlx::query!(
+        "WITH expired AS (
+             SELECT at.id, at.expires_at
+             FROM access_tokens at
+             JOIN session_families sf ON sf.id = at.family_id
+             JOIN devices d ON d.id = sf.device_id
+             WHERE at.expires_at <= now()
+                OR sf.absolute_expires_at <= now()
+                OR (
+                    d.certificate IS NULL
+                    AND d.certified_at IS NULL
+                    AND d.enrollment_challenge_expires_at <= now()
+                )
+             ORDER BY at.expires_at, at.id
+             LIMIT $1
+         )
+         DELETE FROM access_tokens
+         USING expired
+         WHERE access_tokens.id = expired.id",
+        AUTH_GC_ACCESS_TOKEN_BATCH_SIZE,
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
+    let expired_refresh_tokens = sqlx::query!(
+        "WITH expired AS (
+             SELECT rt.id, sf.absolute_expires_at
+             FROM refresh_tokens rt
+             JOIN session_families sf ON sf.id = rt.family_id
+             JOIN devices d ON d.id = sf.device_id
+             WHERE sf.absolute_expires_at <= now()
+                OR (
+                    d.certificate IS NULL
+                    AND d.certified_at IS NULL
+                    AND d.enrollment_challenge_expires_at <= now()
+                )
+             ORDER BY sf.absolute_expires_at, rt.id
+             LIMIT $1
+         )
+         DELETE FROM refresh_tokens
+         USING expired
+         WHERE refresh_tokens.id = expired.id",
+        AUTH_GC_REFRESH_TOKEN_BATCH_SIZE,
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
+    let expired_families = sqlx::query!(
+        "WITH expired AS (
+             SELECT sf.id
+             FROM session_families sf
+             JOIN devices d ON d.id = sf.device_id
+             WHERE (
+                   sf.absolute_expires_at <= now()
+                   OR (
+                       d.certificate IS NULL
+                       AND d.certified_at IS NULL
+                       AND d.enrollment_challenge_expires_at <= now()
+                   )
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM access_tokens at WHERE at.family_id = sf.id
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM refresh_tokens rt WHERE rt.family_id = sf.id
+               )
+             ORDER BY sf.absolute_expires_at, sf.id
+             LIMIT $1
+         )
+         DELETE FROM session_families
+         USING expired
+         WHERE session_families.id = expired.id",
+        AUTH_GC_SESSION_FAMILY_BATCH_SIZE,
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
+    let expired_pending_devices = sqlx::query!(
+        "WITH expired AS (
+             SELECT d.id
+             FROM devices d
+             WHERE d.certificate IS NULL
+               AND d.certified_at IS NULL
+               AND d.enrollment_challenge_expires_at <= now()
+               AND NOT EXISTS (
+                   SELECT 1 FROM session_families sf WHERE sf.device_id = d.id
+               )
+             ORDER BY d.enrollment_challenge_expires_at, d.id
+             LIMIT $1
+         )
+         DELETE FROM devices
+         USING expired
+         WHERE devices.id = expired.id",
+        AUTH_GC_PENDING_DEVICE_BATCH_SIZE,
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(expired_access_tokens
+        + expired_refresh_tokens
+        + expired_families
+        + expired_pending_devices
+        + cleanup_expired_opaque_states(pool).await?)
 }
 
 fn normalize_email(email: &str) -> Result<String, AppError> {
@@ -974,50 +1340,129 @@ async fn insert_pending_device(
     user_id: Uuid,
     device_name: &str,
     challenge: &[u8; DEVICE_CHALLENGE_LEN],
-) -> Result<(), AppError> {
+) -> Result<DateTime<Utc>, AppError> {
+    let challenge_expires_at = Utc::now() + Duration::minutes(10);
     sqlx::query!(
         "INSERT INTO devices
             (id, user_id, device_name, enrollment_challenge,
              enrollment_challenge_expires_at)
-         VALUES ($1, $2, $3, $4, now() + interval '10 minutes')",
+         VALUES ($1, $2, $3, $4, $5)",
         device_id,
         user_id,
         device_name,
         challenge.as_slice(),
+        challenge_expires_at,
     )
     .execute(&mut **tx)
     .await?;
-    Ok(())
-}
-
-struct CreatedSession {
-    token: String,
-    expires_at: DateTime<Utc>,
+    Ok(challenge_expires_at)
 }
 
 async fn create_session(
     tx: &mut PgTransaction<'_>,
     user_id: Uuid,
     device_id: Uuid,
-) -> Result<CreatedSession, AppError> {
-    let token = generate_session_token();
-    let token_hash = hash_token(&token);
-    let expires_at = Utc::now() + Duration::days(SESSION_TTL_DAYS);
+) -> Result<TokenResponse, AppError> {
+    let now = Utc::now();
+    let family_id = Uuid::now_v7();
+    let absolute_expires_at = now + Duration::days(SESSION_FAMILY_TTL_DAYS);
     sqlx::query!(
-        "INSERT INTO sessions (id, user_id, device_id, token_hash, expires_at)
-         VALUES ($1, $2, $3, $4, $5)",
-        Uuid::now_v7(),
+        "INSERT INTO session_families
+            (id, user_id, device_id, client_id, absolute_expires_at, last_seen_at)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+        family_id,
         user_id,
         device_id,
-        token_hash.as_slice(),
-        expires_at,
+        NATIVE_CLIENT_ID,
+        absolute_expires_at,
+        now,
     )
     .execute(&mut **tx)
     .await?;
-    Ok(CreatedSession { token, expires_at })
+    insert_token_pair(
+        tx,
+        family_id,
+        1,
+        now + Duration::days(REFRESH_TOKEN_IDLE_TTL_DAYS),
+        None,
+        now,
+    )
+    .await
 }
 
-fn generate_session_token() -> String {
+async fn insert_token_pair(
+    tx: &mut PgTransaction<'_>,
+    family_id: Uuid,
+    generation: i64,
+    refresh_expires_at: DateTime<Utc>,
+    replaced_token_id: Option<Uuid>,
+    now: DateTime<Utc>,
+) -> Result<TokenResponse, AppError> {
+    let access_token = generate_token();
+    let refresh_token = generate_token();
+    let access_hash = hash_token(&access_token);
+    let refresh_hash = hash_token(&refresh_token);
+    let access_expires_at = std::cmp::min(
+        now + Duration::minutes(ACCESS_TOKEN_TTL_MINUTES),
+        refresh_expires_at,
+    );
+    let access_token_id = Uuid::now_v7();
+    let refresh_token_id = Uuid::now_v7();
+
+    sqlx::query!(
+        "INSERT INTO access_tokens
+            (id, family_id, token_hash, expires_at, last_seen_at)
+         VALUES ($1, $2, $3, $4, $5)",
+        access_token_id,
+        family_id,
+        access_hash.as_slice(),
+        access_expires_at,
+        now,
+    )
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query!(
+        "INSERT INTO refresh_tokens
+            (id, family_id, generation, token_hash, expires_at)
+         VALUES ($1, $2, $3, $4, $5)",
+        refresh_token_id,
+        family_id,
+        generation,
+        refresh_hash.as_slice(),
+        refresh_expires_at,
+    )
+    .execute(&mut **tx)
+    .await?;
+    if let Some(replaced_token_id) = replaced_token_id {
+        let updated = sqlx::query!(
+            "UPDATE refresh_tokens
+             SET consumed_at = $2, replaced_by_id = $3
+             WHERE id = $1 AND consumed_at IS NULL AND revoked_at IS NULL",
+            replaced_token_id,
+            now,
+            refresh_token_id,
+        )
+        .execute(&mut **tx)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(AppError::invalid_grant());
+        }
+    }
+
+    Ok(TokenResponse {
+        access_token,
+        token_type: "Bearer".to_string(),
+        expires_in: u64::try_from((access_expires_at - now).num_seconds().max(0))
+            .map_err(|_| AppError::internal())?,
+        access_expires_at,
+        refresh_token,
+        refresh_token_expires_in: u64::try_from((refresh_expires_at - now).num_seconds().max(0))
+            .map_err(|_| AppError::internal())?,
+        refresh_expires_at,
+    })
+}
+
+fn generate_token() -> String {
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)

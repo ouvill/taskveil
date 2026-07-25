@@ -21,6 +21,7 @@ class AndroidCapsuleStoreTest {
         AndroidCapsuleStore.install(ApplicationProvider.getApplicationContext())
         AndroidCapsuleStore.delete(namespace, "active")
         AndroidCapsuleStore.delete(namespace, "pending")
+        AndroidCapsuleStore.delete(namespace, "session-tokens")
         AndroidCapsuleStore.delete(otherNamespace, "active")
     }
 
@@ -28,6 +29,7 @@ class AndroidCapsuleStoreTest {
     fun clear() {
         AndroidCapsuleStore.delete(namespace, "active")
         AndroidCapsuleStore.delete(namespace, "pending")
+        AndroidCapsuleStore.delete(namespace, "session-tokens")
         AndroidCapsuleStore.delete(otherNamespace, "active")
     }
 
@@ -63,5 +65,20 @@ class AndroidCapsuleStoreTest {
 
         assertNull(AndroidCapsuleStore.load(namespace, "active"))
         assertArrayEquals(expectedSecond, AndroidCapsuleStore.load(otherNamespace, "active"))
+    }
+
+    @Test
+    fun sessionTokenSetRoundTripsAndIsDeletedAsOneProtectedValue() {
+        val tokens = """{"version":1,"access_token":"a","refresh_token":"r"}""".toByteArray()
+        val expected = tokens.clone()
+
+        AndroidCapsuleStore.store(namespace, "session-tokens", tokens)
+
+        assertArrayEquals(
+            expected,
+            AndroidCapsuleStore.load(namespace, "session-tokens"),
+        )
+        AndroidCapsuleStore.delete(namespace, "session-tokens")
+        assertNull(AndroidCapsuleStore.load(namespace, "session-tokens"))
     }
 }

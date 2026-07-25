@@ -19,6 +19,7 @@ resource "aws_lambda_function" "server" {
     variables = {
       TASKVEIL_RUNTIME_SECRET_ID             = data.aws_secretsmanager_secret.runtime.arn
       TASKVEIL_BILLING_ENVIRONMENT           = var.environment == "staging" ? "sandbox" : "production"
+      TASKVEIL_AUTH_ISSUER                   = "https://${local.api_domain}"
       PARAMETERS_SECRETS_EXTENSION_HTTP_PORT = "2773"
       PARAMETERS_SECRETS_EXTENSION_LOG_LEVEL = "ERROR"
       SECRETS_MANAGER_TTL                    = "300"

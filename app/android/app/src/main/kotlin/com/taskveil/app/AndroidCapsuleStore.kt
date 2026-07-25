@@ -122,7 +122,12 @@ object AndroidCapsuleStore {
     }
 
     private fun requireSlot(slot: String) {
-        require(slot == "active" || slot == "pending" || slot == "device-identity") {
+        require(
+            slot == "active" ||
+                slot == "pending" ||
+                slot == "device-identity" ||
+                slot == "session-tokens",
+        ) {
             "invalid capsule slot"
         }
     }

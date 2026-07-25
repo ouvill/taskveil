@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT d.id, d.certificate\n         FROM devices d\n         JOIN tenant_members m ON m.user_id = d.user_id AND m.tenant_id = $1\n         JOIN tenants t ON t.id = m.tenant_id\n         WHERE d.certificate IS NOT NULL AND d.certificate_fingerprint IS NOT NULL\n           AND d.revoked_at IS NULL AND (d.key_expires_at IS NULL OR d.key_expires_at > now())\n           AND (d.user_id = t.owner_user_id OR m.verification_state = 'verified')",
+  "query": "SELECT d.id, d.certificate\n         FROM devices d\n         JOIN tenant_members m ON m.user_id = d.user_id AND m.tenant_id = $1\n         JOIN tenants t ON t.id = m.tenant_id\n         WHERE d.certificate IS NOT NULL AND d.certificate_fingerprint IS NOT NULL\n           AND d.certified_at IS NOT NULL\n           AND d.revoked_at IS NULL AND (d.key_expires_at IS NULL OR d.key_expires_at > now())\n           AND (d.user_id = t.owner_user_id OR m.verification_state = 'verified')",
   "describe": {
     "columns": [
       {
@@ -36,5 +36,5 @@
       true
     ]
   },
-  "hash": "af2194b6f2c8fb82589b4d4d213f0d3ab1d4bcd0d8747214ff3e5598332b188a"
+  "hash": "532adc6a6182daeb6ecfb3ed03015be04f26bf3c793b0761d03fedac53a2368f"
 }

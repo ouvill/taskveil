@@ -148,13 +148,24 @@ impl Fixture {
         .execute(&admin_pool)
         .await
         .unwrap();
+        let family_id = Uuid::now_v7();
         query(
-            "INSERT INTO sessions (id, user_id, device_id, token_hash, expires_at)
-             VALUES ($1, $2, $3, $4, now() + interval '1 day')",
+            "INSERT INTO session_families
+                (id, user_id, device_id, client_id, absolute_expires_at)
+             VALUES ($1, $2, $3, 'taskveil-native', now() + interval '1 day')",
         )
-        .bind(Uuid::now_v7())
+        .bind(family_id)
         .bind(user_id)
         .bind(device_id)
+        .execute(&admin_pool)
+        .await
+        .unwrap();
+        query(
+            "INSERT INTO access_tokens (id, family_id, token_hash, expires_at)
+             VALUES ($1, $2, $3, now() + interval '1 day')",
+        )
+        .bind(Uuid::now_v7())
+        .bind(family_id)
         .bind(Sha256::digest(token.as_bytes()).to_vec())
         .execute(&admin_pool)
         .await
@@ -170,6 +181,7 @@ impl Fixture {
         let app = build_router(AppState {
             pool: application_pool,
             billing,
+            auth_issuer: "http://localhost".to_string(),
         });
         Self {
             app,

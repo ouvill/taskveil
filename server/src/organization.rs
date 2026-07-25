@@ -208,6 +208,7 @@ pub async fn list_member_devices(
                 certificate_fingerprint AS \"certificate_fingerprint!\",
                 revoked_at IS NOT NULL AS \"revoked!\"
          FROM devices WHERE user_id = $1 AND certificate IS NOT NULL
+           AND certified_at IS NOT NULL
            AND revoked_at IS NULL AND (key_expires_at IS NULL OR key_expires_at > now())
          ORDER BY created_at, id",
         member_user_id,
@@ -270,6 +271,7 @@ pub async fn store_recipient_package(
     let sender_fingerprint = sqlx::query_scalar!(
         "SELECT certificate_fingerprint AS \"certificate_fingerprint!\" FROM devices
          WHERE id = $1 AND user_id = $2 AND certificate IS NOT NULL
+           AND certified_at IS NOT NULL
            AND revoked_at IS NULL AND (key_expires_at IS NULL OR key_expires_at > now())",
         auth.device_id,
         auth.user_id,
@@ -286,7 +288,8 @@ pub async fn store_recipient_package(
                 d.user_id
          FROM devices d
          JOIN tenant_members m ON m.user_id = d.user_id AND m.tenant_id = $1
-         WHERE d.id = $2 AND d.certificate IS NOT NULL AND d.revoked_at IS NULL
+         WHERE d.id = $2 AND d.certificate IS NOT NULL
+           AND d.certified_at IS NOT NULL AND d.revoked_at IS NULL
            AND (d.key_expires_at IS NULL OR d.key_expires_at > now())",
         tenant_id,
         request.device_id,
@@ -429,7 +432,9 @@ pub async fn revoke_device(
          FROM devices d
          JOIN users u ON u.id = d.user_id
          JOIN tenant_members m ON m.user_id = d.user_id AND m.tenant_id = $1
-         WHERE d.id = $2",
+         WHERE d.id = $2
+           AND d.certificate IS NOT NULL
+           AND d.certified_at IS NOT NULL",
         tenant_id,
         device_id,
     )
@@ -497,7 +502,10 @@ pub async fn revoke_device(
     .execute(&mut *tx)
     .await?;
     sqlx::query!(
-        "UPDATE sessions SET revoked_at = coalesce(revoked_at, now()) WHERE device_id = $1",
+        "UPDATE session_families
+         SET revoked_at = coalesce(revoked_at, now()),
+             revocation_reason = coalesce(revocation_reason, 'device_revocation')
+         WHERE device_id = $1",
         device_id,
     )
     .execute(&mut *tx)

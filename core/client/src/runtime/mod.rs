@@ -149,8 +149,13 @@ impl TaskveilClient {
     }
 
     pub fn set_sync_server_url(&self, server_url: String) -> Result<(), ClientError> {
-        let server_url = server_url.trim().trim_end_matches('/').to_string();
-        if server_url.is_empty() {
+        let _operation = self.begin_operation()?;
+        let _session_lock = account::acquire_session_token_set_lock(&self.db_dir)?;
+        let server_url = taskveil_sync::canonical_server_origin(&server_url)
+            .map_err(|_| ClientError::AccountRequest)?;
+        if account::stored_session_credential_issuer(&self.db_dir)?
+            .is_some_and(|issuer| issuer != server_url)
+        {
             return Err(ClientError::AccountRequest);
         }
         self.set_setting_value(SYNC_SERVER_URL_SETTING_KEY, &server_url)

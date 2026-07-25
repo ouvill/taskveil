@@ -243,8 +243,9 @@ pub fn load_or_create_device_key(
     }
 }
 
+#[derive(Clone, Copy)]
 pub enum AccountSecretKind {
-    SessionToken,
+    SessionTokens,
     DeviceIdentity,
     WrappedAccountRoot,
 }
@@ -258,7 +259,7 @@ pub fn load_account_secret(
 
     #[cfg(any(target_os = "ios", target_os = "macos"))]
     {
-        if is_flutter_test_process() {
+        if cfg!(debug_assertions) || is_flutter_test_process() {
             return file_store.load();
         }
         AppleKeychainSecretStore::new_data_protection_only(format!(
@@ -272,17 +273,13 @@ pub fn load_account_secret(
     #[cfg(not(any(target_os = "ios", target_os = "macos")))]
     {
         #[cfg(target_os = "android")]
-        if matches!(kind, AccountSecretKind::DeviceIdentity)
-            && !PlatformLocalKeyCapsuleStore::plaintext_allowed()
-        {
+        if kind.requires_protected_storage() && !PlatformLocalKeyCapsuleStore::plaintext_allowed() {
             return crate::android_capsule_store::load_named(
                 &profile_store_namespace(db_dir),
-                "device-identity",
+                kind.android_name(),
             );
         }
-        if matches!(kind, AccountSecretKind::DeviceIdentity)
-            && !PlatformLocalKeyCapsuleStore::plaintext_allowed()
-        {
+        if kind.requires_protected_storage() && !PlatformLocalKeyCapsuleStore::plaintext_allowed() {
             return Err(KeyStoreError::PlaintextStoreForbidden);
         }
         file_store.load()
@@ -299,7 +296,7 @@ pub fn store_account_secret(
 
     #[cfg(any(target_os = "ios", target_os = "macos"))]
     {
-        if is_flutter_test_process() {
+        if cfg!(debug_assertions) || is_flutter_test_process() {
             return file_store.store(value);
         }
         AppleKeychainSecretStore::new_data_protection_only(format!(
@@ -313,18 +310,14 @@ pub fn store_account_secret(
     #[cfg(not(any(target_os = "ios", target_os = "macos")))]
     {
         #[cfg(target_os = "android")]
-        if matches!(kind, AccountSecretKind::DeviceIdentity)
-            && !PlatformLocalKeyCapsuleStore::plaintext_allowed()
-        {
+        if kind.requires_protected_storage() && !PlatformLocalKeyCapsuleStore::plaintext_allowed() {
             return crate::android_capsule_store::store_named(
                 &profile_store_namespace(db_dir),
-                "device-identity",
+                kind.android_name(),
                 value,
             );
         }
-        if matches!(kind, AccountSecretKind::DeviceIdentity)
-            && !PlatformLocalKeyCapsuleStore::plaintext_allowed()
-        {
+        if kind.requires_protected_storage() && !PlatformLocalKeyCapsuleStore::plaintext_allowed() {
             return Err(KeyStoreError::PlaintextStoreForbidden);
         }
         file_store.store(value)
@@ -340,7 +333,7 @@ pub fn delete_account_secret(
 
     #[cfg(any(target_os = "ios", target_os = "macos"))]
     {
-        if is_flutter_test_process() {
+        if cfg!(debug_assertions) || is_flutter_test_process() {
             return file_store.delete();
         }
         AppleKeychainSecretStore::new_data_protection_only(format!(
@@ -354,17 +347,13 @@ pub fn delete_account_secret(
     #[cfg(not(any(target_os = "ios", target_os = "macos")))]
     {
         #[cfg(target_os = "android")]
-        if matches!(kind, AccountSecretKind::DeviceIdentity)
-            && !PlatformLocalKeyCapsuleStore::plaintext_allowed()
-        {
+        if kind.requires_protected_storage() && !PlatformLocalKeyCapsuleStore::plaintext_allowed() {
             return crate::android_capsule_store::delete_named(
                 &profile_store_namespace(db_dir),
-                "device-identity",
+                kind.android_name(),
             );
         }
-        if matches!(kind, AccountSecretKind::DeviceIdentity)
-            && !PlatformLocalKeyCapsuleStore::plaintext_allowed()
-        {
+        if kind.requires_protected_storage() && !PlatformLocalKeyCapsuleStore::plaintext_allowed() {
             return Err(KeyStoreError::PlaintextStoreForbidden);
         }
         file_store.delete()
@@ -374,7 +363,7 @@ pub fn delete_account_secret(
 impl AccountSecretKind {
     fn file_name(&self) -> &'static str {
         match self {
-            AccountSecretKind::SessionToken => SESSION_TOKEN_FILE_NAME,
+            AccountSecretKind::SessionTokens => SESSION_TOKEN_FILE_NAME,
             AccountSecretKind::DeviceIdentity => DEVICE_IDENTITY_FILE_NAME,
             AccountSecretKind::WrappedAccountRoot => WRAPPED_ACCOUNT_ROOT_FILE_NAME,
         }
@@ -383,9 +372,26 @@ impl AccountSecretKind {
     #[cfg(any(target_os = "ios", target_os = "macos"))]
     fn keychain_service(&self) -> &'static str {
         match self {
-            AccountSecretKind::SessionToken => SESSION_TOKEN_KEYCHAIN_SERVICE,
+            AccountSecretKind::SessionTokens => SESSION_TOKEN_KEYCHAIN_SERVICE,
             AccountSecretKind::DeviceIdentity => DEVICE_IDENTITY_KEYCHAIN_SERVICE,
             AccountSecretKind::WrappedAccountRoot => WRAPPED_ACCOUNT_ROOT_KEYCHAIN_SERVICE,
+        }
+    }
+
+    #[cfg(not(any(target_os = "ios", target_os = "macos")))]
+    fn requires_protected_storage(&self) -> bool {
+        matches!(
+            self,
+            AccountSecretKind::SessionTokens | AccountSecretKind::DeviceIdentity
+        )
+    }
+
+    #[cfg(target_os = "android")]
+    fn android_name(&self) -> &'static str {
+        match self {
+            AccountSecretKind::SessionTokens => "session-tokens",
+            AccountSecretKind::DeviceIdentity => "device-identity",
+            AccountSecretKind::WrappedAccountRoot => "account-root-wrapped",
         }
     }
 }
@@ -1133,7 +1139,10 @@ impl FileSecretStore {
                 .map_err(|error| KeyStoreError::Backend(error.to_string()))?;
         }
 
-        fs::write(&self.path, value).map_err(|error| KeyStoreError::Backend(error.to_string()))
+        let temporary_path = self.path.with_extension("tmp");
+        fs::write(&temporary_path, value)
+            .and_then(|()| fs::rename(&temporary_path, &self.path))
+            .map_err(|error| KeyStoreError::Backend(error.to_string()))
     }
 
     fn delete(&self) -> Result<(), KeyStoreError> {

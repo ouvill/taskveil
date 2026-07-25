@@ -1,0 +1,161 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT rt.id, rt.family_id, rt.generation, rt.expires_at,\n                  rt.consumed_at AS \"consumed_at?\", rt.revoked_at AS \"token_revoked_at?\",\n                  sf.absolute_expires_at,\n                  sf.revoked_at AS \"family_revoked_at?\",\n                  d.revoked_at AS \"device_revoked_at?\",\n                  d.certificate AS \"device_certificate?\",\n                  d.certified_at AS \"device_certified_at?\",\n                  d.key_expires_at AS \"device_key_expires_at?\"\n           FROM refresh_tokens rt\n           JOIN session_families sf ON sf.id = rt.family_id\n           JOIN devices d ON d.id = sf.device_id AND d.user_id = sf.user_id\n           WHERE rt.token_hash = $1 AND sf.client_id = $2\n           FOR UPDATE OF rt, sf",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "refresh_tokens",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "family_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "refresh_tokens",
+            "name": "family_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "generation",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "refresh_tokens",
+            "name": "generation"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "expires_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "refresh_tokens",
+            "name": "expires_at"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "consumed_at?",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "refresh_tokens",
+            "name": "consumed_at"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "token_revoked_at?",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "refresh_tokens",
+            "name": "revoked_at"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "absolute_expires_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "session_families",
+            "name": "absolute_expires_at"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "family_revoked_at?",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "session_families",
+            "name": "revoked_at"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "device_revoked_at?",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "devices",
+            "name": "revoked_at"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "device_certificate?",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "devices",
+            "name": "certificate"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "device_certified_at?",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "devices",
+            "name": "certified_at"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "device_key_expires_at?",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "devices",
+            "name": "key_expires_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bytea",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "68bab01f7852a41849f3651c3e0bee50e3fc1b4c7c8eeb4ef5558063e1606625"
+}

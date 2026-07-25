@@ -26,6 +26,7 @@ async fn run() -> Result<(), ()> {
         AppState {
             pool,
             billing: config.billing,
+            auth_issuer: config.auth_issuer,
         },
         config.realtime,
     );
