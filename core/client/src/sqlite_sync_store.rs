@@ -1,20 +1,25 @@
+mod convert;
+
 use std::path::{Path, PathBuf};
 
+use convert::{
+    local_cursor_to_storage, local_outbox_to_storage, local_quarantine_to_storage,
+    local_record_to_storage, storage_alias_to_local, storage_outbox_to_local,
+    storage_quarantine_to_local, storage_record_to_local, storage_resync_to_local,
+    storage_sweep_to_local,
+};
 use taskveil_domain::{CompletedTimerSession, List, Task, TaskSeries, TaskTemplate, Uuid};
 use taskveil_storage::{
-    open_encrypted, FullResyncPhase, FullResyncProgress, FullResyncStableCursor,
-    FullResyncSweepSummary, ListRepository, NewSyncOutboxEntry, OwnedSqliteWriteTx,
-    SettingsRepository, SqliteListRepository, SqliteSettingsRepository, SqliteSyncStateRepository,
-    SqliteTaskRepository, SqliteTemplateSeriesRepository, SqliteTimerSessionRepository,
-    StorageError, SyncOutboxState, SyncQuarantineEntry, SyncRecordSemanticState, SyncRecordState,
+    open_encrypted, ListRepository, OwnedSqliteWriteTx, SettingsRepository, SqliteListRepository,
+    SqliteSettingsRepository, SqliteSyncStateRepository, SqliteTaskRepository,
+    SqliteTemplateSeriesRepository, SqliteTimerSessionRepository, StorageError,
     SyncStateRepository, TaskRepository, TemplateSeriesRepository, TimerSessionRepository,
 };
 use taskveil_sync::{
-    enqueue::{LocalFullResyncPhase, LocalFullResyncProgress, LocalFullResyncSweepSummary},
-    EncryptedSyncState, LocalListAlias, LocalMutationSyncStore, LocalSyncAtomicStore,
-    LocalSyncOutboxEntry, LocalSyncQuarantineEntry, LocalSyncRecordState, LocalSyncSemanticState,
-    LocalSyncStore, LocalSyncWriteTransaction, NewLocalSyncOutboxEntry, PullFailureReason,
-    StableCursor, SyncCollection,
+    enqueue::{LocalFullResyncProgress, LocalFullResyncSweepSummary},
+    LocalListAlias, LocalMutationSyncStore, LocalSyncAtomicStore, LocalSyncOutboxEntry,
+    LocalSyncQuarantineEntry, LocalSyncRecordState, LocalSyncStore, LocalSyncWriteTransaction,
+    NewLocalSyncOutboxEntry, StableCursor, SyncCollection,
 };
 use zeroize::Zeroizing;
 
@@ -82,22 +87,7 @@ impl LocalMutationSyncStore for SqliteSyncStore {
     fn put_outbox_head(&mut self, entry: NewLocalSyncOutboxEntry) -> Result<(), String> {
         with_sync_repository(&self.db_path, &self.db_key, |repository| {
             repository
-                .put_outbox_head(NewSyncOutboxEntry {
-                    op_id: entry.op_id,
-                    record_id: entry.record_id,
-                    collection: entry.collection.to_string(),
-                    base_revision_hlc: entry.base_revision_hlc,
-                    revision_hlc: entry.revision_hlc,
-                    state: match entry.state {
-                        EncryptedSyncState::Live { mutation_hlc, blob } => {
-                            SyncOutboxState::Live { mutation_hlc, blob }
-                        }
-                        EncryptedSyncState::Tombstone { delete_hlc } => {
-                            SyncOutboxState::Tombstone { delete_hlc }
-                        }
-                    },
-                    created_at: entry.created_at,
-                })
+                .put_outbox_head(local_outbox_to_storage(entry))
                 .map(|_| ())
                 .map_err(|error| error.to_string())
         })
@@ -147,34 +137,11 @@ impl LocalSyncStore for SqliteSyncStore {
         with_sync_repository(&self.db_path, &self.db_key, |repository| {
             repository
                 .list_outbox_heads(limit)
-                .map(|entries| {
-                    entries
-                        .into_iter()
-                        .map(|entry| -> Result<LocalSyncOutboxEntry, String> {
-                            Ok(LocalSyncOutboxEntry {
-                                op_id: entry.op_id,
-                                record_id: entry.record_id,
-                                collection: entry
-                                    .collection
-                                    .parse::<SyncCollection>()
-                                    .map_err(|error| error.to_string())?,
-                                base_revision_hlc: entry.base_revision_hlc,
-                                revision_hlc: entry.revision_hlc,
-                                state: match entry.state {
-                                    SyncOutboxState::Live { mutation_hlc, blob } => {
-                                        EncryptedSyncState::Live { mutation_hlc, blob }
-                                    }
-                                    SyncOutboxState::Tombstone { delete_hlc } => {
-                                        EncryptedSyncState::Tombstone { delete_hlc }
-                                    }
-                                },
-                                created_at: entry.created_at,
-                            })
-                        })
-                        .collect::<Result<Vec<_>, String>>()
-                })
-                .map_err(|error| error.to_string())?
-        })
+                .map_err(|error| error.to_string())
+        })?
+        .into_iter()
+        .map(storage_outbox_to_local)
+        .collect()
     }
 
     fn ack_outbox_op(&mut self, op_id: Uuid) -> Result<bool, String> {
@@ -948,195 +915,6 @@ impl LocalSyncWriteTransaction for SqliteSyncWriteTx {
     }
 }
 
-fn storage_resync_to_local(progress: FullResyncProgress) -> LocalFullResyncProgress {
-    LocalFullResyncProgress {
-        generation_id: progress.generation_id,
-        continuity_generation: progress.continuity_generation,
-        phase: match progress.phase {
-            FullResyncPhase::Base => LocalFullResyncPhase::Base,
-            FullResyncPhase::Delta => LocalFullResyncPhase::Delta,
-            FullResyncPhase::Sweep => LocalFullResyncPhase::Sweep,
-        },
-        base_seq: progress.base_seq,
-        base_cursor: progress.base_cursor.map(storage_cursor_to_local),
-        delta_cursor: progress.delta_cursor,
-        closure_high_water: progress.closure_high_water,
-        sweep_cursor: progress.sweep_cursor.map(storage_cursor_to_local),
-    }
-}
-
-fn storage_cursor_to_local(cursor: FullResyncStableCursor) -> StableCursor {
-    StableCursor {
-        collection: cursor
-            .collection
-            .parse()
-            .expect("storage validates full resync cursor collection"),
-        record_id: cursor.record_id,
-    }
-}
-
-fn local_cursor_to_storage(cursor: &StableCursor) -> FullResyncStableCursor {
-    FullResyncStableCursor {
-        collection: cursor.collection.to_string(),
-        record_id: cursor.record_id,
-    }
-}
-
-fn storage_sweep_to_local(summary: FullResyncSweepSummary) -> LocalFullResyncSweepSummary {
-    LocalFullResyncSweepSummary {
-        scanned_records: summary.scanned_records,
-        swept_lists: summary.swept_lists,
-        swept_tasks: summary.swept_tasks,
-        swept_templates: summary.swept_templates,
-        swept_task_series: summary.swept_task_series,
-        swept_timer_sessions: summary.swept_timer_sessions,
-        swept_record_states: summary.swept_record_states,
-    }
-}
-
-fn local_outbox_to_storage(entry: NewLocalSyncOutboxEntry) -> NewSyncOutboxEntry {
-    NewSyncOutboxEntry {
-        op_id: entry.op_id,
-        record_id: entry.record_id,
-        collection: entry.collection.to_string(),
-        base_revision_hlc: entry.base_revision_hlc,
-        revision_hlc: entry.revision_hlc,
-        state: match entry.state {
-            EncryptedSyncState::Live { mutation_hlc, blob } => {
-                SyncOutboxState::Live { mutation_hlc, blob }
-            }
-            EncryptedSyncState::Tombstone { delete_hlc } => {
-                SyncOutboxState::Tombstone { delete_hlc }
-            }
-        },
-        created_at: entry.created_at,
-    }
-}
-
-fn storage_outbox_to_local(
-    entry: taskveil_storage::SyncOutboxEntry,
-) -> Result<LocalSyncOutboxEntry, String> {
-    Ok(LocalSyncOutboxEntry {
-        op_id: entry.op_id,
-        record_id: entry.record_id,
-        collection: entry
-            .collection
-            .parse::<SyncCollection>()
-            .map_err(|error| error.to_string())?,
-        base_revision_hlc: entry.base_revision_hlc,
-        revision_hlc: entry.revision_hlc,
-        state: match entry.state {
-            SyncOutboxState::Live { mutation_hlc, blob } => {
-                EncryptedSyncState::Live { mutation_hlc, blob }
-            }
-            SyncOutboxState::Tombstone { delete_hlc } => {
-                EncryptedSyncState::Tombstone { delete_hlc }
-            }
-        },
-        created_at: entry.created_at,
-    })
-}
-
-fn local_quarantine_to_storage(entry: LocalSyncQuarantineEntry) -> SyncQuarantineEntry {
-    SyncQuarantineEntry {
-        record_id: entry.record_id,
-        collection: entry.collection.to_string(),
-        seq: entry.seq,
-        revision_hlc: entry.revision_hlc,
-        state: match entry.state {
-            EncryptedSyncState::Live { mutation_hlc, blob } => {
-                SyncOutboxState::Live { mutation_hlc, blob }
-            }
-            EncryptedSyncState::Tombstone { delete_hlc } => {
-                SyncOutboxState::Tombstone { delete_hlc }
-            }
-        },
-        reason: entry.reason.as_str().to_string(),
-        required_list_id: entry.required_list_id,
-        first_failed_at: entry.first_failed_at,
-        last_failed_at: entry.last_failed_at,
-        attempt_count: entry.attempt_count,
-    }
-}
-
-fn storage_quarantine_to_local(
-    entry: SyncQuarantineEntry,
-) -> Result<LocalSyncQuarantineEntry, String> {
-    Ok(LocalSyncQuarantineEntry {
-        record_id: entry.record_id,
-        collection: entry
-            .collection
-            .parse::<SyncCollection>()
-            .map_err(|e| e.to_string())?,
-        seq: entry.seq,
-        revision_hlc: entry.revision_hlc,
-        state: match entry.state {
-            SyncOutboxState::Live { mutation_hlc, blob } => {
-                EncryptedSyncState::Live { mutation_hlc, blob }
-            }
-            SyncOutboxState::Tombstone { delete_hlc } => {
-                EncryptedSyncState::Tombstone { delete_hlc }
-            }
-        },
-        reason: entry.reason.parse::<PullFailureReason>()?,
-        required_list_id: entry.required_list_id,
-        first_failed_at: entry.first_failed_at,
-        last_failed_at: entry.last_failed_at,
-        attempt_count: entry.attempt_count,
-    })
-}
-
-fn storage_record_to_local(state: SyncRecordState) -> LocalSyncRecordState {
-    LocalSyncRecordState {
-        current_revision_hlc: state.current_revision_hlc,
-        state: match state.state {
-            SyncRecordSemanticState::Live {
-                mutation_hlc,
-                plaintext_json,
-            } => LocalSyncSemanticState::Live {
-                mutation_hlc,
-                plaintext_json,
-            },
-            SyncRecordSemanticState::Tombstone { delete_hlc } => {
-                LocalSyncSemanticState::Tombstone { delete_hlc }
-            }
-        },
-    }
-}
-
-fn local_record_to_storage(
-    collection: SyncCollection,
-    record_id: Uuid,
-    state: LocalSyncRecordState,
-    updated_at: i64,
-) -> SyncRecordState {
-    SyncRecordState {
-        record_id,
-        collection: collection.to_string(),
-        current_revision_hlc: state.current_revision_hlc,
-        state: match state.state {
-            LocalSyncSemanticState::Live {
-                mutation_hlc,
-                plaintext_json,
-            } => SyncRecordSemanticState::Live {
-                mutation_hlc,
-                plaintext_json,
-            },
-            LocalSyncSemanticState::Tombstone { delete_hlc } => {
-                SyncRecordSemanticState::Tombstone { delete_hlc }
-            }
-        },
-        updated_at,
-    }
-}
-
-fn storage_alias_to_local(alias: taskveil_storage::ListAlias) -> LocalListAlias {
-    LocalListAlias {
-        alias_list_id: alias.alias_list_id,
-        canonical_list_id: alias.canonical_list_id,
-    }
-}
-
 fn replace_list_aliases_in_transaction(
     transaction: &mut OwnedSqliteWriteTx,
     aliases: &[LocalListAlias],
@@ -1231,15 +1009,356 @@ fn with_list_repository<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use taskveil_domain::{new_list, new_task};
+    use taskveil_domain::{
+        new_list, new_task, CompletedTimerSession, SeriesCursor, TaskBlueprint, TaskBlueprintNode,
+        TaskContent, TaskSeriesConfig, TimerFinishKind, TimerMode, TASK_BLUEPRINT_SCHEMA_REVISION,
+    };
     use taskveil_storage::{
         ListRepository, LocalCryptoRepository, LocalProfileBinding, LocalTenantRootKeyBundle,
         SqliteLocalCryptoRepository,
     };
-    use taskveil_sync::{enqueue_backfill, LocalSyncKeys, SYNC_CURSOR_NAME};
+    use taskveil_sync::{
+        enqueue_backfill, EncryptedSyncState, LocalSyncKeys, LocalSyncSemanticState,
+        PullFailureReason, SYNC_CURSOR_NAME,
+    };
     use tempfile::tempdir;
 
     const DB_KEY: [u8; 32] = [0x51; 32];
+
+    #[derive(Clone)]
+    struct AdapterFixtures {
+        canonical: List,
+        alias: List,
+        task: Task,
+        template: TaskTemplate,
+        series: TaskSeries,
+        timer: CompletedTimerSession,
+        live_outbox_op_id: Uuid,
+        tombstone_outbox_op_id: Uuid,
+        live_quarantine_id: Uuid,
+        tombstone_quarantine_id: Uuid,
+    }
+
+    impl AdapterFixtures {
+        fn new() -> Self {
+            let canonical = new_list("Canonical".into(), "a0".into(), 1).unwrap();
+            let alias = new_list("Alias".into(), "a1".into(), 1).unwrap();
+            let task =
+                new_task(canonical.id, None, "Contract task".into(), "a0".into(), 1).unwrap();
+            let blueprint = TaskBlueprint {
+                schema_revision: TASK_BLUEPRINT_SCHEMA_REVISION,
+                nodes: vec![TaskBlueprintNode {
+                    node_key: "root".into(),
+                    parent_node_key: None,
+                    sibling_order: 0,
+                    content: TaskContent {
+                        title: "Contract template task".into(),
+                        note: String::new(),
+                        priority: 0,
+                        estimated_minutes: Some(15),
+                    },
+                }],
+            };
+            let template = TaskTemplate {
+                id: Uuid::now_v7(),
+                name: "Contract template".into(),
+                default_list_id: Some(canonical.id),
+                blueprint: blueprint.clone(),
+                blueprint_revision: "template-r1".into(),
+                created_at: 1,
+                updated_at: 1,
+            };
+            let series = TaskSeries {
+                id: Uuid::now_v7(),
+                config: TaskSeriesConfig {
+                    blueprint,
+                    target_list_id: Some(canonical.id),
+                    rrule: "FREQ=DAILY".into(),
+                    starts_at: 10_000,
+                    time_zone: "UTC".into(),
+                    enabled: true,
+                    config_revision: "series-r1".into(),
+                    config_parent_revision: None,
+                    config_effective_from: 1,
+                    lineage: Vec::new(),
+                },
+                cursor: SeriesCursor::Pending(10_000),
+                created_at: 1,
+                updated_at: 1,
+            };
+            let timer = CompletedTimerSession {
+                id: Uuid::now_v7(),
+                task_id: task.id,
+                mode: TimerMode::Stopwatch,
+                finish_kind: TimerFinishKind::Completed,
+                started_at: 1_000,
+                ended_at: 5_000,
+                active_duration_ms: 3_000,
+                created_at: 5_100,
+            };
+            Self {
+                canonical,
+                alias,
+                task,
+                template,
+                series,
+                timer,
+                live_outbox_op_id: Uuid::now_v7(),
+                tombstone_outbox_op_id: Uuid::now_v7(),
+                live_quarantine_id: Uuid::now_v7(),
+                tombstone_quarantine_id: Uuid::now_v7(),
+            }
+        }
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct AdapterSnapshot {
+        setting: Option<String>,
+        outbox: Vec<LocalSyncOutboxEntry>,
+        live_record: Option<LocalSyncRecordState>,
+        tombstone_record: Option<LocalSyncRecordState>,
+        cursor: Option<i64>,
+        quarantine: Vec<LocalSyncQuarantineEntry>,
+        aliases: Vec<LocalListAlias>,
+        resolved_alias: Uuid,
+        list: Option<List>,
+        task: Option<Task>,
+        tasks: Vec<Task>,
+        template: Option<TaskTemplate>,
+        series: Option<TaskSeries>,
+        timer: Option<CompletedTimerSession>,
+        timers: Vec<CompletedTimerSession>,
+    }
+
+    fn seed_adapter_contract<S: LocalSyncStore>(store: &mut S, fixtures: &AdapterFixtures) {
+        store.set_setting("adapter_contract", "value", 10).unwrap();
+        store
+            .upsert_list_for_sync(fixtures.canonical.clone())
+            .unwrap();
+        store.upsert_list_for_sync(fixtures.alias.clone()).unwrap();
+        store.upsert_task_for_sync(fixtures.task.clone()).unwrap();
+        store
+            .upsert_template_for_sync(fixtures.template.clone())
+            .unwrap();
+        store
+            .upsert_series_for_sync(fixtures.series.clone())
+            .unwrap();
+        store
+            .upsert_timer_session_for_sync(fixtures.timer.clone())
+            .unwrap();
+        store
+            .materialize_canonical_list(fixtures.canonical.id)
+            .unwrap();
+        store
+            .replace_list_aliases(
+                &[LocalListAlias {
+                    alias_list_id: fixtures.alias.id,
+                    canonical_list_id: fixtures.canonical.id,
+                }],
+                11,
+            )
+            .unwrap();
+
+        store
+            .put_outbox_head(NewLocalSyncOutboxEntry {
+                op_id: fixtures.live_outbox_op_id,
+                record_id: fixtures.canonical.id,
+                collection: SyncCollection::Lists,
+                base_revision_hlc: None,
+                revision_hlc: "10:0:device".into(),
+                state: EncryptedSyncState::Live {
+                    mutation_hlc: "10:0:device".into(),
+                    blob: vec![1, 2, 3],
+                },
+                created_at: 10,
+            })
+            .unwrap();
+        store
+            .put_outbox_head(NewLocalSyncOutboxEntry {
+                op_id: fixtures.tombstone_outbox_op_id,
+                record_id: fixtures.task.id,
+                collection: SyncCollection::Tasks,
+                base_revision_hlc: Some("9:0:device".into()),
+                revision_hlc: "11:0:device".into(),
+                state: EncryptedSyncState::Tombstone {
+                    delete_hlc: "11:0:device".into(),
+                },
+                created_at: 11,
+            })
+            .unwrap();
+        store
+            .put_record_state(
+                SyncCollection::Lists,
+                fixtures.canonical.id,
+                LocalSyncRecordState {
+                    current_revision_hlc: Some("10:0:device".into()),
+                    state: LocalSyncSemanticState::Live {
+                        mutation_hlc: "10:0:device".into(),
+                        plaintext_json: "{\"kind\":\"list\"}".into(),
+                    },
+                },
+                10,
+            )
+            .unwrap();
+        store
+            .put_record_state(
+                SyncCollection::Tasks,
+                fixtures.task.id,
+                LocalSyncRecordState {
+                    current_revision_hlc: Some("11:0:device".into()),
+                    state: LocalSyncSemanticState::Tombstone {
+                        delete_hlc: "11:0:device".into(),
+                    },
+                },
+                11,
+            )
+            .unwrap();
+        store.set_cursor("adapter_cursor", 42, 12).unwrap();
+        store
+            .put_quarantine(LocalSyncQuarantineEntry {
+                record_id: fixtures.live_quarantine_id,
+                collection: SyncCollection::Templates,
+                seq: 12,
+                revision_hlc: "12:0:device".into(),
+                state: EncryptedSyncState::Live {
+                    mutation_hlc: "12:0:device".into(),
+                    blob: vec![4, 5, 6],
+                },
+                reason: PullFailureReason::InvalidPlaintext,
+                required_list_id: None,
+                first_failed_at: 12,
+                last_failed_at: 12,
+                attempt_count: 1,
+            })
+            .unwrap();
+        store
+            .put_quarantine(LocalSyncQuarantineEntry {
+                record_id: fixtures.tombstone_quarantine_id,
+                collection: SyncCollection::TaskSeries,
+                seq: 13,
+                revision_hlc: "13:0:device".into(),
+                state: EncryptedSyncState::Tombstone {
+                    delete_hlc: "13:0:device".into(),
+                },
+                reason: PullFailureReason::InvalidPlaintext,
+                required_list_id: None,
+                first_failed_at: 13,
+                last_failed_at: 13,
+                attempt_count: 1,
+            })
+            .unwrap();
+    }
+
+    fn adapter_snapshot<S: LocalSyncStore>(
+        store: &mut S,
+        fixtures: &AdapterFixtures,
+    ) -> AdapterSnapshot {
+        AdapterSnapshot {
+            setting: store.get_setting("adapter_contract").unwrap(),
+            outbox: store.list_outbox_heads(10).unwrap(),
+            live_record: store
+                .get_record_state(SyncCollection::Lists, fixtures.canonical.id)
+                .unwrap(),
+            tombstone_record: store
+                .get_record_state(SyncCollection::Tasks, fixtures.task.id)
+                .unwrap(),
+            cursor: store.get_cursor_seq("adapter_cursor").unwrap(),
+            quarantine: store.list_quarantine(10).unwrap(),
+            aliases: store.list_list_aliases().unwrap(),
+            resolved_alias: store.resolve_list_alias(fixtures.alias.id).unwrap(),
+            list: store.get_list(fixtures.canonical.id).unwrap(),
+            task: store.get_task(fixtures.task.id).unwrap(),
+            tasks: store
+                .list_tasks_by_list_for_sync(fixtures.canonical.id)
+                .unwrap(),
+            template: store.get_template(fixtures.template.id).unwrap(),
+            series: store.get_series(fixtures.series.id).unwrap(),
+            timer: store.get_timer_session(fixtures.timer.id).unwrap(),
+            timers: store.list_timer_sessions_by_task(fixtures.task.id).unwrap(),
+        }
+    }
+
+    #[test]
+    fn direct_and_committed_transaction_adapters_persist_equivalent_contracts() {
+        let direct_temp = tempdir().unwrap();
+        let transaction_temp = tempdir().unwrap();
+        let fixtures = AdapterFixtures::new();
+        let mut direct = SqliteSyncStore::new(direct_temp.path().join("direct.sqlite3"), DB_KEY);
+        let mut transactional =
+            SqliteSyncStore::new(transaction_temp.path().join("transaction.sqlite3"), DB_KEY);
+
+        seed_adapter_contract(&mut direct, &fixtures);
+        let direct_snapshot = adapter_snapshot(&mut direct, &fixtures);
+
+        let mut transaction = transactional.begin_write_transaction().unwrap();
+        seed_adapter_contract(&mut transaction, &fixtures);
+        transaction.commit().unwrap();
+        let transaction_snapshot = adapter_snapshot(&mut transactional, &fixtures);
+
+        assert_eq!(transaction_snapshot, direct_snapshot);
+        assert!(matches!(
+            direct_snapshot.outbox[0].state,
+            EncryptedSyncState::Live { .. }
+        ));
+        assert!(matches!(
+            direct_snapshot.outbox[1].state,
+            EncryptedSyncState::Tombstone { .. }
+        ));
+        assert!(matches!(
+            direct_snapshot.quarantine[0].state,
+            EncryptedSyncState::Live { .. }
+        ));
+        assert!(matches!(
+            direct_snapshot.quarantine[1].state,
+            EncryptedSyncState::Tombstone { .. }
+        ));
+    }
+
+    #[test]
+    fn transaction_adapter_drop_rolls_back_all_contract_categories() {
+        let temp = tempdir().unwrap();
+        let fixtures = AdapterFixtures::new();
+        let mut store = SqliteSyncStore::new(temp.path().join("rollback.sqlite3"), DB_KEY);
+        {
+            let mut transaction = store.begin_write_transaction().unwrap();
+            seed_adapter_contract(&mut transaction, &fixtures);
+        }
+
+        assert_eq!(store.get_setting("adapter_contract").unwrap(), None);
+        assert!(store.list_outbox_heads(10).unwrap().is_empty());
+        assert_eq!(
+            store
+                .get_record_state(SyncCollection::Lists, fixtures.canonical.id)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            store
+                .get_record_state(SyncCollection::Tasks, fixtures.task.id)
+                .unwrap(),
+            None
+        );
+        assert_eq!(store.get_cursor_seq("adapter_cursor").unwrap(), None);
+        assert!(store.list_quarantine(10).unwrap().is_empty());
+        assert!(store.list_list_aliases().unwrap().is_empty());
+        assert_eq!(
+            store.resolve_list_alias(fixtures.alias.id).unwrap(),
+            fixtures.alias.id
+        );
+        assert_eq!(store.get_list(fixtures.canonical.id).unwrap(), None);
+        assert_eq!(store.get_task(fixtures.task.id).unwrap(), None);
+        assert!(store
+            .list_tasks_by_list_for_sync(fixtures.canonical.id)
+            .unwrap()
+            .is_empty());
+        assert_eq!(store.get_template(fixtures.template.id).unwrap(), None);
+        assert_eq!(store.get_series(fixtures.series.id).unwrap(), None);
+        assert_eq!(store.get_timer_session(fixtures.timer.id).unwrap(), None);
+        assert!(store
+            .list_timer_sessions_by_task(fixtures.task.id)
+            .unwrap()
+            .is_empty());
+    }
 
     #[test]
     fn canonical_inbox_contracts_are_available_on_store_and_transaction_adapters() {
