@@ -1,7 +1,7 @@
 ---
 id: 019f9a15-78b3-7372-a22f-36d4e38c9cb1
 title: SQLite sync adapter parity
-status: active
+status: done
 lane: standard
 milestone: maintenance
 ---
@@ -135,3 +135,42 @@ contract testで固定し、低リスクな変換境界だけをmoduleへ抽出�
   testがsocket bindを拒否された。許可済みのsandbox外再実行では全件passした。
 - skip、未解決事項なし。
 - Commit: この変更を含むcommit（最終hashはGit履歴を正本とする）
+
+### 独立検証
+
+- 判定: 合格
+- 構造レビュー:
+  - `SqliteSyncStore` と `SqliteSyncWriteTx` の
+    `LocalMutationSyncStore` / `LocalSyncStore` 実装を機械比較し、双方の44 method名が
+    完全一致することを確認した。transaction固有のfull resync 7 methodと `commit` は
+    `LocalSyncWriteTransaction` に分離されたままである。
+  - 同一 `AdapterFixtures` がsetting、outbox live / tombstone、record state
+    live / tombstone、cursor、quarantine live / tombstone、list alias、list、task、
+    template、task series、timer sessionをseedすることを確認した。commit testは
+    direct adapterとcommit後のtransaction adapterの全snapshotを比較し、drop testは
+    別DBで同じ全カテゴリが残らないことを個別に確認している。
+  - 抽出した11 conversion functionを変更前の本文と比較し、差分は
+    `pub(super)` visibility、importによる型修飾の短縮、rustfmt、error局所変数名だけで、
+    field mapping、live / tombstone tag、collection検証に変更がないことを確認した。
+  - production差分はprivate `convert` moduleとimport、既存outbox変換2箇所の
+    helper利用、conversion functionの移動だけだった。encrypted DB open、
+    `OwnedSqliteWriteTx::begin`、repository helper、commit / drop境界には差分がない。
+    `StorageError::NotFound` から `Option::None` へのmappingもadapter側で変更されていない。
+  - commit `658b568ff7e32b672f7493f628916b7f745a3e26` の変更はclient内部実装・test、
+    このwork itemの3ファイルだけである。公開宣言は変更前後とも
+    `SqliteSyncStore` / `SqliteSyncWriteTx` の2件で一致し、schema、migration、
+    sync protocol、Cargo manifest / lock、依存には差分がない。
+- 再実行:
+  - `cargo fmt --all -- --check`: 成功。
+  - `cargo clippy -p taskveil-client --all-targets -- -D warnings`: 成功。
+  - `cargo test -p taskveil-client`: unit 59件、doc-test 4件が成功。
+  - `cargo check --workspace --all-targets`: 成功。
+  - `sh app/tool/check_client_boundaries.sh`: 成功。
+  - `sh app/tool/test_client_boundaries.sh`: 成功。
+  - `git diff --check`: 成功。
+- 環境:
+  - client testのsandbox内初回実行は、既存local HTTP server testのsocket bindを
+    `Operation not permitted` で拒否した。許可付きの同一コマンド再実行では全件成功し、
+    parity / commit / rollback testも成功したため、コード失敗ではない。
+- 未解決: なし。
+- 検証者: 実装を担当していない独立検証エージェント。
