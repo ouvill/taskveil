@@ -1,7 +1,7 @@
 ---
 id: 019f9a15-7996-7b73-9491-b12ba3f44ac1
 title: Flutter bridge capability ports
-status: active
+status: done
 lane: standard
 milestone: maintenance
 ---
@@ -126,10 +126,29 @@ test seamであり、今回の保守作業では互換性を維持する。FRB A
 - 環境:
   - 全体解析前に同梱Cargokit build toolの未取得packageを `dart pub get` で解決した。
     package解決によるtracked差分はない。
-- Commit: handoffで報告。
+- Commit: `82befde51c2db4aedee610fbcb100d8be1d4e51a`
 - 未解決: なし。
 
 ### 独立検証
 
-- 判定: 未実施
-- 検証者: 未割当
+- 検証日: 2026-07-26
+- 判定: 合格
+- 根拠:
+  - 変更前の `BridgeService` と新しい9 portからmethod名を機械抽出して比較し、
+    双方69件、集合差分0、port間重複0を確認した。
+  - 既存の `FrbBridgeService` が69 methodを実装し、aggregate
+    `BridgeService` が9 portすべてを実装することを確認した。
+  - `FakeBridgeService` に差分がないこと、および既存aggregate overrideを含む
+    Flutter全295 testと新しいsettings port単独override testが成功することを確認した。
+  - production consumerの差分がprovider群とorganization safety dialogに限定され、
+    account、sync、billing、settings、reminderの派生providerを使用することを確認した。
+  - `bridge_service.dart` の `UnimplementedError` は変更前後とも17件だった。
+  - commit差分をpath単位で確認し、Rust API、FRB生成物、ARB、Cargo manifest /
+    lockfile、pubspec / lockfile、FRB設定に変更がないことを確認した。
+  - 対象Dart 6ファイルのformat checkは変更0、`flutter analyze` は
+    `No issues found` だった。
+  - `app/rust` のrelease build後に `flutter test` を再実行し、295件成功、
+    visual QA harness 1件のみ意図されたskipだった。
+  - hardcoded strings、client boundary check 2種、worktreeとcommit双方の
+    `git diff --check` が成功した。
+- 検証者: 実装に関与していない独立検証エージェント
