@@ -7,6 +7,7 @@ scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT INT TERM
 
 gradle_file="$repo_root/app/android/app/build.gradle.kts"
+gradle_wrapper="$repo_root/app/android/gradlew"
 signing_report="$scratch/signing-report.txt"
 failure_log="$scratch/store-signing-failure.txt"
 missing_properties="$scratch/missing-key.properties"
@@ -14,6 +15,13 @@ missing_properties="$scratch/missing-key.properties"
 if grep -F 'signingConfigs.getByName("debug")' "$gradle_file" >/dev/null; then
     echo "release must never fall back to the Android debug signing key" >&2
     exit 1
+fi
+
+if [ ! -x "$gradle_wrapper" ]; then
+    (
+        cd "$repo_root/app"
+        flutter build apk --config-only
+    )
 fi
 
 (
@@ -24,7 +32,7 @@ fi
     unset TASKVEIL_ANDROID_KEY_ALIAS
     unset TASKVEIL_ANDROID_KEY_PASSWORD
     cd "$repo_root/app/android"
-    ./gradlew -PtaskveilStoreBuild=false signingReport
+    "$gradle_wrapper" -PtaskveilStoreBuild=false signingReport
 ) >"$signing_report"
 
 if ! awk '
@@ -45,7 +53,7 @@ if (
     unset TASKVEIL_ANDROID_KEY_ALIAS
     unset TASKVEIL_ANDROID_KEY_PASSWORD
     cd "$repo_root/app/android"
-    ./gradlew \
+    "$gradle_wrapper" \
         -PtaskveilStoreBuild=true \
         -PtaskveilKeyProperties="$missing_properties" \
         help
