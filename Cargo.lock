@@ -3659,6 +3659,7 @@ dependencies = [
  "hex",
  "rusqlite",
  "serde_json",
+ "sha2 0.10.9",
  "taskveil-crypto",
  "taskveil-domain",
  "tempfile",

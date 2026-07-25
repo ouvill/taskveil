@@ -261,215 +261,6 @@ fn fts5_search_supports_english_and_japanese_prefix_queries() {
 }
 
 #[test]
-fn v3_database_migrates_to_v4_and_backfills_tasks_fts() {
-    let file = NamedTempFile::new().unwrap();
-    create_v3_database(file.path(), &KEY);
-    let mut task = sample_task();
-    task.content.title = "Legacy searchable task".to_string();
-    task.content.note = "Backfill target".to_string();
-    {
-        let connection = open_raw_encrypted(file.path(), &KEY);
-        insert_task_pre_v20(&connection, &task);
-    }
-
-    let connection = open_encrypted(file.path(), &KEY).unwrap();
-    let repository = SqliteTaskRepository::new(connection);
-    task.sort_order = "00000000000000010000000000000000".to_string();
-
-    assert_eq!(
-        read_user_version(repository.connection()).unwrap(),
-        LATEST_SCHEMA_VERSION
-    );
-    assert_eq!(repository.search_tasks("backfill").unwrap(), vec![task]);
-}
-
-#[test]
-fn v6_database_migrates_to_v7_and_adds_performance_indexes() {
-    let file = NamedTempFile::new().unwrap();
-    create_v6_database(file.path(), &KEY);
-
-    let connection = open_encrypted(file.path(), &KEY).unwrap();
-
-    assert_eq!(
-        read_user_version(&connection).unwrap(),
-        LATEST_SCHEMA_VERSION
-    );
-    assert!(index_exists(&connection, "idx_tasks_list_sort_order"));
-    assert!(index_exists(&connection, "idx_tasks_home_targets"));
-}
-
-#[test]
-fn v7_database_migrates_to_latest_sync_state_tables() {
-    let file = NamedTempFile::new().unwrap();
-    create_v7_database(file.path(), &KEY);
-
-    let connection = open_encrypted(file.path(), &KEY).unwrap();
-
-    assert_eq!(
-        read_user_version(&connection).unwrap(),
-        LATEST_SCHEMA_VERSION
-    );
-    assert_eq!(
-        sync_outbox_column(&connection, "record_id"),
-        Some(("TEXT".to_string(), 1))
-    );
-    assert_eq!(
-        sync_outbox_column(&connection, "collection"),
-        Some(("TEXT".to_string(), 1))
-    );
-    assert_eq!(
-        sync_outbox_column(&connection, "op_id"),
-        Some(("TEXT".to_string(), 1))
-    );
-    assert_eq!(
-        sync_outbox_column(&connection, "base_revision_hlc"),
-        Some(("TEXT".to_string(), 0))
-    );
-    assert_eq!(
-        sync_outbox_column(&connection, "revision_hlc"),
-        Some(("TEXT".to_string(), 1))
-    );
-    assert_eq!(
-        sync_outbox_column(&connection, "state_kind"),
-        Some(("TEXT".to_string(), 1))
-    );
-    assert_eq!(
-        sync_outbox_column(&connection, "blob"),
-        Some(("BLOB".to_string(), 0))
-    );
-    assert_eq!(
-        sync_cursor_column(&connection, "seq"),
-        Some(("INTEGER".to_string(), 1))
-    );
-    assert!(index_exists(&connection, "idx_sync_outbox_stable_order"));
-}
-
-#[test]
-fn v9_database_migrates_to_latest_and_adds_local_crypto_cache() {
-    let file = NamedTempFile::new().unwrap();
-    create_v9_database(file.path(), &KEY);
-    let tenant_id = Uuid::now_v7();
-    let user_id = Uuid::now_v7();
-    let device_id = Uuid::now_v7();
-    let connection = open_raw_encrypted(file.path(), &KEY);
-    for (key, value, updated_at) in [
-        ("account_tenant_id", tenant_id.to_string(), 100),
-        ("account_user_id", user_id.to_string(), 200),
-        ("account_device_id", device_id.to_string(), 300),
-    ] {
-        connection
-            .execute(
-                "INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, ?3)",
-                params![key, value, updated_at],
-            )
-            .unwrap();
-    }
-    drop(connection);
-
-    let connection = open_encrypted(file.path(), &KEY).unwrap();
-
-    assert_eq!(
-        read_user_version(&connection).unwrap(),
-        LATEST_SCHEMA_VERSION
-    );
-    assert_eq!(
-        table_columns(&connection, "local_profile_binding").unwrap(),
-        vec![
-            "singleton",
-            "tenant_id",
-            "user_id",
-            "device_id",
-            "bound_at",
-            "updated_at",
-        ]
-    );
-    assert!(table_columns(&connection, "local_list_key_bundles")
-        .unwrap()
-        .is_empty());
-    assert!(!table_columns(&connection, "lists")
-        .unwrap()
-        .iter()
-        .any(|column| column == "org_id"));
-    assert!(!index_exists(
-        &connection,
-        "idx_local_list_key_bundles_tenant"
-    ));
-    assert_eq!(
-        SqliteLocalCryptoRepository::new(connection)
-            .load_binding()
-            .unwrap(),
-        Some(LocalProfileBinding {
-            tenant_id,
-            user_id,
-            device_id,
-            bound_at: 100,
-            updated_at: 300,
-        })
-    );
-}
-
-#[test]
-fn v10_migration_discards_v1_sync_metadata_but_preserves_domain_rows() {
-    let file = NamedTempFile::new().unwrap();
-    create_v10_database(file.path(), &KEY);
-    let list = sample_list("a0");
-    let mut task = sample_task();
-    task.list_id = list.id;
-    task.parent_task_id = None;
-    {
-        let connection = open_raw_encrypted(file.path(), &KEY);
-        let mut repository = SqliteListRepository::new(connection);
-        repository.insert(list.clone()).unwrap();
-    }
-    {
-        let connection = open_raw_encrypted(file.path(), &KEY);
-        insert_task_pre_v20(&connection, &task);
-    }
-    {
-        let connection = open_raw_encrypted(file.path(), &KEY);
-        connection
-            .execute(
-                "INSERT INTO sync_outbox (
-                         record_id, collection, hlc, deleted, blob, created_at
-                     ) VALUES (?1, 'tasks', 'v1-hlc', 0, X'01', 1)",
-                [task.id.to_string()],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO sync_record_states (
-                         record_id, collection, plaintext_json, updated_at
-                     ) VALUES (?1, 'tasks', '{}', 1)",
-                [task.id.to_string()],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO sync_cursors (name, seq, updated_at)
-                     VALUES ('default', 99, 1)",
-                [],
-            )
-            .unwrap();
-    }
-
-    let connection = open_encrypted(file.path(), &KEY).unwrap();
-    let mut migrated_list = list.clone();
-    migrated_list.sort_order = "00000000000000010000000000000000".to_string();
-    let mut migrated_task = task.clone();
-    migrated_task.sort_order = "00000000000000010000000000000000".to_string();
-    assert_eq!(
-        read_user_version(&connection).unwrap(),
-        LATEST_SCHEMA_VERSION
-    );
-    assert_eq!(get_list_on(&connection, list.id).unwrap(), migrated_list);
-    assert_eq!(get_task_on(&connection, task.id).unwrap(), migrated_task);
-    let repository = SqliteSyncStateRepository::new(connection);
-    assert!(repository.list_outbox_heads(10).unwrap().is_empty());
-    assert_eq!(repository.get_record_state("tasks", task.id).unwrap(), None);
-    assert_eq!(repository.get_cursor("default").unwrap(), None);
-}
-
-#[test]
 fn local_crypto_cache_roundtrips_tenant_root_and_rejects_rebinding() {
     let file = NamedTempFile::new().unwrap();
     let connection = open_encrypted(file.path(), &KEY).unwrap();
@@ -535,10 +326,8 @@ fn timer_v18_repository_restores_singleton_and_rejects_immutable_conflicts() {
     {
         let connection = open_encrypted(file.path(), &KEY).unwrap();
         assert_eq!(
-            connection
-                .query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
-                .unwrap(),
-            LATEST_SCHEMA_VERSION
+            latest_migration_version(&connection),
+            LATEST_MIGRATION_VERSION
         );
         let mut repository = SqliteTimerSessionRepository::new(connection);
         repository.start_active(active.clone(), 1_200).unwrap();
@@ -906,24 +695,6 @@ fn task_67_reports_10000_task_storage_timings() {
         "FTS5 prefix query".to_string(),
     ));
 
-    let migration_file = NamedTempFile::new().unwrap();
-    let migration_seed =
-        seed_performance_database(migration_file.path(), &KEY, PerformanceSeedSchema::V3);
-    assert_eq!(migration_seed.task_count, 10_000);
-    let started = std::time::Instant::now();
-    let migrated_connection = open_encrypted(migration_file.path(), &KEY).unwrap();
-    let migration_elapsed_ms = started.elapsed().as_millis();
-    assert_eq!(
-        read_user_version(&migrated_connection).unwrap(),
-        LATEST_SCHEMA_VERSION
-    );
-    rows.push((
-        "migration(v3_to_latest)",
-        migration_seed.task_count,
-        migration_elapsed_ms,
-        "v4 FTS backfill + v5-v7 migrations".to_string(),
-    ));
-
     let started = std::time::Instant::now();
     {
         let connection = open_encrypted(file.path(), &KEY).unwrap();
@@ -996,14 +767,14 @@ fn fts5_search_works_after_reopening_encrypted_database() {
 }
 
 #[test]
-fn new_database_is_created_via_baseline_and_migrated_to_latest_schema() {
+fn new_database_is_created_from_initial_migration() {
     let file = NamedTempFile::new().unwrap();
 
     let connection = open_encrypted(file.path(), &KEY).unwrap();
 
     assert_eq!(
-        read_user_version(&connection).unwrap(),
-        LATEST_SCHEMA_VERSION
+        latest_migration_version(&connection),
+        LATEST_MIGRATION_VERSION
     );
     assert_eq!(
         archived_at_column(&connection),
@@ -1048,115 +819,6 @@ fn new_database_is_created_via_baseline_and_migrated_to_latest_schema() {
     assert_eq!(
         sync_cursor_column(&connection, "updated_at"),
         Some(("INTEGER".to_string(), 1))
-    );
-}
-
-#[test]
-fn v1_database_migrates_to_latest_and_preserves_existing_data() {
-    let file = NamedTempFile::new().unwrap();
-    create_baseline_v1_database(file.path(), &KEY, true);
-
-    let mut list = sample_list("a0");
-    list.is_default = true;
-    let mut task = sample_task();
-    task.list_id = list.id;
-    {
-        let connection = open_raw_encrypted(file.path(), &KEY);
-        insert_baseline_v1_list(&connection, &list);
-    }
-    {
-        let connection = open_raw_encrypted(file.path(), &KEY);
-        insert_task_pre_v20(&connection, &task);
-    }
-
-    let connection = open_encrypted(file.path(), &KEY).unwrap();
-    list.sort_order = "00000000000000010000000000000000".to_string();
-    task.sort_order = "00000000000000010000000000000000".to_string();
-
-    assert_eq!(
-        read_user_version(&connection).unwrap(),
-        LATEST_SCHEMA_VERSION
-    );
-    assert_eq!(
-        archived_at_column(&connection),
-        Some(("INTEGER".to_string(), 0))
-    );
-    assert_eq!(
-        is_default_column(&connection),
-        Some(("INTEGER".to_string(), 1, "0".to_string()))
-    );
-    assert_eq!(
-        setting_column(&connection, "value"),
-        Some(("TEXT".to_string(), 1))
-    );
-    assert_eq!(
-        reminder_column(&connection, "created_at"),
-        Some(("INTEGER".to_string(), 1))
-    );
-    assert_eq!(
-        sync_outbox_column(&connection, "blob"),
-        Some(("BLOB".to_string(), 0))
-    );
-    assert_eq!(
-        sync_cursor_column(&connection, "name"),
-        Some(("TEXT".to_string(), 1))
-    );
-    assert_eq!(
-        SqliteListRepository::new(open_encrypted(file.path(), &KEY).unwrap())
-            .get(list.id)
-            .unwrap(),
-        list
-    );
-    assert_eq!(
-        SqliteTaskRepository::new(open_encrypted(file.path(), &KEY).unwrap())
-            .get(task.id)
-            .unwrap(),
-        task
-    );
-}
-
-#[test]
-fn legacy_user_version_zero_v1_database_is_promoted_and_migrated() {
-    let file = NamedTempFile::new().unwrap();
-    create_baseline_v1_database(file.path(), &KEY, false);
-
-    let mut list = sample_list("legacy");
-    list.is_default = true;
-    {
-        let connection = open_raw_encrypted(file.path(), &KEY);
-        insert_baseline_v1_list(&connection, &list);
-    }
-
-    let connection = open_encrypted(file.path(), &KEY).unwrap();
-    list.sort_order = "00000000000000010000000000000000".to_string();
-
-    assert_eq!(
-        read_user_version(&connection).unwrap(),
-        LATEST_SCHEMA_VERSION
-    );
-    assert_eq!(
-        archived_at_column(&connection),
-        Some(("INTEGER".to_string(), 0))
-    );
-    assert_eq!(
-        is_default_column(&connection),
-        Some(("INTEGER".to_string(), 1, "0".to_string()))
-    );
-    assert_eq!(
-        setting_column(&connection, "updated_at"),
-        Some(("INTEGER".to_string(), 1))
-    );
-    assert_eq!(
-        reminder_column(&connection, "task_id"),
-        Some(("TEXT".to_string(), 1))
-    );
-    assert_eq!(
-        sync_outbox_column(&connection, "revision_hlc"),
-        Some(("TEXT".to_string(), 1))
-    );
-    assert_eq!(
-        SqliteListRepository::new(connection).get(list.id).unwrap(),
-        list
     );
 }
 

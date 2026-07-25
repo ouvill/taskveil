@@ -53,8 +53,8 @@ pub enum StorageError {
     },
     #[error("database cannot be read with the provided SQLCipher key")]
     InvalidDatabaseKey,
-    #[error("unsupported database schema version: found {found}, latest supported {latest}")]
-    UnsupportedSchemaVersion { found: i32, latest: i32 },
+    #[error("unsupported database migration version: found {found}, latest supported {latest}")]
+    UnsupportedMigrationVersion { found: i32, latest: i32 },
     #[error("incompatible database schema: {0}")]
     IncompatibleSchema(String),
     #[error(

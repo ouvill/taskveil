@@ -122,7 +122,7 @@ task-74後にmacOS署名付きbuildとKeychainゼロプロンプト、iOS Simula
 
 - 新規インストールでローカルDBが作成される。
 - アプリ再起動後もSQLCipher DBを開ける。
-- 旧バージョンからの `PRAGMA user_version` migrationが成功する。
+- 配布済みclient versionからのchecksum ledger migrationが成功する。
 - 新DBを旧アプリで開かない方針が維持される。
 - ローカル通知、登録/ログイン、2台同期が確認できる。
 - 購入・復元後のentitlementと同期認可が一致し、失効時もlocal-only機能が継続する。
@@ -130,6 +130,6 @@ task-74後にmacOS署名付きbuildとKeychainゼロプロンプト、iOS Simula
 
 ## 7. 差し戻し
 
-クライアントリリースはDB migrationを伴う場合があるため、単純な旧バージョン配布で戻せるとは限らない。新しいDBを旧アプリが開けない場合は仕様通り `UnsupportedSchemaVersion` になる。
+クライアントリリースはDB migrationを伴う場合があるため、単純な旧バージョン配布で戻せるとは限らない。新しいDBを旧アプリが開けない場合は仕様通り`UnsupportedMigrationVersion`になる。
 
 差し戻しが必要な場合は、DBを戻すのではなく、修正版を前方互換で出すことを基本にする。ストアでの公開停止、段階配信停止、緊急審査依頼は人間判断とする。

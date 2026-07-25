@@ -66,16 +66,9 @@ pub use traits::{
 };
 pub use transaction::{OwnedSqliteWriteTx, SqliteWriteTx};
 
-#[cfg(test)]
-use migrations::{
-    add_lists_archived_at, add_lists_is_default, add_local_crypto_cache, add_performance_indexes,
-    add_reminders, add_settings, add_sync_outbox_and_cursors, add_sync_record_states,
-    apply_pending_migrations, rebuild_tasks_fts_triggers, set_user_version, table_columns,
-    table_columns_raw, Migration, BASELINE_SCHEMA_VERSION, SCHEMA,
-};
-use migrations::{ensure_schema, read_user_version, MIGRATIONS};
+use migrations::{ensure_schema, MIGRATIONS};
 
-pub const LATEST_SCHEMA_VERSION: i32 = 22;
+pub const LATEST_MIGRATION_VERSION: i32 = 1;
 const LOCAL_DB_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[cfg(test)]
