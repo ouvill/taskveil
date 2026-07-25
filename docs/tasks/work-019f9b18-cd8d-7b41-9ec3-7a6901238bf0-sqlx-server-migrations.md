@@ -125,6 +125,11 @@ local development、SQLx prepareでmigration管理方式が一致していない
 - 品質ゲート: `cargo fmt --all -- --check`、`cargo clippy --workspace -- -D warnings`、
   `cargo test --workspace`、client boundary check / test、`bash -n tool/dev_server.sh`、
   `git diff --check`が成功した。Flutter変更はないためFlutter gateは対象外とした。
+- CI安定化: SQLx metadata checkが、Postgres公式imageの初期化中に起動する
+  Unix socket専用temporary serverをreadyと誤認するraceを修正した。SQLxが実際に使う
+  published TCP endpointへ接続できるまで待機し、起動失敗時はcontainer state、Postgres
+  log、SQLx接続エラーを出力する。fresh containerで`./tool/sqlx_prepare.sh --check`を
+  連続3回実行して成功した。
 - Commit: `d087af069a778038ded14be556ae56864b11f1d0`
 - 未解決: なし
 
