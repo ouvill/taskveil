@@ -120,7 +120,7 @@ schemaを変えずにこの集合だけをmoduleへ移し、後続の保守性�
 - 証拠: `cargo fmt --all -- --check`、storage対象clippy、storage test
   （89 passed、manual performance test 1 ignored）、workspace all-target check、
   client boundary check 2種、`git diff --check` が成功した。
-- Commit: 未コミット
+- Commit: f6514c67982c
 - 未解決: なし
 
 ### 独立検証
