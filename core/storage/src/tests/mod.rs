@@ -189,140 +189,14 @@ fn live_record_state(
     }
 }
 
-fn open_raw_encrypted(path: &Path, key: &[u8; 32]) -> Connection {
-    let connection = Connection::open(path).unwrap();
-    apply_sqlcipher_key(&connection, key).unwrap();
+fn latest_migration_version(connection: &Connection) -> i32 {
     connection
-}
-
-fn create_baseline_v1_database(path: &Path, key: &[u8; 32], set_version: bool) {
-    let mut connection = open_raw_encrypted(path, key);
-    let transaction = connection.transaction().unwrap();
-    transaction.execute_batch(SCHEMA).unwrap();
-    if set_version {
-        set_user_version(&transaction, BASELINE_SCHEMA_VERSION).unwrap();
-    }
-    transaction.commit().unwrap();
-}
-
-fn insert_baseline_v1_list(connection: &Connection, list: &List) {
-    connection
-        .execute(
-            "INSERT INTO lists (
-                    id, name, color, icon, org_id, sort_order, created_at, updated_at
-                ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
-                )",
-            params![
-                list.id.to_string(),
-                list.name,
-                list.color,
-                list.icon,
-                Option::<String>::None,
-                list.sort_order,
-                list.created_at,
-                list.updated_at,
-            ],
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM _taskveil_migrations",
+            [],
+            |row| row.get(0),
         )
-        .unwrap();
-}
-
-fn create_v2_database(path: &Path, key: &[u8; 32]) {
-    create_baseline_v1_database(path, key, true);
-    let mut connection = open_raw_encrypted(path, key);
-    let transaction = connection.transaction().unwrap();
-    add_lists_archived_at(&transaction).unwrap();
-    set_user_version(&transaction, 2).unwrap();
-    transaction.commit().unwrap();
-}
-
-fn create_v3_database(path: &Path, key: &[u8; 32]) {
-    create_v2_database(path, key);
-    let mut connection = open_raw_encrypted(path, key);
-    let transaction = connection.transaction().unwrap();
-    add_lists_is_default(&transaction).unwrap();
-    set_user_version(&transaction, 3).unwrap();
-    transaction.commit().unwrap();
-}
-
-fn create_v4_database(path: &Path, key: &[u8; 32]) {
-    create_v3_database(path, key);
-    let mut connection = open_raw_encrypted(path, key);
-    let transaction = connection.transaction().unwrap();
-    rebuild_tasks_fts_triggers(&transaction).unwrap();
-    set_user_version(&transaction, 4).unwrap();
-    transaction.commit().unwrap();
-}
-
-fn create_v5_database(path: &Path, key: &[u8; 32]) {
-    create_v4_database(path, key);
-    let mut connection = open_raw_encrypted(path, key);
-    let transaction = connection.transaction().unwrap();
-    add_settings(&transaction).unwrap();
-    set_user_version(&transaction, 5).unwrap();
-    transaction.commit().unwrap();
-}
-
-fn create_v6_database(path: &Path, key: &[u8; 32]) {
-    create_v5_database(path, key);
-    let mut connection = open_raw_encrypted(path, key);
-    let transaction = connection.transaction().unwrap();
-    add_reminders(&transaction).unwrap();
-    set_user_version(&transaction, 6).unwrap();
-    transaction.commit().unwrap();
-}
-
-fn create_v7_database(path: &Path, key: &[u8; 32]) {
-    create_v6_database(path, key);
-    let mut connection = open_raw_encrypted(path, key);
-    let transaction = connection.transaction().unwrap();
-    add_performance_indexes(&transaction).unwrap();
-    set_user_version(&transaction, 7).unwrap();
-    transaction.commit().unwrap();
-}
-
-fn create_v9_database(path: &Path, key: &[u8; 32]) {
-    create_v7_database(path, key);
-    let mut connection = open_raw_encrypted(path, key);
-    let transaction = connection.transaction().unwrap();
-    add_sync_outbox_and_cursors(&transaction).unwrap();
-    set_user_version(&transaction, 8).unwrap();
-    add_sync_record_states(&transaction).unwrap();
-    set_user_version(&transaction, 9).unwrap();
-    transaction.commit().unwrap();
-}
-
-fn create_v10_database(path: &Path, key: &[u8; 32]) {
-    create_v9_database(path, key);
-    let mut connection = open_raw_encrypted(path, key);
-    let transaction = connection.transaction().unwrap();
-    add_local_crypto_cache(&transaction).unwrap();
-    set_user_version(&transaction, 10).unwrap();
-    transaction.commit().unwrap();
-}
-
-fn insert_v2_list(connection: &Connection, list: &List) {
-    connection
-        .execute(
-            "INSERT INTO lists (
-                    id, name, color, icon, org_id, sort_order, archived_at,
-                    created_at, updated_at
-                ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9
-                )",
-            params![
-                list.id.to_string(),
-                list.name,
-                list.color,
-                list.icon,
-                Option::<String>::None,
-                list.sort_order,
-                list.archived_at,
-                list.created_at,
-                list.updated_at,
-            ],
-        )
-        .unwrap();
+        .unwrap()
 }
 
 fn list_column(connection: &Connection, target: &str) -> Option<(String, i32, String)> {
@@ -351,21 +225,6 @@ fn archived_at_column(connection: &Connection) -> Option<(String, i32)> {
 
 fn is_default_column(connection: &Connection) -> Option<(String, i32, String)> {
     list_column(connection, "is_default")
-}
-
-fn index_exists(connection: &Connection, index_name: &str) -> bool {
-    connection
-        .query_row(
-            "SELECT 1
-                 FROM sqlite_master
-                 WHERE type = 'index' AND name = ?1
-                 LIMIT 1",
-            [index_name],
-            |_| Ok(()),
-        )
-        .optional()
-        .unwrap()
-        .is_some()
 }
 
 fn setting_column(connection: &Connection, target: &str) -> Option<(String, i32)> {
@@ -448,28 +307,9 @@ fn sync_cursor_column(connection: &Connection, target: &str) -> Option<(String, 
         })
 }
 
-fn count_archived_at_columns(connection: &Connection) -> usize {
-    let mut statement = connection.prepare("PRAGMA table_info(lists)").unwrap();
-    statement
-        .query_map([], |row| row.get::<_, String>(1))
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap()
-        .into_iter()
-        .filter(|column| column == "archived_at")
-        .count()
-}
-
-fn schema_version(connection: &Connection) -> i32 {
-    connection
-        .query_row("PRAGMA schema_version", [], |row| row.get(0))
-        .unwrap()
-}
-
 #[derive(Clone, Copy)]
 enum PerformanceSeedSchema {
     Latest,
-    V3,
 }
 
 struct PerformanceSeed {
@@ -489,11 +329,6 @@ fn seed_performance_database(
     match schema {
         PerformanceSeedSchema::Latest => {
             let mut connection = open_encrypted(path, key).unwrap();
-            insert_performance_seed(&mut connection)
-        }
-        PerformanceSeedSchema::V3 => {
-            create_v3_database(path, key);
-            let mut connection = open_raw_encrypted(path, key);
             insert_performance_seed(&mut connection)
         }
     }
@@ -650,24 +485,6 @@ fn insert_performance_seed(connection: &mut Connection) -> PerformanceSeed {
         due_task_count,
         closed_task_count,
     }
-}
-
-fn default_list_ids(connection: &Connection) -> Vec<String> {
-    let mut statement = connection
-        .prepare("SELECT id FROM lists WHERE is_default = 1 ORDER BY id ASC")
-        .unwrap();
-    statement
-        .query_map([], |row| row.get::<_, String>(0))
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap()
-}
-
-fn failing_archived_at_migration(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
-    transaction.execute_batch(
-        "ALTER TABLE lists ADD COLUMN archived_at INTEGER NULL;
-             SELECT value FROM missing_failure_injection_table;",
-    )
 }
 
 mod database;

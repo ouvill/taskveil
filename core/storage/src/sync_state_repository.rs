@@ -266,12 +266,6 @@ pub(super) fn resolve_list_alias_on(
     connection: &Connection,
     list_id: Uuid,
 ) -> Result<Uuid, StorageError> {
-    // Raw legacy fixtures may use repositories before `open_encrypted` runs
-    // migrations. Alias resolution is a no-op until schema v19 exists; a v19
-    // database missing the table still fails below as incompatible storage.
-    if read_user_version(connection)? < 19 {
-        return Ok(list_id);
-    }
     let canonical = connection
         .query_row(
             "SELECT canonical_list_id FROM list_aliases WHERE alias_list_id = ?1",
