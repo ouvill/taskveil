@@ -6,7 +6,7 @@ set -euo pipefail
 # What it does:
 #   1. Reuses or creates Docker container "taskveil-dev-postgres".
 #   2. Publishes Postgres on the first free localhost port from 5432 upward.
-#   3. Applies server/migrations/*.sql before starting the Rust server.
+#   3. Runs the same SQLx migration binary used by deployment.
 #   4. Runs `cargo run -p taskveil-server --bin taskveil-server` with the runtime URL.
 #
 # Stop the Rust server with Ctrl-C.
@@ -96,13 +96,9 @@ until docker exec "$CONTAINER_NAME" pg_isready -U "$POSTGRES_USER" -d "$POSTGRES
   sleep 1
 done
 
-echo "Applying SQL migrations..."
-for migration in server/migrations/*.sql; do
-  echo "  $migration"
-  docker exec -i "$CONTAINER_NAME" \
-    psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
-    < "$migration" >/dev/null
-done
+echo "Applying pending SQL migrations..."
+DATABASE_MIGRATION_URL="postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:${POSTGRES_PORT}/${POSTGRES_DB}" \
+  cargo run -p taskveil-server --bin taskveil-migrate
 
 if ! docker exec "$CONTAINER_NAME" \
   psql -tAc "SELECT 1 FROM pg_roles WHERE rolname = '${RUNTIME_USER}'" \

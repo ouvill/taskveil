@@ -1,6 +1,8 @@
-use sqlx_core::raw_sql::raw_sql;
+use sqlx::migrate::{MigrateError, Migrator};
 use sqlx_postgres::{PgPool, PgPoolOptions, PgTransaction};
 use uuid::Uuid;
+
+static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 pub async fn connect(database_url: &str) -> Result<PgPool, sqlx_core::Error> {
     PgPoolOptions::new()
@@ -63,62 +65,8 @@ pub async fn connect_application(database_url: &str) -> Result<PgPool, sqlx_core
     Ok(pool)
 }
 
-pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx_core::Error> {
-    raw_sql(include_str!("../migrations/202607080001_sync_server.sql"))
-        .execute(pool)
-        .await?;
-    raw_sql(include_str!(
-        "../migrations/202607080002_account_key_bundles.sql"
-    ))
-    .execute(pool)
-    .await?;
-    raw_sql(include_str!(
-        "../migrations/202607100001_sync_protocol_v2.sql"
-    ))
-    .execute(pool)
-    .await?;
-    raw_sql(include_str!("../migrations/202607100002_fuzzy_resync.sql"))
-        .execute(pool)
-        .await?;
-    raw_sql(include_str!("../migrations/202607110001_rls_hardening.sql"))
-        .execute(pool)
-        .await?;
-    raw_sql(include_str!(
-        "../migrations/202607110002_archive_first_deletion.sql"
-    ))
-    .execute(pool)
-    .await?;
-    raw_sql(include_str!(
-        "../migrations/202607130001_timer_sessions.sql"
-    ))
-    .execute(pool)
-    .await?;
-    raw_sql(include_str!(
-        "../migrations/202607160001_billing_foundation.sql"
-    ))
-    .execute(pool)
-    .await?;
-    raw_sql(include_str!(
-        "../migrations/202607170001_template_recurrence.sql"
-    ))
-    .execute(pool)
-    .await?;
-    raw_sql(include_str!(
-        "../migrations/202607240001_tenant_record_keys.sql"
-    ))
-    .execute(pool)
-    .await?;
-    raw_sql(include_str!(
-        "../migrations/202607240002_task_series_domain.sql"
-    ))
-    .execute(pool)
-    .await?;
-    raw_sql(include_str!(
-        "../migrations/202607250001_standard_session_management.sql"
-    ))
-    .execute(pool)
-    .await?;
-    Ok(())
+pub async fn run_migrations(pool: &PgPool) -> Result<(), MigrateError> {
+    MIGRATOR.run(pool).await
 }
 
 pub async fn begin_tenant_transaction(

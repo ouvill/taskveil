@@ -67,7 +67,7 @@ iana-time-zone = "0.1"
 http = "1"
 hmac = "0.12.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-native-roots", "postgres", "macros", "uuid", "chrono"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-native-roots", "postgres", "macros", "migrate", "uuid", "chrono"] }
 sqlx-core = { version = "0.9.0", default-features = false, features = ["_rt-tokio", "_tls-rustls-ring-native-roots"] }
 sqlx-postgres = { version = "0.9.0", default-features = false, features = ["uuid", "chrono"] }
 testcontainers-modules = { version = "0.15.0", features = ["postgres"] }
