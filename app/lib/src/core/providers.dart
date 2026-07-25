@@ -400,24 +400,30 @@ class BillingNotifier extends AsyncNotifier<BillingUiState?> {
     if (!account.loggedIn) return null;
     final bridge = ref.watch(bridgeServiceProvider);
     final cached = await bridge.getCachedBilling();
+    late final BillingStateDto entitlement;
     try {
-      return await _load(await bridge.billingBootstrap());
+      entitlement = await bridge.billingBootstrap();
     } catch (_) {
       if (cached == null) rethrow;
       return BillingUiState(entitlement: cached, products: const []);
     }
+    return _withStoreCatalog(entitlement);
   }
 
-  Future<BillingUiState> _load(BillingStateDto entitlement) async {
+  Future<BillingUiState> _withStoreCatalog(BillingStateDto entitlement) async {
     final store = ref.read(billingStoreProvider);
-    await store.configure(
-      appUserId: entitlement.providerAppUserId,
-      environment: entitlement.environment,
-    );
-    return BillingUiState(
-      entitlement: entitlement,
-      products: await store.products(),
-    );
+    try {
+      await store.configure(
+        appUserId: entitlement.providerAppUserId,
+        environment: entitlement.environment,
+      );
+      return BillingUiState(
+        entitlement: entitlement,
+        products: await store.products(),
+      );
+    } catch (_) {
+      return BillingUiState(entitlement: entitlement, products: const []);
+    }
   }
 
   Future<void> refreshFromServer() async {
@@ -425,9 +431,10 @@ class BillingNotifier extends AsyncNotifier<BillingUiState?> {
     if (current == null) return;
     state = AsyncData(current.copyWith(busy: true));
     try {
-      state = AsyncData(
-        await _load(await ref.read(bridgeServiceProvider).refreshBilling()),
-      );
+      final entitlement = await ref
+          .read(bridgeServiceProvider)
+          .refreshBilling();
+      state = AsyncData(await _withStoreCatalog(entitlement));
     } catch (error, stackTrace) {
       state = AsyncError(error, stackTrace);
     }
@@ -455,7 +462,7 @@ class BillingNotifier extends AsyncNotifier<BillingUiState?> {
         final entitlement = await ref
             .read(bridgeServiceProvider)
             .refreshBilling();
-        final refreshed = await _load(entitlement);
+        final refreshed = await _withStoreCatalog(entitlement);
         state = AsyncData(refreshed.copyWith(lastOutcome: outcome));
       } else {
         state = AsyncData(current.copyWith(busy: false, lastOutcome: outcome));

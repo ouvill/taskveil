@@ -1171,7 +1171,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get billingSubscriptionBody =>
-      'ProではE2EE同期と暗号化クラウドバックアップを利用できます。Appleのサブスクリプション画面からいつでも解約できます。';
+      'ProではE2EE同期と暗号化クラウドバックアップを利用できます。端末のサブスクリプション設定からいつでも解約できます。';
 
   @override
   String get billingStatusFree => 'Free';
@@ -1213,7 +1213,7 @@ class AppLocalizationsJa extends AppLocalizations {
   String get billingCancelled => '購入をキャンセルしました。';
 
   @override
-  String get billingPending => '購入を処理中です。Appleで支払いが確認されるとProが有効になります。';
+  String get billingPending => '購入を処理中です。アプリストアで支払いが確認されるとProが有効になります。';
 
   @override
   String get billingFailed => '購入を完了できませんでした。';

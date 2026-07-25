@@ -94,6 +94,15 @@ void main() {
     },
   );
 
+  test('permission request failures degrade to a denied result', () async {
+    final service = ReminderNotificationService(
+      bridge: FakeBridgeService(),
+      gateway: _FakeReminderNotificationGateway(permissionRequestFails: true),
+    );
+
+    expect(await service.requestPermissions(), isFalse);
+  });
+
   test('multiple reminders update and delete independently', () async {
     final fakeBridge = FakeBridgeService();
     final gateway = _FakeReminderNotificationGateway();
@@ -490,9 +499,13 @@ const _content = ReminderNotificationContent(
 );
 
 class _FakeReminderNotificationGateway implements ReminderNotificationGateway {
-  _FakeReminderNotificationGateway({this.permissionsGranted = true});
+  _FakeReminderNotificationGateway({
+    this.permissionsGranted = true,
+    this.permissionRequestFails = false,
+  });
 
   final bool permissionsGranted;
+  final bool permissionRequestFails;
   final scheduled = <_ScheduledReminder>[];
   final cancelled = <int>[];
   int permissionRequests = 0;
@@ -510,6 +523,9 @@ class _FakeReminderNotificationGateway implements ReminderNotificationGateway {
   @override
   Future<bool> requestPermissions() async {
     permissionRequests += 1;
+    if (permissionRequestFails) {
+      throw StateError('notification permission request failed');
+    }
     return permissionsGranted;
   }
 

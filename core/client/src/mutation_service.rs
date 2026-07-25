@@ -30,7 +30,7 @@ pub enum ClientError {
     Recurrence(#[from] taskveil_domain::RecurrenceError),
     #[error("local sync preparation failed")]
     Sync,
-    #[error("profile I/O failed")]
+    #[error("profile I/O failed: {0}")]
     Io(#[source] std::io::Error),
     #[error("profile secret store failed")]
     KeyStore(#[source] taskveil_crypto::KeyStoreError),
