@@ -109,7 +109,7 @@ milestone: maintenance
   - `flutter test`: 280件成功、visual QA harness 1件skip。
   - `sh app/tool/check_hardcoded_strings.sh`: 成功。
   - `git diff --check`: 成功。
-- Commit: 未コミット
+- Commit: 7b381de
 - 未解決: なし
 
 ### 独立検証
