@@ -1,7 +1,7 @@
 ---
 id: 019f9a15-77c3-72d2-9fdd-c865a6089769
 title: FRB contract coverage and private conversion extraction
-status: active
+status: done
 lane: standard
 milestone: maintenance
 ---
@@ -128,3 +128,32 @@ encoding helperを同居させている。また、公開関数のsignatureを�
 - Commit: この変更を含むcommit（hashはGit履歴を正本とする）。
 - 未解決事項: 独立検証は未実施。実装者による完了判定とstatus変更は行わず、
   front matterは `active` のままとする。
+
+### 独立検証
+
+- 検証日: 2026-07-26
+- 判定: 合格
+- 対象Commit: `8836f6b0af131c354395fdc58d972f7f90c77f71`
+- 契約確認: `api.rs` の公開関数73件と
+  `all_public_function_signatures_remain_stable` のassertion 73件を機械照合し、
+  未参照0件を確認した。実装前後の公開関数名、および公開struct / enum名にも
+  差分はなく、公開DTO・公開関数は引き続き `api.rs` に置かれている。
+- helper確認: 旧 `api.rs` の `client_result` から `json_string` までの41関数と、
+  新しい `api/conversions.rs` の41関数を、`pub(super)` とrustfmtの折り返しを
+  正規化して比較し、処理内容の差分がないことを確認した。新moduleのvisibilityは
+  parent限定である。
+- FRB / Dart確認: `flutter_rust_bridge_codegen 2.12.0` で実装commit後に再生成し、
+  `git status --short` と生成物diffが空であることを確認した。実装commitの生成物差分は
+  `app/lib/src/rust/api.dart` のprivate helper ignored metadata comment 1行の削除だけで、
+  その他のRust / Dart / C生成物に差分はない。`flutter_rust_bridge.yaml` の
+  `rust_input: crate::api` と公開Dart宣言・signatureは不変である。
+- 品質ゲート: `cargo fmt --all -- --check`、
+  `cargo clippy -p taskveil_app_bridge --all-targets -- -D warnings`、
+  `cargo test -p taskveil_app_bridge`（3件成功）、
+  `cargo check --workspace --all-targets`、`flutter analyze`（`No issues found`）、
+  `sh app/tool/check_client_boundaries.sh`、
+  `sh app/tool/test_client_boundaries.sh`、`git diff --check`が成功した。
+- 環境条件: sandbox内のFRB codegenとFlutter解析はFlutter SDK cacheへの
+  書き込み制約で失敗したため、承認済み外部実行で同じコマンドを再実行して成功した。
+- 検証者: 実装を担当していない独立レビューエージェント
+- 指摘・未解決事項: なし。
