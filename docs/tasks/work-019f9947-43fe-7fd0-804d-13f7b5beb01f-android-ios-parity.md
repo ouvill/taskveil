@@ -1,7 +1,7 @@
 ---
 id: 019f9947-43fe-7fd0-804d-13f7b5beb01f
 title: Android and iOS implementation parity
-status: active
+status: done
 lane: critical
 milestone: P2-M5
 ---
@@ -64,15 +64,15 @@ Androidで、iOSと共通のローカル機能に加え、通知権限、リマ�
 
 ## 6. 受け入れ基準
 
-- [ ] Android 13+でリマインダー保存時に通知権限を要求し、拒否時に通知登録成功と誤認しない。
-- [ ] Android通知から1時間スヌーズactionを実行でき、iOSと同じdomain処理へ到達する。
-- [ ] Androidで端末再起動・アプリ更新後に将来のscheduled notificationを再登録できるmanifest構成である。
-- [ ] RevenueCatがiOS / Androidそれぞれのbuild-time public SDK keyで構成され、Androidで購入・復元・管理URLを呼べる。
-- [ ] 既存のserver-side entitlement、custom App User ID、environment分離、local-only継続契約を変更しない。
-- [ ] Android EmulatorでKeystore、Device Key rotation / DB reopen、通知permission / scheduling、主要ローカル画面を検証する。
-- [ ] Androidのアカウント登録・ログイン・同期について、自動E2Eまたは外部serverが必要な明示的release gateとして再現可能に記録する。
-- [ ] Android arm64 release APKとiOS arm64 no-codesign release buildが継続して成功する。
-- [ ] repositoryの共通品質ゲートと独立検証が合格する。
+- [x] Android 13+でリマインダー保存時に通知権限を要求し、拒否時に通知登録成功と誤認しない。
+- [x] Android通知から1時間スヌーズactionを実行でき、iOSと同じdomain処理へ到達する。
+- [x] Androidで端末再起動・アプリ更新後に将来のscheduled notificationを再登録できるmanifest構成である。
+- [x] RevenueCatがiOS / Androidそれぞれのbuild-time public SDK keyで構成され、Androidで購入・復元・管理URLを呼べる。
+- [x] 既存のserver-side entitlement、custom App User ID、environment分離、local-only継続契約を変更しない。
+- [x] Android EmulatorでKeystore、Device Key rotation / DB reopen、通知permission / scheduling、主要ローカル画面を検証する。
+- [x] Androidのアカウント登録・ログイン・同期について、自動E2Eまたは外部serverが必要な明示的release gateとして再現可能に記録する。
+- [x] Android arm64 release APKとiOS arm64 no-codesign release buildが継続して成功する。
+- [x] repositoryの共通品質ゲートと独立検証が合格する。
 
 ## 7. 制約・注意事項
 
@@ -89,3 +89,31 @@ Androidで、iOSと共通のローカル機能に加え、通知権限、リマ�
 - 実行した品質ゲート、APK / iOS build、Emulator対象API / device profile
 - 外部Google Play / RevenueCat設定とsandbox購入に残る人間作業
 - 独立検証結果、commit、未解決事項
+
+## 9. 完了報告
+
+### 実装
+
+- Android 13+の通知権限要求、拒否・例外時のfail-closed、リマインダーの1時間スヌーズaction、boot / app update後の再登録receiverを実装した。通知payloadには既存の安全な識別子だけを保持する。
+- RevenueCatのpublic SDK keyをiOS / Android別build-time環境変数へ分離し、Androidでも購入、復元、商品取得、Google Play管理URLを同じclient境界で扱えるようにした。store catalogの初期化失敗時も最後に検証済みのserver entitlement表示を失わない。
+- Android production署名を明示的なstore buildだけに限定し、設定不足時のdebug署名fallbackを廃止した。CIはunsigned arm64 APK / AAB、Rust JNI同梱、AAB署名なしを検証する。
+- Android上のprofile session排他を`flock(LOCK_EX | LOCK_NB)`でcross-processに維持し、プロセス再起動を跨ぐ同一profileのDevice Key rotationとSQLCipher reopenを自動検証した。
+- 隔離したPostgres / Taskveil serverを使い、profile Aの登録・push、profile Bのlogin・pull・push、profile Aの再pullを行うAndroid Emulator E2Eを追加した。本番データや課金bypassは使わない。
+
+### 検証
+
+- Pixel 10 / Android 17 API 37 / arm64-v8a Emulatorで、Keystore instrumentation、通知permission / scheduling、主要UI、A→B→A同期、プロセス再起動を跨ぐDevice Key rotation 2回とSQLCipher reopenを一括実行し、PASSした。
+- `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`: PASS。
+- app Rust release build、`flutter analyze`、`flutter test`（294 PASS、visual QA 1件は既定skip）、hardcoded strings / client boundary checks、shell syntax、`git diff --check`: PASS。
+- Android署名fail-safe回帰、arm64 release APK（44.3 MB）、AAB（42.4 MB）、両方のRust JNI同梱、検証用AABの署名なし: PASS。
+- iOS arm64 no-codesign release build: PASS（Runner.app 78.0 MB）。
+- 2名の独立レビューで、cross-process lockとrotation継続性に関する指摘2件を修正後に再検証した。最終統合差分にP1 / P2 / P3の未解消指摘はない。
+
+### Commit
+
+- `9ad1370 feat(android): reach iOS implementation parity`
+
+### 未解決事項
+
+- Google Play Console / RevenueCat dashboardへの実商品・credential設定、Google Play sandboxの実購入・復元・失効証跡は外部release gateとして残る。
+- Android接続実機での通知、再起動後再登録、Google Play購入、別端末同期の最終確認はstore提出前に行う。Emulatorやunit testを実決済成功の代替にはしない。
