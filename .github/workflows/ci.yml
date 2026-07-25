@@ -300,7 +300,7 @@ jobs:
           key: ${{ steps.flutter-rust-cache.outputs.cache-primary-key }}
 
   android-build:
-    name: Android arm64 release APK
+    name: Android arm64 release package validation
     needs: changes
     if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     runs-on: ubuntu-24.04
@@ -356,14 +356,29 @@ jobs:
         working-directory: app/rust_builder/cargokit/build_tool
         run: dart pub get
 
-      - name: Build Android arm64 release APK
-        working-directory: app
-        run: flutter build apk --release --target-platform android-arm64
+      - name: Verify Android release signing fail-safe
+        run: sh tool/ci/test_android_release_signing.sh
 
-      - name: Verify Android arm64 JNI library
+      - name: Build unsigned Android arm64 release APK and AAB
+        working-directory: app
+        env:
+          TASKVEIL_ANDROID_STORE_BUILD: "false"
         run: |
-          test -s app/build/app/outputs/flutter-apk/app-release.apk
-          unzip -p app/build/app/outputs/flutter-apk/app-release.apk lib/arm64-v8a/libtaskveil_app_bridge.so > /dev/null
+          flutter build apk --release --target-platform android-arm64
+          flutter build appbundle --release --target-platform android-arm64
+
+      - name: Verify Android arm64 packages and JNI library
+        run: |
+          apk=app/build/app/outputs/flutter-apk/app-release.apk
+          aab=app/build/app/outputs/bundle/release/app-release.aab
+          test -s "$apk"
+          test -s "$aab"
+          unzip -p "$apk" lib/arm64-v8a/libtaskveil_app_bridge.so > /dev/null
+          unzip -p "$aab" base/lib/arm64-v8a/libtaskveil_app_bridge.so > /dev/null
+          if unzip -Z1 "$aab" | grep -Eq '^META-INF/[^/]+\.(RSA|DSA|EC|SF)$'; then
+            echo "CI validation AAB must not carry a store signature." >&2
+            exit 1
+          fi
 
       - name: Save Android build cache
         if: success() && github.event_name != 'pull_request' && steps.android-build-cache.outputs.cache-hit != 'true'

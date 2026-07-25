@@ -27,7 +27,8 @@ Final pricing, trial details, eligibility rules, and launch timing are not commi
 
 Taskveil will not make its first general release until the billing foundation is complete. Store submission, release tags, and public launch announcements remain blocked until all of the following are verified:
 
-- iOS purchase and restore work end to end in a store sandbox.
+- iOS App Store and Android Google Play purchase and restore work end to end
+  in their respective store sandboxes.
 - Receipts, transactions, and billing events are verified on the server and applied idempotently.
 - Server-side entitlements are the authorization source for paid sync access.
 - Expiration and revocation stop server-backed paid capabilities without making local data unreadable or uneditable.
@@ -51,6 +52,16 @@ The technical design must preserve these boundaries:
 Billing prompts should be quiet and contextual. Appropriate moments include setting up an additional device, enabling encrypted cloud backup, or accepting an organization invitation. Taskveil should avoid aggressive paywalls, surprise restrictions on existing local functionality, and sales notifications.
 
 Cancellation and renewal flows should be clear. If a paid capability expires, Taskveil may stop server-backed sync or sharing, but local data remains available on the device.
+
+The mobile client uses RevenueCat on iOS and Android. Each build receives the
+platform-specific public SDK key through
+`TASKVEIL_REVENUECAT_IOS_API_KEY` or
+`TASKVEIL_REVENUECAT_ANDROID_API_KEY`, together with
+`TASKVEIL_REVENUECAT_ENVIRONMENT`. The environment must match the server-issued
+billing environment. Purchase, restore, and the store-provided subscription
+management URL are available on both mobile platforms. Desktop builds do not
+initialize a billing provider; their local features remain available, while
+subscription changes must be made on a supported mobile platform.
 
 ## Non-Public Detail
 

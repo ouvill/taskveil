@@ -2218,7 +2218,7 @@ abstract class AppLocalizations {
   /// No description provided for @billingSubscriptionBody.
   ///
   /// In en, this message translates to:
-  /// **'Pro includes E2EE sync and encrypted cloud backup. Cancel anytime in Apple subscriptions.'**
+  /// **'Pro includes E2EE sync and encrypted cloud backup. Cancel anytime in your device\'s subscription settings.'**
   String get billingSubscriptionBody;
 
   /// No description provided for @billingStatusFree.
@@ -2302,7 +2302,7 @@ abstract class AppLocalizations {
   /// No description provided for @billingPending.
   ///
   /// In en, this message translates to:
-  /// **'Purchase pending. Pro will activate after Apple confirms payment.'**
+  /// **'Purchase pending. Pro will activate after your app store confirms payment.'**
   String get billingPending;
 
   /// No description provided for @billingFailed.
