@@ -60,17 +60,6 @@ CONTAINER_ID="$(docker run --rm -d \
   -e "POSTGRES_DB=$POSTGRES_DB" \
   "$POSTGRES_IMAGE")"
 
-for _ in $(seq 1 60); do
-  if docker exec "$CONTAINER_ID" \
-    pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null 2>&1; then
-    break
-  fi
-  sleep 1
-done
-
-docker exec "$CONTAINER_ID" \
-  pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null
-
 POSTGRES_PORT="$(
   docker inspect \
     -f '{{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort}}' \
@@ -78,6 +67,36 @@ POSTGRES_PORT="$(
 )"
 export DATABASE_URL="postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:${POSTGRES_PORT}/${POSTGRES_DB}?sslmode=disable"
 unset SQLX_OFFLINE
+
+DATABASE_READY=false
+for _ in $(seq 1 60); do
+  # The official Postgres image starts a temporary Unix-socket-only server
+  # while initializing the data directory. An in-container pg_isready can
+  # observe that server before the published TCP endpoint used by SQLx exists.
+  if cargo sqlx migrate info --source server/migrations >/dev/null 2>&1; then
+    DATABASE_READY=true
+    break
+  fi
+
+  CONTAINER_RUNNING="$(
+    docker inspect -f '{{.State.Running}}' "$CONTAINER_ID" 2>/dev/null || true
+  )"
+  if [ "$CONTAINER_RUNNING" != "true" ]; then
+    break
+  fi
+  sleep 1
+done
+
+if [ "$DATABASE_READY" != "true" ]; then
+  echo "Postgres did not become reachable through $DATABASE_URL" >&2
+  docker inspect \
+    -f 'container status={{.State.Status}} exit_code={{.State.ExitCode}} error={{.State.Error}}' \
+    "$CONTAINER_ID" >&2 || true
+  docker logs "$CONTAINER_ID" >&2 || true
+  echo "SQLx connection check:" >&2
+  cargo sqlx migrate info --source server/migrations >&2 || true
+  exit 1
+fi
 
 cargo sqlx migrate run --source server/migrations
 if [ "$CHECK_MODE" = true ]; then

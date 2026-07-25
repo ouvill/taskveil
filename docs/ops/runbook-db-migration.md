@@ -4,12 +4,13 @@ TaskveilサーバーDBのマイグレーション手順を定義する。2026-07
 
 ## 1. 対象
 
-対象は [`server/migrations/`](../../server/migrations/) 配下のPostgres SQLである。`taskveil-migrate` binaryだけが`DATABASE_MIGRATION_URL`のowner接続で`server/src/db.rs`の`run_migrations`を実行する。通常の`taskveil-server`は起動時migrationを行わず、owner credentialを受け取らない。ローカル開発では [`tool/dev_server.sh`](../../tool/dev_server.sh) が同じSQLを `psql` で適用する。
+対象は [`server/migrations/`](../../server/migrations/) 配下のPostgres SQLである。`taskveil-migrate` binaryだけが`DATABASE_MIGRATION_URL`のowner接続でSQLx `Migrator`を実行する。SQLxは`_sqlx_migrations`へversion、description、適用日時、成功状態、checksum、実行時間を記録し、適用済みchecksumを検証して未適用migrationだけを順に実行する。`_sqlx_migrations`と一度限りのreset marker `taskveil_schema_migrations`はowner-onlyとし、`taskveil_app`へ権限を付与しない。通常の`taskveil-server`は起動時migrationを行わず、owner credentialを受け取らない。ローカル開発でも [`tool/dev_server.sh`](../../tool/dev_server.sh) が同じ`taskveil-migrate` binaryを使用する。
 
 ## 2. 方針
 
 - マイグレーションは前方のみとする。
 - ロールバックはDBを巻き戻すのではなく、修正SQLまたは修正版アプリで前方に進める。
+- 適用済みmigration fileは変更しない。SQLxのchecksum不一致は失敗として扱い、修正は新しいmigrationへ追加する。
 - 互換性が必要な変更はexpand-contractを使う。
 - 既存データ削除、列の意味変更、型変更、NOT NULL追加、unique制約追加は、リハーサルと影響確認なしに行わない。
 - E2EEデータの暗号blobをサーバー側で復号する作業は行わない。
@@ -31,7 +32,7 @@ contractは公開リポジトリだけで判断しない。実稼働状況、ク
 ./tool/dev_server.sh
 ```
 
-スクリプトは `taskveil-dev-postgres` を起動し、`server/migrations/*.sql` を順に適用してからサーバーを起動する。
+スクリプトは `taskveil-dev-postgres` を起動し、`taskveil-migrate`で未適用migrationを適用してからサーバーを起動する。
 
 クリーンDBで試す場合:
 
@@ -55,9 +56,9 @@ curl -i http://localhost:8080/health
 ## 5. SQL追加時の確認項目
 
 - ファイル名は既存の連番形式に合わせる。例: `YYYYMMDDNNNN_description.sql`
-- `CREATE TABLE IF NOT EXISTS` や `CREATE INDEX IF NOT EXISTS` のように再適用耐性を持たせる。
-- `ALTER TABLE ... ADD COLUMN` は既存環境で再適用されない前提を確認する。必要なら存在確認つきSQLにする。
-- `server/src/db.rs` の `run_migrations` に新SQLを追加する。
+- 既存環境へ一度だけ適用される前提でSQLを書く。deploy retryとtransaction rollback後の再実行も考慮する。
+- 適用済みmigration fileは変更せず、新しい連番fileを追加する。
+- `server/src/db.rs`へのfilename列挙は不要である。`server/build.rs`がmigration directoryの変更を検知し、compile-time `Migrator`へ埋め込む。
 - `server/tests/` にmigration後の基本CRUDまたはAPIテストを追加する。
 - `tool/dev_server.sh` でローカル適用できることを確認する。
 
@@ -73,6 +74,8 @@ DATABASE_MIGRATION_URL="<NEON_MIGRATION_DATABASE_URL>" \
 ```
 
 deployはLambda alias切替よりmigrationを先に行い、失敗時はaliasを動かさない。SQLは再実行で壊れない設計にする。通常query用の `DATABASE_URL` は別のruntime loginを使用し、migrationが作成するNOLOGIN group role `taskveil_app`のmemberにする。
+
+SQLx ledger導入前に全SQLを適用済みのDBでは、最初の`taskveil-migrate`だけが現行SQLをSQLx経由で再適用して`_sqlx_migrations`を作成する。現行migration集合はこのbootstrap再適用をintegration testで検証する。以後はledgerにないmigrationだけが実行される。`202607240002_task_series_domain.sql`の独自`taskveil_schema_migrations` markerは、zero-knowledge serverで変換できない旧recordの削除をbootstrap時に繰り返さないため維持する。
 
 ```sql
 -- role名とpasswordは運用環境で管理する。実値をpublic repoへ記録しない。
@@ -106,6 +109,8 @@ APIレベルの検証:
 - push/pullがtenant分離、batch上限、blob上限、未来HLC拒否を維持している。
 - 削除tombstoneの空blob方針が維持されている。
 - application poolの `current_user` がnon-owner runtime loginで、`rolsuper = false`、`rolbypassrls = false`、`rolinherit = true`、`pg_has_role(current_user, 'taskveil_app', 'USAGE') = true`である。
+- `_sqlx_migrations`の全行が`success = true`で、repository内のmigration versionとchecksumが一致する。
+- runtime loginが`_sqlx_migrations`と`taskveil_schema_migrations`のSELECT / INSERT / UPDATE / DELETE権限を持たない。
 - `tenants`、`tenant_members`、`tenant_seq`、tenant key generation / recipient、sync record/historyでRLSと`FORCE ROW LEVEL SECURITY`が有効である。List key tableは存在しない。
 - tenant contextなしでは0行、tenant contextありでは当該tenantだけが見え、別tenantへのinsert/update/deleteが拒否または0件になる。
 
