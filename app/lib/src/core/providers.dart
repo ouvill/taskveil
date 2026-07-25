@@ -44,6 +44,46 @@ final bridgeServiceProvider = Provider<BridgeService>(
   (ref) => const FrbBridgeService(),
 );
 
+/// Feature-scoped views of the aggregate bridge.
+///
+/// Each provider derives from [bridgeServiceProvider], so existing tests can
+/// keep overriding the aggregate while feature code depends on a narrow port.
+final accountBridgeProvider = Provider<AccountBridgePort>(
+  (ref) => ref.watch(bridgeServiceProvider),
+);
+
+final syncBridgeProvider = Provider<SyncBridgePort>(
+  (ref) => ref.watch(bridgeServiceProvider),
+);
+
+final billingBridgeProvider = Provider<BillingBridgePort>(
+  (ref) => ref.watch(bridgeServiceProvider),
+);
+
+final listBridgeProvider = Provider<ListBridgePort>(
+  (ref) => ref.watch(bridgeServiceProvider),
+);
+
+final templateBridgeProvider = Provider<TemplateBridgePort>(
+  (ref) => ref.watch(bridgeServiceProvider),
+);
+
+final taskBridgeProvider = Provider<TaskBridgePort>(
+  (ref) => ref.watch(bridgeServiceProvider),
+);
+
+final timerBridgeProvider = Provider<TimerBridgePort>(
+  (ref) => ref.watch(bridgeServiceProvider),
+);
+
+final settingsBridgeProvider = Provider<SettingsBridgePort>(
+  (ref) => ref.watch(bridgeServiceProvider),
+);
+
+final reminderBridgeProvider = Provider<ReminderBridgePort>(
+  (ref) => ref.watch(bridgeServiceProvider),
+);
+
 final billingStoreProvider = Provider<BillingStore>(
   (ref) => RevenueCatBillingStore(),
 );
@@ -245,7 +285,7 @@ const _supportedCalendarWeekStarts = {
 class SettingsRepository {
   SettingsRepository(this._bridge);
 
-  final BridgeService _bridge;
+  final SettingsBridgePort _bridge;
 
   Future<String?> getSetting(String key) {
     return _bridge.getSetting(key: key);
@@ -294,13 +334,11 @@ class SettingsRepository {
 class SyncServerUrlNotifier extends AsyncNotifier<String> {
   @override
   FutureOr<String> build() {
-    return ref.watch(bridgeServiceProvider).getSyncServerUrl();
+    return ref.watch(syncBridgeProvider).getSyncServerUrl();
   }
 
   Future<void> setServerUrl(String serverUrl) async {
-    await ref
-        .read(bridgeServiceProvider)
-        .setSyncServerUrl(serverUrl: serverUrl);
+    await ref.read(syncBridgeProvider).setSyncServerUrl(serverUrl: serverUrl);
     ref.invalidateSelf();
   }
 }
@@ -313,7 +351,7 @@ final syncServerUrlProvider =
 class AccountNotifier extends AsyncNotifier<AccountSessionStateDto> {
   @override
   FutureOr<AccountSessionStateDto> build() {
-    return ref.watch(bridgeServiceProvider).getAccountSessionState();
+    return ref.watch(accountBridgeProvider).getAccountSessionState();
   }
 
   Future<AccountAuthResultDto> register({
@@ -323,7 +361,7 @@ class AccountNotifier extends AsyncNotifier<AccountSessionStateDto> {
     String? deviceName,
   }) async {
     final result = await ref
-        .read(bridgeServiceProvider)
+        .read(accountBridgeProvider)
         .accountRegister(
           email: email,
           password: password,
@@ -342,7 +380,7 @@ class AccountNotifier extends AsyncNotifier<AccountSessionStateDto> {
     String? deviceName,
   }) async {
     final result = await ref
-        .read(bridgeServiceProvider)
+        .read(accountBridgeProvider)
         .accountLogin(
           email: email,
           password: password,
@@ -355,7 +393,7 @@ class AccountNotifier extends AsyncNotifier<AccountSessionStateDto> {
   }
 
   Future<void> logout() async {
-    final bridge = ref.read(bridgeServiceProvider);
+    final bridge = ref.read(accountBridgeProvider);
     await bridge.accountLogout();
     await ref.read(billingStoreProvider).accountLoggedOut();
     state = AsyncData(await bridge.getAccountSessionState());
@@ -398,7 +436,7 @@ class BillingNotifier extends AsyncNotifier<BillingUiState?> {
   Future<BillingUiState?> build() async {
     final account = await ref.watch(accountProvider.future);
     if (!account.loggedIn) return null;
-    final bridge = ref.watch(bridgeServiceProvider);
+    final bridge = ref.watch(billingBridgeProvider);
     final cached = await bridge.getCachedBilling();
     late final BillingStateDto entitlement;
     try {
@@ -432,7 +470,7 @@ class BillingNotifier extends AsyncNotifier<BillingUiState?> {
     state = AsyncData(current.copyWith(busy: true));
     try {
       final entitlement = await ref
-          .read(bridgeServiceProvider)
+          .read(billingBridgeProvider)
           .refreshBilling();
       state = AsyncData(await _withStoreCatalog(entitlement));
     } catch (error, stackTrace) {
@@ -460,7 +498,7 @@ class BillingNotifier extends AsyncNotifier<BillingUiState?> {
       final outcome = await action();
       if (outcome == BillingPurchaseOutcome.purchased) {
         final entitlement = await ref
-            .read(bridgeServiceProvider)
+            .read(billingBridgeProvider)
             .refreshBilling();
         final refreshed = await _withStoreCatalog(entitlement);
         state = AsyncData(refreshed.copyWith(lastOutcome: outcome));
@@ -492,7 +530,7 @@ class SyncStatusNotifier extends AsyncNotifier<SyncStatusDto> {
     _scheduler?.dispose();
     _foreground = ref.read(appForegroundProvider);
     final account = await ref.watch(accountProvider.future);
-    final bridge = ref.watch(bridgeServiceProvider);
+    final bridge = ref.watch(syncBridgeProvider);
     final status = await bridge.getSyncStatus();
     if (account.loggedIn) {
       // Bootstrap the server snapshot and provider identity at startup/login,
@@ -543,14 +581,12 @@ class SyncStatusNotifier extends AsyncNotifier<SyncStatusDto> {
       state = AsyncData(_copySyncStatus(current, running: true));
     }
     try {
-      final outcome = await ref.read(bridgeServiceProvider).syncNowOutcome();
+      final outcome = await ref.read(syncBridgeProvider).syncNowOutcome();
       switch (outcome) {
         case SyncNowOutcomeDto_Synced(:final status):
           state = AsyncData(status);
         case SyncNowOutcomeDto_BillingRequired():
-          final recovered = await ref
-              .read(bridgeServiceProvider)
-              .getSyncStatus();
+          final recovered = await ref.read(syncBridgeProvider).getSyncStatus();
           state = AsyncData(_copySyncStatus(recovered, running: false));
           ref.invalidate(billingProvider);
           return;
@@ -571,7 +607,7 @@ class SyncStatusNotifier extends AsyncNotifier<SyncStatusDto> {
         state = AsyncData(_copySyncStatus(failed, running: false));
       }
       try {
-        final recovered = await ref.read(bridgeServiceProvider).getSyncStatus();
+        final recovered = await ref.read(syncBridgeProvider).getSyncStatus();
         state = AsyncData(_copySyncStatus(recovered, running: false));
       } catch (_) {
         // Preserve the non-running snapshot above when status recovery also
@@ -672,7 +708,7 @@ SyncStatusDto _copySyncStatus(SyncStatusDto status, {bool? running}) {
 }
 
 final settingsRepositoryProvider = Provider<SettingsRepository>(
-  (ref) => SettingsRepository(ref.watch(bridgeServiceProvider)),
+  (ref) => SettingsRepository(ref.watch(settingsBridgeProvider)),
 );
 
 final reminderNotificationGatewayProvider =
@@ -1497,12 +1533,12 @@ class TaskRemindersNotifier extends AsyncNotifier<List<ReminderDto>> {
 
   @override
   FutureOr<List<ReminderDto>> build() {
-    return ref.watch(bridgeServiceProvider).getTaskReminders(taskId: taskId);
+    return ref.watch(reminderBridgeProvider).getTaskReminders(taskId: taskId);
   }
 
   Future<ReminderDto> createReminder(int remindAt) async {
     final reminder = await ref
-        .read(bridgeServiceProvider)
+        .read(reminderBridgeProvider)
         .createTaskReminder(taskId: taskId, remindAt: remindAt);
     ref.invalidateSelf();
     return reminder;
@@ -1510,7 +1546,7 @@ class TaskRemindersNotifier extends AsyncNotifier<List<ReminderDto>> {
 
   Future<ReminderDto> updateReminder(String reminderId, int remindAt) async {
     final reminder = await ref
-        .read(bridgeServiceProvider)
+        .read(reminderBridgeProvider)
         .updateReminder(reminderId: reminderId, remindAt: remindAt);
     ref.invalidateSelf();
     return reminder;
@@ -1518,7 +1554,7 @@ class TaskRemindersNotifier extends AsyncNotifier<List<ReminderDto>> {
 
   Future<ReminderDto> deleteReminder(String reminderId) async {
     final reminder = await ref
-        .read(bridgeServiceProvider)
+        .read(reminderBridgeProvider)
         .deleteReminder(reminderId: reminderId);
     await ref
         .read(reminderNotificationServiceProvider)
@@ -1529,7 +1565,7 @@ class TaskRemindersNotifier extends AsyncNotifier<List<ReminderDto>> {
 
   Future<List<ReminderDto>> clearReminders() async {
     final reminders = await ref
-        .read(bridgeServiceProvider)
+        .read(reminderBridgeProvider)
         .clearTaskReminders(taskId: taskId);
     await ref
         .read(reminderNotificationServiceProvider)
