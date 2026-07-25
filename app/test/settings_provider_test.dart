@@ -1,10 +1,24 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:taskveil/src/core/bridge_ports.dart';
 import 'package:taskveil/src/core/providers.dart';
 
 import 'support/fake_bridge_service.dart';
 
 void main() {
+  test('uiModeProvider can override only the settings bridge port', () async {
+    final settings = _InMemorySettingsPort();
+    final container = ProviderContainer(
+      overrides: [settingsBridgeProvider.overrideWithValue(settings)],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(uiModeProvider.notifier).setUiMode(advancedUiMode);
+
+    expect(settings.values[uiModeSettingKey], advancedUiMode);
+    expect(await container.read(uiModeProvider.future), advancedUiMode);
+  });
+
   test('uiModeProvider defaults to simple when unset', () async {
     final fake = FakeBridgeService();
     final container = ProviderContainer(
@@ -101,4 +115,16 @@ void main() {
       expect(await fake.getSetting(key: onboardingCompletedSettingKey), '1');
     },
   );
+}
+
+class _InMemorySettingsPort implements SettingsBridgePort {
+  final values = <String, String>{};
+
+  @override
+  Future<String?> getSetting({required String key}) async => values[key];
+
+  @override
+  Future<void> setSetting({required String key, required String value}) async {
+    values[key] = value;
+  }
 }

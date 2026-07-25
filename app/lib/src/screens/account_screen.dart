@@ -280,7 +280,7 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
     await showDialog<void>(
       context: context,
       builder: (context) =>
-          _OrganizationSafetyDialog(bridge: ref.read(bridgeServiceProvider)),
+          _OrganizationSafetyDialog(bridge: ref.read(accountBridgeProvider)),
     );
   }
 }
@@ -879,7 +879,7 @@ class _BillingProductTile extends StatelessWidget {
 class _OrganizationSafetyDialog extends StatefulWidget {
   const _OrganizationSafetyDialog({required this.bridge});
 
-  final BridgeService bridge;
+  final AccountBridgePort bridge;
 
   @override
   State<_OrganizationSafetyDialog> createState() =>
