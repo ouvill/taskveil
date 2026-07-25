@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT sf.user_id\n         FROM access_tokens at\n         JOIN session_families sf ON sf.id = at.family_id\n         JOIN devices d ON d.id = sf.device_id AND d.user_id = sf.user_id\n         WHERE at.token_hash = $1 AND at.expires_at > now()\n           AND at.revoked_at IS NULL\n           AND sf.revoked_at IS NULL AND sf.absolute_expires_at > now()\n           AND d.revoked_at IS NULL\n           AND d.certificate IS NOT NULL AND d.certified_at IS NOT NULL\n           AND (d.key_expires_at IS NULL OR d.key_expires_at > now())",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "session_families",
+            "name": "user_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f02a26b0ee7d17b7de6d7b6518802c4c6229db70c3a91baa509993acc0d2c9a2"
+}

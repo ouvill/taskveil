@@ -251,13 +251,25 @@ impl Fixture {
         .execute(&pool)
         .await
         .unwrap();
+        let family_id = Uuid::now_v7();
         query(
-            "INSERT INTO sessions (id, user_id, device_id, token_hash, expires_at)
-             VALUES ($1, $2, $3, $4, $5)",
+            "INSERT INTO session_families
+                (id, user_id, device_id, client_id, absolute_expires_at)
+             VALUES ($1, $2, $3, 'taskveil-native', $4)",
         )
-        .bind(Uuid::now_v7())
+        .bind(family_id)
         .bind(user_id)
         .bind(device_id)
+        .bind(Utc::now() + Duration::days(1))
+        .execute(&pool)
+        .await
+        .unwrap();
+        query(
+            "INSERT INTO access_tokens (id, family_id, token_hash, expires_at)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(family_id)
         .bind(Sha256::digest(token.as_bytes()).to_vec())
         .bind(Utc::now() + Duration::days(1))
         .execute(&pool)
@@ -271,6 +283,7 @@ impl Fixture {
         let app = build_router(AppState {
             pool: application_pool.clone(),
             billing: BillingService::unavailable_for_tests(BillingEnvironment::Sandbox),
+            auth_issuer: "http://localhost".to_string(),
         });
         Self {
             app,
@@ -458,7 +471,7 @@ async fn production_pull_refreshes_once_then_atomically_applies_and_quarantines(
         server_url,
         tenant_id: fixture.tenant_id,
         device_id: "quarantine-client".to_string(),
-        session_token: fixture.token.clone(),
+        session_token: taskveil_sync::SecretString::new(fixture.token.clone()),
         manifest_auth_key: test_manifest_auth_key(),
         keys: LocalSyncKeys {
             tenant_id: fixture.tenant_id,
@@ -949,7 +962,7 @@ async fn replay_reaches_missing_key_after_one_hundred_corrupt_quarantine_rows() 
             server_url,
             tenant_id: fixture.tenant_id,
             device_id: "starvation-client".to_string(),
-            session_token: fixture.token,
+            session_token: taskveil_sync::SecretString::new(fixture.token),
             manifest_auth_key: test_manifest_auth_key(),
             keys: LocalSyncKeys {
                 tenant_id: fixture.tenant_id,
@@ -1043,7 +1056,7 @@ async fn unsupported_preflight_durably_blocks_outbox_before_push() {
         server_url: format!("http://{address}"),
         tenant_id,
         device_id: "upgrade-client".to_string(),
-        session_token: "token".to_string(),
+        session_token: taskveil_sync::SecretString::new("token"),
         manifest_auth_key: test_manifest_auth_key(),
         keys: LocalSyncKeys::default(),
     };
@@ -1146,7 +1159,7 @@ async fn continuity_410_still_enforces_protocol_upgrade_before_resync() {
                 server_url: format!("http://{address}"),
                 tenant_id,
                 device_id: "continuity-upgrade-client".to_string(),
-                session_token: "token".to_string(),
+                session_token: taskveil_sync::SecretString::new("token"),
                 manifest_auth_key: test_manifest_auth_key(),
                 keys: LocalSyncKeys::default(),
             },
@@ -1321,7 +1334,7 @@ async fn gc_horizon_full_resync_closes_before_local_outbox_push() {
             server_url: format!("http://{address}"),
             tenant_id: proof_tenant_id,
             device_id: "horizon-client".to_string(),
-            session_token: "token".to_string(),
+            session_token: taskveil_sync::SecretString::new("token"),
             manifest_auth_key: test_manifest_auth_key(),
             keys: LocalSyncKeys {
                 tenant_id: proof_tenant_id,
@@ -1462,7 +1475,7 @@ async fn closure_ack_failure_keeps_local_commit_and_retries_before_push() {
         server_url: format!("http://{address}"),
         tenant_id,
         device_id: "ack-crash".to_string(),
-        session_token: "token".to_string(),
+        session_token: taskveil_sync::SecretString::new("token"),
         manifest_auth_key: test_manifest_auth_key(),
         keys: LocalSyncKeys {
             tenant_id,
@@ -1573,7 +1586,7 @@ async fn production_two_client_distinct_fields_and_due_mode_conflict_converge() 
         server_url: server_url.clone(),
         tenant_id: fixture.tenant_id,
         device_id: device_id.to_string(),
-        session_token: fixture.token.clone(),
+        session_token: taskveil_sync::SecretString::new(fixture.token.clone()),
         manifest_auth_key: test_manifest_auth_key(),
         keys,
     };
@@ -1781,7 +1794,7 @@ async fn equal_rank_clients_converge_then_common_reorder_rebalances_and_reconver
         server_url: server_url.clone(),
         tenant_id: fixture.tenant_id,
         device_id: device_id.to_string(),
-        session_token: fixture.token.clone(),
+        session_token: taskveil_sync::SecretString::new(fixture.token.clone()),
         manifest_auth_key: test_manifest_auth_key(),
         keys,
     };
@@ -2039,7 +2052,7 @@ async fn remote_list_deletion_rehomes_offline_descendant_and_republishes_it() {
             server_url,
             tenant_id: fixture.tenant_id,
             device_id: "offline-descendant".to_string(),
-            session_token: fixture.token.clone(),
+            session_token: taskveil_sync::SecretString::new(fixture.token.clone()),
             manifest_auth_key: test_manifest_auth_key(),
             keys,
         },

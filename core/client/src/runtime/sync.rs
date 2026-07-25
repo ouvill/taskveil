@@ -1,13 +1,11 @@
 use std::{future::Future, pin::Pin};
 
-use taskveil_crypto::{load_account_secret, AccountSecretKind};
 use taskveil_storage::{TaskRepository, TemplateSeriesRepository, TimerSessionRepository};
 use taskveil_sync::{
     account::{AccountClient, AccountClientError},
     ActiveSyncContext, LocalSyncAtomicStore, LocalSyncKeys, LocalSyncStore,
     LocalSyncWriteTransaction, SyncKeyRefresher, SyncRunSummary,
 };
-use zeroize::Zeroizing;
 
 use super::{
     now_ms, CryptoRuntimeState, SyncRuntimeState, TaskveilClient, INITIAL_BACKFILL_CURSOR_NAME,
@@ -43,30 +41,10 @@ impl TaskveilClient {
         let result = self.run_sync_now().await;
         drop(operation);
         let timestamp = now_ms()?;
+        let logged_in = self.has_active_sync_context();
         let mut state = self.sync_state()?;
-        state.running = false;
-        let mut entitlement_required = false;
-        match result {
-            Ok(summary) => {
-                state.last_success_at = Some(timestamp);
-                state.last_error = None;
-                state.last_summary = summary;
-            }
-            Err(ClientError::UpgradeRequired) => {
-                state.last_failure_at = Some(timestamp);
-                state.last_error = Some("upgrade required".to_string());
-            }
-            Err(ClientError::EntitlementRequired) => {
-                state.last_failure_at = Some(timestamp);
-                state.last_error = Some("entitlement required".to_string());
-                entitlement_required = true;
-            }
-            Err(_) => {
-                state.last_failure_at = Some(timestamp);
-                state.last_error = Some("sync failed".to_string());
-            }
-        }
-        let status = sync_status(true, &state);
+        let (status, entitlement_required) =
+            finish_sync_run(logged_in, &mut state, result, timestamp);
         drop(state);
         drop(running);
         if entitlement_required {
@@ -79,18 +57,27 @@ impl TaskveilClient {
     /// Fetches a short-lived foreground realtime ticket without exposing the
     /// session token or tenant/device identifiers to the frontend.
     pub async fn realtime_ticket(&self) -> Result<RealtimeTicket, ClientError> {
+        let _operation = self.begin_operation()?;
+        self.access_token(false).await?;
         let context = self
             .active_sync_context()
             .ok_or(ClientError::AccountRequest)?;
         let client =
             AccountClient::new(&context.server_url).map_err(|_| ClientError::AccountRequest)?;
-        let response = client
-            .realtime_ticket(context.tenant_id, &context.session_token)
+        let response = match client
+            .realtime_ticket(context.tenant_id, context.session_token.expose())
             .await
-            .map_err(|error| match error {
-                AccountClientError::EntitlementRequired => ClientError::EntitlementRequired,
-                _ => ClientError::AccountRequest,
-            })?;
+        {
+            Err(AccountClientError::Server(401)) => {
+                let token = self.access_token(true).await?;
+                client.realtime_ticket(context.tenant_id, &token).await
+            }
+            result => result,
+        }
+        .map_err(|error| match error {
+            AccountClientError::EntitlementRequired => ClientError::EntitlementRequired,
+            _ => ClientError::AccountRequest,
+        })?;
         Ok(RealtimeTicket {
             websocket_url: response.websocket_url,
             ticket: response.ticket,
@@ -100,9 +87,20 @@ impl TaskveilClient {
 
     async fn run_sync_now(&self) -> Result<SyncRunSummary, ClientError> {
         self.ensure_account_runtime_restored()?;
+        self.access_token(false).await?;
+        match self.run_sync_attempt().await {
+            Err(error) if error == "unauthorized" => {
+                self.access_token(true).await?;
+                self.run_sync_attempt().await.map_err(map_sync_run_error)
+            }
+            result => result.map_err(map_sync_run_error),
+        }
+    }
+
+    async fn run_sync_attempt(&self) -> Result<SyncRunSummary, String> {
         let context = self
             .active_sync_context()
-            .ok_or(ClientError::AccountRequest)?;
+            .ok_or_else(|| "sync failed".to_string())?;
         let mut store = SqliteSyncStore::new_secret(self.db_path.clone(), self.db_key());
         let mut clock = || now_ms().map_err(|error| error.to_string());
         let mut key_refresher = ProductionKeyRefresher { client: self };
@@ -117,18 +115,12 @@ impl TaskveilClient {
             &mut key_refresher,
             &mut pre_push,
         )
-        .await
-        .map_err(|error| {
-            if error == "upgrade required" {
-                ClientError::UpgradeRequired
-            } else if error == "entitlement required" {
-                ClientError::EntitlementRequired
-            } else {
-                ClientError::SyncRun
-            }
-        })?;
+        .await?;
         loop {
-            let settlement = self.settle_after_sync_pull(now_ms()?)?;
+            let timestamp = now_ms().map_err(|_| "sync failed".to_string())?;
+            let settlement = self
+                .settle_after_sync_pull(timestamp)
+                .map_err(|_| "sync failed".to_string())?;
             if !settlement.outbox_changed {
                 break;
             }
@@ -139,16 +131,7 @@ impl TaskveilClient {
                 &mut key_refresher,
                 &mut pre_push,
             )
-            .await
-            .map_err(|error| {
-                if error == "upgrade required" {
-                    ClientError::UpgradeRequired
-                } else if error == "entitlement required" {
-                    ClientError::EntitlementRequired
-                } else {
-                    ClientError::SyncRun
-                }
-            })?;
+            .await?;
             add_sync_summary(&mut summary, &follow_up);
             if !settlement.has_more {
                 break;
@@ -222,16 +205,15 @@ impl TaskveilClient {
         let manifest_auth_key =
             taskveil_sync::derive_personal_manifest_auth_key(crypto.master_key()).ok()?;
         drop(account);
-        let token = load_account_secret(&self.db_dir, AccountSecretKind::SessionToken).ok()??;
-        let token = Zeroizing::new(String::from_utf8(token).ok()?);
+        let token = self.current_access_token()?;
         if token.is_empty() || !session.logged_in {
             return None;
         }
         Some(ActiveSyncContext {
-            server_url: self.sync_server_url().ok()?,
+            server_url: token.issuer.clone(),
             tenant_id,
             device_id,
-            session_token: token.to_string(),
+            session_token: taskveil_sync::SecretString::new(token.to_string()),
             keys,
             manifest_auth_key,
         })
@@ -255,6 +237,14 @@ fn add_sync_summary(target: &mut SyncRunSummary, value: &SyncRunSummary) {
     target.missing_key_quarantined_count += value.missing_key_quarantined_count;
     target.corruption_quarantined_count += value.corruption_quarantined_count;
     target.resolved_quarantine_count += value.resolved_quarantine_count;
+}
+
+fn map_sync_run_error(error: String) -> ClientError {
+    match error.as_str() {
+        "upgrade required" => ClientError::UpgradeRequired,
+        "entitlement required" => ClientError::EntitlementRequired,
+        _ => ClientError::SyncRun,
+    }
 }
 
 struct SyncRunningGuard<'a> {
@@ -305,5 +295,58 @@ fn sync_status(logged_in: bool, state: &SyncRuntimeState) -> SyncStatus {
         corruption_quarantined_count: state.last_summary.corruption_quarantined_count,
         resolved_quarantine_count: state.last_summary.resolved_quarantine_count,
         upgrade_required: state.last_error.as_deref() == Some("upgrade required"),
+    }
+}
+
+fn finish_sync_run(
+    logged_in: bool,
+    state: &mut SyncRuntimeState,
+    result: Result<SyncRunSummary, ClientError>,
+    timestamp: i64,
+) -> (SyncStatus, bool) {
+    state.running = false;
+    let mut entitlement_required = false;
+    match result {
+        Ok(summary) => {
+            state.last_success_at = Some(timestamp);
+            state.last_error = None;
+            state.last_summary = summary;
+        }
+        Err(ClientError::UpgradeRequired) => {
+            state.last_failure_at = Some(timestamp);
+            state.last_error = Some("upgrade required".to_string());
+        }
+        Err(ClientError::EntitlementRequired) => {
+            state.last_failure_at = Some(timestamp);
+            state.last_error = Some("entitlement required".to_string());
+            entitlement_required = true;
+        }
+        Err(_) => {
+            state.last_failure_at = Some(timestamp);
+            state.last_error = Some("sync failed".to_string());
+        }
+    }
+    (sync_status(logged_in, state), entitlement_required)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalidated_session_is_reported_logged_out_after_failed_sync() {
+        let mut state = SyncRuntimeState {
+            running: true,
+            ..SyncRuntimeState::default()
+        };
+
+        let (status, entitlement_required) =
+            finish_sync_run(false, &mut state, Err(ClientError::AccountRequest), 42);
+
+        assert!(!status.logged_in);
+        assert!(!status.running);
+        assert_eq!(status.last_failure_at, Some(42));
+        assert_eq!(status.last_error.as_deref(), Some("sync failed"));
+        assert!(!entitlement_required);
     }
 }

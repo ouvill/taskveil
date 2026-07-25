@@ -789,6 +789,8 @@ pub async fn set_device_key_expiry(
         "UPDATE devices d
          SET key_expires_at = $3
          WHERE d.id = $2
+           AND d.certificate IS NOT NULL
+           AND d.certified_at IS NOT NULL
            AND EXISTS (
                SELECT 1 FROM tenant_members m
                WHERE m.tenant_id = $1 AND m.user_id = d.user_id
@@ -807,7 +809,10 @@ pub async fn set_device_key_expiry(
         .is_some_and(|expiry| expiry <= Utc::now())
     {
         sqlx::query!(
-            "UPDATE sessions SET revoked_at = coalesce(revoked_at, now()) WHERE device_id = $1",
+            "UPDATE session_families
+             SET revoked_at = coalesce(revoked_at, now()),
+                 revocation_reason = coalesce(revocation_reason, 'device_key_expiry')
+             WHERE device_id = $1",
             device_id
         )
         .execute(&mut *tx)
@@ -871,6 +876,8 @@ pub async fn retire_rotation(
              SELECT 1 FROM devices d
              JOIN tenant_members m ON m.user_id = d.user_id AND m.tenant_id = $1
              WHERE d.revoked_at IS NULL
+               AND d.certificate IS NOT NULL
+               AND d.certified_at IS NOT NULL
                AND (d.key_expires_at IS NULL OR d.key_expires_at > now())
                AND NOT EXISTS (
                    SELECT 1 FROM key_generation_acks a
@@ -1039,6 +1046,7 @@ async fn require_organization_recipient_coverage(
          JOIN tenant_members m ON m.user_id = d.user_id AND m.tenant_id = $1
          JOIN tenants t ON t.id = m.tenant_id
          WHERE d.certificate IS NOT NULL AND d.certificate_fingerprint IS NOT NULL
+           AND d.certified_at IS NOT NULL
            AND d.revoked_at IS NULL AND (d.key_expires_at IS NULL OR d.key_expires_at > now())
            AND (d.user_id = t.owner_user_id OR m.verification_state = 'verified')",
         tenant_id

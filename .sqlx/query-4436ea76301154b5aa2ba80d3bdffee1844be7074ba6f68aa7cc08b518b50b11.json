@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE refresh_tokens\n             SET consumed_at = $2, replaced_by_id = $3\n             WHERE id = $1 AND consumed_at IS NULL AND revoked_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4436ea76301154b5aa2ba80d3bdffee1844be7074ba6f68aa7cc08b518b50b11"
+}

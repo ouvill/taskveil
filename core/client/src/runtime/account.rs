@@ -1,9 +1,14 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use serde::{Deserialize, Serialize};
+use std::{
+    fs::{File, OpenOptions, TryLockError},
+    ops::Deref,
+};
 use taskveil_crypto::{
     delete_account_secret,
     key_hierarchy::{
         unwrap_account_root_private_key_with_master_key, unwrap_master_key_with_device_key,
-        wrap_account_root_private_key_with_master_key, INITIAL_KEY_GENERATION,
+        wrap_account_root_private_key_with_master_key, INITIAL_KEY_GENERATION, KEY_LEN,
     },
     load_account_secret,
     organization::{
@@ -21,12 +26,14 @@ use taskveil_storage::{
 use taskveil_sync::{
     account::{
         unwrap_active_key_bundle, unwrap_historical_key_bundles, AccountClient, AccountClientError,
-        AccountKeyMaterial, BillingResponseDto, OrganizationRosterTrust,
+        AccountKeyMaterial, AccountLoginProvisional, AccountSession, AccountTokenSet,
+        BillingResponseDto, DeviceEnrollmentDto, OrganizationRosterTrust,
     },
+    canonical_server_origin,
     organization::verify_organization_active_bundle,
     LocalMutationSyncStore, LocalSyncAtomicStore, LocalSyncKeys, LocalSyncWriteTransaction,
 };
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use super::{
     now_ms, CryptoRuntimeState, TaskveilClient, ACCOUNT_DEVICE_ID_SETTING_KEY,
@@ -40,12 +47,234 @@ use crate::{
     LocalCryptoIdentity, LocalCryptoUnavailable, OrganizationSafetyState,
 };
 
+#[derive(Clone, Copy)]
 enum AccountAuthMode {
     Register,
     Login,
 }
 
 const BILLING_ENTITLEMENT_CACHE_SETTING_KEY: &str = "billing_entitlement_cache";
+const SESSION_TOKEN_SET_VERSION: u8 = 2;
+const ACCESS_TOKEN_REFRESH_SKEW_MS: i64 = 60_000;
+const SESSION_TOKEN_SET_LOCK_FILE_NAME: &str = ".taskveil-session-token-set.lock";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingLoginNetworkStep {
+    Certify,
+    RefreshCertifiedDevice,
+}
+
+fn pending_login_network_step(now_ms: i64, access_expires_at_ms: i64) -> PendingLoginNetworkStep {
+    if access_expires_at_ms <= now_ms {
+        PendingLoginNetworkStep::RefreshCertifiedDevice
+    } else {
+        // Never apply the normal refresh skew before initial certification:
+        // the server intentionally rejects refresh for provisional devices.
+        PendingLoginNetworkStep::Certify
+    }
+}
+
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+pub(super) struct StoredSessionTokens {
+    version: u8,
+    pub(super) issuer: String,
+    access_token: String,
+    access_expires_at_ms: i64,
+    refresh_token: String,
+    refresh_expires_at_ms: i64,
+}
+
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+struct StoredPendingLogin {
+    version: u8,
+    issuer: String,
+    email: String,
+    user_id: String,
+    tenant_id: String,
+    device_id: String,
+    access_token: String,
+    access_expires_at_ms: i64,
+    refresh_token: String,
+    refresh_expires_at_ms: i64,
+    challenge_expires_at_ms: i64,
+    local_wrapped_master_key: Vec<u8>,
+    generation: u64,
+    tenant_generation: u64,
+    master_key: Vec<u8>,
+    account_root_private: Vec<u8>,
+    account_root_public: Vec<u8>,
+    tenant_root_dek: Vec<u8>,
+    device_identity: Vec<u8>,
+    enrollment_suite_id: u16,
+    enrollment_account_root_public: String,
+    enrollment_device_certificate: String,
+    enrollment_certificate_fingerprint: String,
+    enrollment_proof_signature: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum StoredSessionCredential {
+    Active(StoredSessionTokens),
+    PendingDeviceCertification(Box<StoredPendingLogin>),
+}
+
+impl StoredSessionTokens {
+    fn from_account_tokens(issuer: &str, tokens: &AccountTokenSet) -> Self {
+        Self {
+            version: SESSION_TOKEN_SET_VERSION,
+            issuer: issuer.to_string(),
+            access_token: tokens.access_token.to_string(),
+            access_expires_at_ms: tokens.access_expires_at_ms,
+            refresh_token: tokens.refresh_token.to_string(),
+            refresh_expires_at_ms: tokens.refresh_expires_at_ms,
+        }
+    }
+
+    fn validate(&self) -> Result<(), ClientError> {
+        if self.version != SESSION_TOKEN_SET_VERSION
+            || canonical_server_origin(&self.issuer).as_deref() != Ok(self.issuer.as_str())
+            || self.access_token.is_empty()
+            || self.refresh_token.is_empty()
+            || self.access_expires_at_ms <= 0
+            || self.refresh_expires_at_ms <= 0
+        {
+            return Err(ClientError::IncompleteAccountState);
+        }
+        Ok(())
+    }
+}
+
+impl StoredPendingLogin {
+    fn from_provisional(
+        issuer: &str,
+        provisional: &AccountLoginProvisional,
+    ) -> Result<Self, ClientError> {
+        Ok(Self {
+            version: SESSION_TOKEN_SET_VERSION,
+            issuer: issuer.to_string(),
+            email: provisional.session.email.clone(),
+            user_id: provisional.session.user_id.clone(),
+            tenant_id: provisional.session.tenant_id.clone(),
+            device_id: provisional.session.device_id.clone(),
+            access_token: provisional.session.tokens.access_token.to_string(),
+            access_expires_at_ms: provisional.session.tokens.access_expires_at_ms,
+            refresh_token: provisional.session.tokens.refresh_token.to_string(),
+            refresh_expires_at_ms: provisional.session.tokens.refresh_expires_at_ms,
+            challenge_expires_at_ms: provisional.challenge_expires_at_ms,
+            local_wrapped_master_key: provisional.local_wrapped_master_key.clone(),
+            generation: provisional.keys.generation,
+            tenant_generation: provisional.keys.tenant_generation,
+            master_key: provisional.keys.master_key.to_vec(),
+            account_root_private: provisional.keys.account_root_private.encode().to_vec(),
+            account_root_public: provisional
+                .keys
+                .account_root_public
+                .encode()
+                .map_err(|_| ClientError::AccountBoundUnavailable)?,
+            tenant_root_dek: provisional.keys.tenant_root_dek.to_vec(),
+            device_identity: provisional
+                .device_identity
+                .encode()
+                .map_err(|_| ClientError::AccountRequest)?
+                .to_vec(),
+            enrollment_suite_id: provisional.enrollment.suite_id,
+            enrollment_account_root_public: provisional.enrollment.account_root_public.clone(),
+            enrollment_device_certificate: provisional.enrollment.device_certificate.clone(),
+            enrollment_certificate_fingerprint: provisional
+                .enrollment
+                .certificate_fingerprint
+                .clone(),
+            enrollment_proof_signature: provisional.enrollment.proof_signature.clone(),
+        })
+    }
+
+    fn validate(&self) -> Result<(), ClientError> {
+        if self.version != SESSION_TOKEN_SET_VERSION
+            || canonical_server_origin(&self.issuer).as_deref() != Ok(self.issuer.as_str())
+            || self.email.is_empty()
+            || self.access_token.is_empty()
+            || self.refresh_token.is_empty()
+            || self.access_expires_at_ms <= 0
+            || self.refresh_expires_at_ms <= 0
+            || self.challenge_expires_at_ms <= 0
+            || self.generation == 0
+            || self.tenant_generation == 0
+            || self.master_key.len() != KEY_LEN
+            || self.account_root_private.len() != 64
+            || self.tenant_root_dek.len() != KEY_LEN
+            || self.device_identity.is_empty()
+        {
+            return Err(ClientError::IncompleteAccountState);
+        }
+        parse_uuid(&self.user_id)?;
+        parse_uuid(&self.tenant_id)?;
+        parse_uuid(&self.device_id)?;
+        Ok(())
+    }
+
+    fn to_provisional(&self) -> Result<AccountLoginProvisional, ClientError> {
+        self.validate()?;
+        let master_key: [u8; KEY_LEN] = self
+            .master_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| ClientError::IncompleteAccountState)?;
+        let tenant_root_dek: [u8; KEY_LEN] = self
+            .tenant_root_dek
+            .as_slice()
+            .try_into()
+            .map_err(|_| ClientError::IncompleteAccountState)?;
+        Ok(AccountLoginProvisional {
+            session: AccountSession {
+                user_id: self.user_id.clone(),
+                tenant_id: self.tenant_id.clone(),
+                device_id: self.device_id.clone(),
+                email: self.email.clone(),
+                tokens: AccountTokenSet {
+                    access_token: Zeroizing::new(self.access_token.clone()),
+                    access_expires_at_ms: self.access_expires_at_ms,
+                    refresh_token: Zeroizing::new(self.refresh_token.clone()),
+                    refresh_expires_at_ms: self.refresh_expires_at_ms,
+                },
+            },
+            local_wrapped_master_key: self.local_wrapped_master_key.clone(),
+            keys: AccountKeyMaterial {
+                generation: self.generation,
+                tenant_generation: self.tenant_generation,
+                master_key: Zeroizing::new(master_key),
+                account_root_private: AccountRootPrivateKeys::decode(&self.account_root_private)
+                    .map_err(|_| ClientError::IncompleteAccountState)?,
+                account_root_public: AccountRootPublicKeys::decode(&self.account_root_public)
+                    .map_err(|_| ClientError::IncompleteAccountState)?,
+                tenant_root_dek: Zeroizing::new(tenant_root_dek),
+            },
+            device_identity: DeviceIdentity::decode(&self.device_identity)
+                .map_err(|_| ClientError::IncompleteAccountState)?,
+            enrollment: DeviceEnrollmentDto {
+                suite_id: self.enrollment_suite_id,
+                account_root_public: self.enrollment_account_root_public.clone(),
+                device_certificate: self.enrollment_device_certificate.clone(),
+                certificate_fingerprint: self.enrollment_certificate_fingerprint.clone(),
+                proof_signature: self.enrollment_proof_signature.clone(),
+            },
+            challenge_expires_at_ms: self.challenge_expires_at_ms,
+        })
+    }
+}
+
+pub(super) struct OriginBoundAccessToken {
+    pub(super) issuer: String,
+    token: Zeroizing<String>,
+}
+
+impl Deref for OriginBoundAccessToken {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.token.as_str()
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct OrganizationTrustPin {
@@ -179,10 +408,9 @@ impl TaskveilClient {
         self.ensure_account_runtime_restored()?;
         let tenant_id = parse_uuid(&tenant_id)?;
         let member_user_id = parse_uuid(&member_user_id)?;
-        let session_token = load_secret_string(&self.db_dir, AccountSecretKind::SessionToken)?
-            .ok_or(ClientError::AccountRequest)?;
+        let session_token = self.access_token(false).await?;
         let client =
-            AccountClient::new(self.sync_server_url()?).map_err(|_| ClientError::AccountRequest)?;
+            AccountClient::new(&session_token.issuer).map_err(|_| ClientError::AccountRequest)?;
         let response = client
             .organization_safety_number(tenant_id, member_user_id, &session_token)
             .await
@@ -208,10 +436,9 @@ impl TaskveilClient {
         self.ensure_account_runtime_restored()?;
         let tenant_id = parse_uuid(&tenant_id)?;
         let member_user_id = parse_uuid(&member_user_id)?;
-        let session_token = load_secret_string(&self.db_dir, AccountSecretKind::SessionToken)?
-            .ok_or(ClientError::AccountRequest)?;
+        let session_token = self.access_token(false).await?;
         let client =
-            AccountClient::new(self.sync_server_url()?).map_err(|_| ClientError::AccountRequest)?;
+            AccountClient::new(&session_token.issuer).map_err(|_| ClientError::AccountRequest)?;
         let current = client
             .organization_safety_number(tenant_id, member_user_id, &session_token)
             .await
@@ -244,10 +471,9 @@ impl TaskveilClient {
         self.ensure_account_runtime_restored()?;
         let tenant_id = parse_uuid(&tenant_id)?;
         let member_user_id = parse_uuid(&member_user_id)?;
-        let session_token = load_secret_string(&self.db_dir, AccountSecretKind::SessionToken)?
-            .ok_or(ClientError::AccountRequest)?;
+        let session_token = self.access_token(false).await?;
         let client =
-            AccountClient::new(self.sync_server_url()?).map_err(|_| ClientError::AccountRequest)?;
+            AccountClient::new(&session_token.issuer).map_err(|_| ClientError::AccountRequest)?;
         let safety = client
             .organization_safety_number(tenant_id, member_user_id, &session_token)
             .await
@@ -320,10 +546,9 @@ impl TaskveilClient {
         self.ensure_account_runtime_restored()?;
         let tenant_id = parse_uuid(&tenant_id)?;
         let member_user_id = parse_uuid(&member_user_id)?;
-        let session_token = load_secret_string(&self.db_dir, AccountSecretKind::SessionToken)?
-            .ok_or(ClientError::AccountRequest)?;
+        let session_token = self.access_token(false).await?;
         let client =
-            AccountClient::new(self.sync_server_url()?).map_err(|_| ClientError::AccountRequest)?;
+            AccountClient::new(&session_token.issuer).map_err(|_| ClientError::AccountRequest)?;
         let safety = client
             .organization_safety_number(tenant_id, member_user_id, &session_token)
             .await
@@ -439,10 +664,9 @@ impl TaskveilClient {
                 .non_empty_setting(ACCOUNT_USER_ID_SETTING_KEY)?
                 .ok_or(ClientError::IncompleteAccountState)?,
         )?;
-        let session_token = load_secret_string(&self.db_dir, AccountSecretKind::SessionToken)?
-            .ok_or(ClientError::AccountRequest)?;
+        let session_token = self.access_token(false).await?;
         let client =
-            AccountClient::new(self.sync_server_url()?).map_err(|_| ClientError::AccountRequest)?;
+            AccountClient::new(&session_token.issuer).map_err(|_| ClientError::AccountRequest)?;
         let safety = client
             .organization_safety_number(tenant_id, member_user_id, &session_token)
             .await
@@ -596,21 +820,28 @@ impl TaskveilClient {
 
     pub async fn account_logout(&self) -> Result<(), ClientError> {
         let _operation = self.begin_operation()?;
-        let server_url = self.sync_server_url()?;
-        let token = load_secret_string(&self.db_dir, AccountSecretKind::SessionToken)?;
-        if let Some(token) = token.as_ref() {
-            if let Ok(client) = AccountClient::new(server_url) {
-                let _ = client.logout(token).await;
-            }
+        let _session_lock = acquire_session_token_set_lock(&self.db_dir)?;
+        let credential = load_session_credential(&self.db_dir)?;
+        if let Some((issuer, refresh_token)) =
+            credential.as_ref().map(|credential| match credential {
+                StoredSessionCredential::Active(tokens) => {
+                    (tokens.issuer.as_str(), tokens.refresh_token.as_str())
+                }
+                StoredSessionCredential::PendingDeviceCertification(pending) => {
+                    (pending.issuer.as_str(), pending.refresh_token.as_str())
+                }
+            })
+        {
+            let client = AccountClient::new(issuer).map_err(|_| ClientError::AccountRequest)?;
+            client
+                .logout(refresh_token)
+                .await
+                .map_err(map_account_client_error)?;
         }
-        delete_account_secret(&self.db_dir, AccountSecretKind::SessionToken)
-            .map_err(ClientError::KeyStore)?;
+        self.invalidate_remote_session_locked()?;
         // Logout revokes only the remote session. The account binding, wrapped
         // master key, and verified local Tenant Root DEK cache deliberately
         // survive so offline mutation remains available.
-        let mut account = self.account_state()?;
-        account.session = None;
-        account.session_restored = true;
         Ok(())
     }
 
@@ -644,10 +875,8 @@ impl TaskveilClient {
                 .as_deref()
                 .ok_or(ClientError::AccountRequest)?,
         )?;
-        let token = load_secret_string(&self.db_dir, AccountSecretKind::SessionToken)?
-            .ok_or(ClientError::AccountRequest)?;
-        let client =
-            AccountClient::new(self.sync_server_url()?).map_err(|_| ClientError::AccountRequest)?;
+        let token = self.access_token(false).await?;
+        let client = AccountClient::new(&token.issuer).map_err(|_| ClientError::AccountRequest)?;
         let response = if refresh {
             client.refresh_billing(tenant_id, &token).await
         } else {
@@ -671,13 +900,29 @@ impl TaskveilClient {
         mode: AccountAuthMode,
     ) -> Result<AccountAuthResult, ClientError> {
         let _operation = self.begin_operation()?;
-        let server_url = match server_url {
-            Some(server_url) => {
-                self.set_sync_server_url(server_url)?;
-                self.sync_server_url()?
-            }
+        let _session_lock = acquire_session_token_set_lock(&self.db_dir)?;
+        let requested_server_url = match server_url {
+            Some(server_url) => server_url,
             None => self.sync_server_url()?,
         };
+        let server_url = canonical_server_origin(&requested_server_url)
+            .map_err(|_| ClientError::AccountRequest)?;
+        if let Some(pending) = load_pending_login(&self.db_dir)? {
+            if !matches!(mode, AccountAuthMode::Login)
+                || pending.issuer != server_url
+                || !pending.email.eq_ignore_ascii_case(email.trim())
+            {
+                return Err(ClientError::AccountRequest);
+            }
+            let client =
+                AccountClient::new(&pending.issuer).map_err(|_| ClientError::AccountRequest)?;
+            return self.resume_pending_login_locked(client, pending).await;
+        }
+        if load_session_tokens(&self.db_dir)?.is_some() {
+            // Re-authentication must not silently abandon an existing remote
+            // family. The caller must complete remote-first logout first.
+            return Err(ClientError::AccountRequest);
+        }
         let device_key = Zeroizing::new(*self.active_capsule()?.device_key());
         let client = AccountClient::new(&server_url).map_err(|_| ClientError::AccountRequest)?;
         let password = Zeroizing::new(password);
@@ -705,13 +950,14 @@ impl TaskveilClient {
                     &encoded_identity,
                 )
                 .map_err(ClientError::KeyStore)?;
-                let crypto = self.persist_account_state(
+                let crypto = self.persist_account_state_locked(
+                    &server_url,
                     &session,
-                    outcome.session.expires_at_ms,
-                    outcome.session.session_token.as_bytes(),
+                    &outcome.session.tokens,
                     &outcome.local_wrapped_master_key,
                     &outcome.keys,
                 )?;
+                self.set_setting_value(super::SYNC_SERVER_URL_SETTING_KEY, &server_url)?;
                 self.replace_account_runtime(Some(session.clone()), crypto)?;
                 // A new profile has no initial-backfill cursor. Do not delete a
                 // durable cursor here: same-profile authentication must be
@@ -722,50 +968,125 @@ impl TaskveilClient {
                 })
             }
             AccountAuthMode::Login => {
-                let mut outcome = client
-                    .login(&email, &password, device_name.as_deref(), &device_key)
+                let provisional = client
+                    .begin_login(&email, &password, device_name.as_deref(), &device_key)
                     .await
                     .map_err(|_| ClientError::AccountRequest)?;
-                let tenant_id = parse_uuid(&outcome.session.tenant_id)?;
-                let user_id = parse_uuid(&outcome.session.user_id)?;
-                self.validate_existing_profile_identity(tenant_id, user_id)?;
-                self.ensure_key_material_covers_local_lists(
-                    &server_url,
-                    tenant_id,
-                    &outcome.session.session_token,
-                    &mut outcome.keys,
+                let pending = StoredPendingLogin::from_provisional(&server_url, &provisional)?;
+                store_pending_login(&self.db_dir, pending)?;
+                self.resume_pending_login_locked(
+                    client,
+                    load_pending_login(&self.db_dir)?.ok_or(ClientError::IncompleteAccountState)?,
                 )
-                .await?;
-                let session = account_session_state(
-                    outcome.session.email.clone(),
-                    outcome.session.user_id.clone(),
-                    outcome.session.tenant_id.clone(),
-                    outcome.session.device_id.clone(),
-                );
-                let encoded_identity = outcome
-                    .device_identity
-                    .encode()
-                    .map_err(|_| ClientError::AccountRequest)?;
-                store_account_secret(
-                    &self.db_dir,
-                    AccountSecretKind::DeviceIdentity,
-                    &encoded_identity,
-                )
-                .map_err(ClientError::KeyStore)?;
-                let crypto = self.persist_account_state(
-                    &session,
-                    outcome.session.expires_at_ms,
-                    outcome.session.session_token.as_bytes(),
-                    &outcome.local_wrapped_master_key,
-                    &outcome.keys,
-                )?;
-                self.replace_account_runtime(Some(session.clone()), crypto)?;
-                Ok(AccountAuthResult {
-                    session,
-                    recovery_key: None,
-                })
+                .await
             }
         }
+    }
+
+    async fn resume_pending_login_locked(
+        &self,
+        client: AccountClient,
+        pending: StoredPendingLogin,
+    ) -> Result<AccountAuthResult, ClientError> {
+        let issuer = pending.issuer.clone();
+        let mut provisional = pending.to_provisional()?;
+        let tenant_id = parse_uuid(&provisional.session.tenant_id)?;
+        let user_id = parse_uuid(&provisional.session.user_id)?;
+        if let Err(identity_error) = self.validate_existing_profile_identity(tenant_id, user_id) {
+            client
+                .logout(&provisional.session.tokens.refresh_token)
+                .await
+                .map_err(map_account_client_error)?;
+            delete_account_secret(&self.db_dir, AccountSecretKind::SessionTokens)
+                .map_err(ClientError::KeyStore)?;
+            return Err(identity_error);
+        }
+
+        let now = now_ms()?;
+        if provisional.session.tokens.refresh_expires_at_ms <= now {
+            delete_account_secret(&self.db_dir, AccountSecretKind::SessionTokens)
+                .map_err(ClientError::KeyStore)?;
+            return Err(ClientError::AccountRequest);
+        }
+        if pending_login_network_step(now, provisional.session.tokens.access_expires_at_ms)
+            == PendingLoginNetworkStep::RefreshCertifiedDevice
+        {
+            match client
+                .refresh(&provisional.session.tokens.refresh_token)
+                .await
+            {
+                Ok(tokens) => {
+                    // The server refresh endpoint accepts only certified
+                    // devices, so success proves that certification completed
+                    // before the previous process stopped.
+                    provisional.session.tokens = tokens;
+                    store_pending_login(
+                        &self.db_dir,
+                        StoredPendingLogin::from_provisional(&issuer, &provisional)?,
+                    )?;
+                }
+                Err(AccountClientError::InvalidGrant)
+                    if provisional.challenge_expires_at_ms <= now =>
+                {
+                    client
+                        .logout(&provisional.session.tokens.refresh_token)
+                        .await
+                        .map_err(map_account_client_error)?;
+                    delete_account_secret(&self.db_dir, AccountSecretKind::SessionTokens)
+                        .map_err(ClientError::KeyStore)?;
+                    return Err(ClientError::AccountRequest);
+                }
+                Err(error) => return Err(map_account_client_error(error)),
+            }
+        }
+
+        if let Err(error) = client.certify_login(&provisional).await {
+            if provisional.challenge_expires_at_ms <= now {
+                client
+                    .logout(&provisional.session.tokens.refresh_token)
+                    .await
+                    .map_err(map_account_client_error)?;
+                delete_account_secret(&self.db_dir, AccountSecretKind::SessionTokens)
+                    .map_err(ClientError::KeyStore)?;
+            }
+            return Err(map_account_client_error(error));
+        }
+        self.ensure_key_material_covers_local_lists(
+            &issuer,
+            tenant_id,
+            &provisional.session.tokens.access_token,
+            &mut provisional.keys,
+        )
+        .await?;
+        let session = account_session_state(
+            provisional.session.email.clone(),
+            provisional.session.user_id.clone(),
+            provisional.session.tenant_id.clone(),
+            provisional.session.device_id.clone(),
+        );
+        let encoded_identity = provisional
+            .device_identity
+            .encode()
+            .map_err(|_| ClientError::AccountRequest)?;
+        store_account_secret(
+            &self.db_dir,
+            AccountSecretKind::DeviceIdentity,
+            &encoded_identity,
+        )
+        .map_err(ClientError::KeyStore)?;
+        let crypto = self.persist_account_state_locked(
+            &issuer,
+            &session,
+            &provisional.session.tokens,
+            &provisional.local_wrapped_master_key,
+            &provisional.keys,
+        )?;
+        self.set_setting_value(super::SYNC_SERVER_URL_SETTING_KEY, &issuer)?;
+        self.replace_account_runtime(Some(session.clone()), crypto)?;
+        Ok(AccountAuthResult {
+            session,
+            recovery_key: None,
+        })
     }
 
     pub(crate) fn ensure_account_runtime_restored(&self) -> Result<(), ClientError> {
@@ -807,11 +1128,17 @@ impl TaskveilClient {
         if self.account_state()?.session_restored {
             return Ok(());
         }
-        let session_token = load_secret_string(&self.db_dir, AccountSecretKind::SessionToken)?;
+        let _session_lock = acquire_session_token_set_lock(&self.db_dir)?;
+        let session_tokens = load_session_tokens(&self.db_dir)?;
         self.account_state()?.session_restored = true;
-        let Some(_session_token) = session_token.filter(|token| !token.is_empty()) else {
+        let Some(session_tokens) = session_tokens else {
             return Ok(());
         };
+        if session_tokens.refresh_expires_at_ms <= now_ms()? {
+            delete_account_secret(&self.db_dir, AccountSecretKind::SessionTokens)
+                .map_err(ClientError::KeyStore)?;
+            return Ok(());
+        }
         let Some(email) = self.non_empty_setting(ACCOUNT_EMAIL_SETTING_KEY)? else {
             return Ok(());
         };
@@ -824,25 +1151,65 @@ impl TaskveilClient {
         let Some(device_id) = self.non_empty_setting(ACCOUNT_DEVICE_ID_SETTING_KEY)? else {
             return Ok(());
         };
-        let Some(expires_at) = self
-            .non_empty_setting(ACCOUNT_SESSION_EXPIRES_AT_SETTING_KEY)?
-            .and_then(|value| value.parse::<i64>().ok())
-        else {
-            return Ok(());
-        };
-        if expires_at <= now_ms()? {
-            return Ok(());
-        }
         self.account_state()?.session =
             Some(account_session_state(email, user_id, tenant_id, device_id));
         Ok(())
     }
 
+    pub(super) async fn access_token(
+        &self,
+        force_refresh: bool,
+    ) -> Result<OriginBoundAccessToken, ClientError> {
+        self.ensure_account_runtime_restored()?;
+        let _session_lock = acquire_session_token_set_lock(&self.db_dir)?;
+        let mut tokens = load_session_tokens(&self.db_dir)?.ok_or(ClientError::AccountRequest)?;
+        let now = now_ms()?;
+        if tokens.refresh_expires_at_ms <= now {
+            self.invalidate_remote_session_locked()?;
+            return Err(ClientError::AccountRequest);
+        }
+        if force_refresh
+            || tokens.access_expires_at_ms <= now.saturating_add(ACCESS_TOKEN_REFRESH_SKEW_MS)
+        {
+            let client =
+                AccountClient::new(&tokens.issuer).map_err(|_| ClientError::AccountRequest)?;
+            let refreshed = match client.refresh(&tokens.refresh_token).await {
+                Ok(refreshed) => refreshed,
+                Err(AccountClientError::InvalidGrant) => {
+                    self.invalidate_remote_session_locked()?;
+                    return Err(ClientError::AccountRequest);
+                }
+                Err(error) => return Err(map_account_client_error(error)),
+            };
+            tokens = StoredSessionTokens::from_account_tokens(&tokens.issuer, &refreshed);
+            store_session_tokens(&self.db_dir, &tokens)?;
+        }
+        Ok(OriginBoundAccessToken {
+            issuer: tokens.issuer.clone(),
+            token: Zeroizing::new(tokens.access_token.clone()),
+        })
+    }
+
+    pub(super) fn current_access_token(&self) -> Option<OriginBoundAccessToken> {
+        let tokens = load_session_tokens(&self.db_dir).ok()??;
+        Some(OriginBoundAccessToken {
+            issuer: tokens.issuer.clone(),
+            token: Zeroizing::new(tokens.access_token.clone()),
+        })
+    }
+
+    fn invalidate_remote_session_locked(&self) -> Result<(), ClientError> {
+        delete_account_secret(&self.db_dir, AccountSecretKind::SessionTokens)
+            .map_err(ClientError::KeyStore)?;
+        let mut account = self.account_state()?;
+        account.session = None;
+        account.session_restored = true;
+        Ok(())
+    }
+
     pub(super) async fn refresh_tenant_keys_for_sync(&self) -> Result<LocalSyncKeys, ClientError> {
         self.ensure_account_runtime_restored()?;
-        let server_url = self.sync_server_url()?;
-        let session_token = load_secret_string(&self.db_dir, AccountSecretKind::SessionToken)?
-            .ok_or(ClientError::AccountRequest)?;
+        let session_token = self.access_token(false).await?;
         let (tenant_id, user_id, device_id, master_key) = {
             let account = self.account_state()?;
             let Some(_session) = account.session.as_ref().filter(|session| session.logged_in)
@@ -860,7 +1227,8 @@ impl TaskveilClient {
             )
         };
 
-        let client = AccountClient::new(server_url).map_err(|_| ClientError::AccountRequest)?;
+        let client =
+            AccountClient::new(&session_token.issuer).map_err(|_| ClientError::AccountRequest)?;
         let bundle = client
             .active_key_bundle(tenant_id, &session_token)
             .await
@@ -1121,11 +1489,11 @@ impl TaskveilClient {
         Ok((private, public))
     }
 
-    fn persist_account_state(
+    fn persist_account_state_locked(
         &self,
+        issuer: &str,
         session: &AccountSessionState,
-        expires_at_ms: i64,
-        session_token: &[u8],
+        tokens: &AccountTokenSet,
         local_wrapped_master_key: &[u8],
         keys: &AccountKeyMaterial,
     ) -> Result<crate::LocalCryptoContext, ClientError> {
@@ -1159,10 +1527,6 @@ impl TaskveilClient {
             session.device_id.as_deref().unwrap_or_default(),
         )?;
         self.set_setting_value(
-            ACCOUNT_SESSION_EXPIRES_AT_SETTING_KEY,
-            &expires_at_ms.to_string(),
-        )?;
-        self.set_setting_value(
             ACCOUNT_ROOT_PUBLIC_SETTING_KEY,
             &STANDARD.encode(
                 keys.account_root_public
@@ -1174,8 +1538,6 @@ impl TaskveilClient {
             ACCOUNT_MK_GENERATION_SETTING_KEY,
             &keys.generation.to_string(),
         )?;
-        store_account_secret(&self.db_dir, AccountSecretKind::SessionToken, session_token)
-            .map_err(ClientError::KeyStore)?;
         let root_private = keys.account_root_private.encode();
         let wrapped_root = wrap_account_root_private_key_with_master_key(
             identity.user_id,
@@ -1190,6 +1552,13 @@ impl TaskveilClient {
             &wrapped_root,
         )
         .map_err(ClientError::KeyStore)?;
+        // Publishing the active credential is the final durable step. Until
+        // this succeeds, the pending-login payload remains available for an
+        // idempotent certification/finalization retry after a crash.
+        store_session_tokens(
+            &self.db_dir,
+            &StoredSessionTokens::from_account_tokens(issuer, tokens),
+        )?;
         Ok(crypto)
     }
 
@@ -1271,15 +1640,105 @@ fn billing_state(response: BillingResponseDto) -> BillingState {
     }
 }
 
-fn load_secret_string(
+fn load_session_credential(
     db_dir: &std::path::Path,
-    kind: AccountSecretKind,
-) -> Result<Option<Zeroizing<String>>, ClientError> {
-    load_account_secret(db_dir, kind)
+) -> Result<Option<StoredSessionCredential>, ClientError> {
+    let Some(encoded) = load_account_secret(db_dir, AccountSecretKind::SessionTokens)
         .map_err(ClientError::KeyStore)?
-        .map(|bytes| String::from_utf8(bytes).map(Zeroizing::new))
-        .transpose()
-        .map_err(|_| ClientError::IncompleteAccountState)
+    else {
+        return Ok(None);
+    };
+    let encoded = Zeroizing::new(encoded);
+    let credential: StoredSessionCredential =
+        serde_json::from_slice(&encoded).map_err(|_| ClientError::IncompleteAccountState)?;
+    match &credential {
+        StoredSessionCredential::Active(tokens) => tokens.validate()?,
+        StoredSessionCredential::PendingDeviceCertification(pending) => pending.validate()?,
+    }
+    Ok(Some(credential))
+}
+
+pub(super) fn load_session_tokens(
+    db_dir: &std::path::Path,
+) -> Result<Option<StoredSessionTokens>, ClientError> {
+    Ok(match load_session_credential(db_dir)? {
+        Some(StoredSessionCredential::Active(tokens)) => Some(tokens),
+        Some(StoredSessionCredential::PendingDeviceCertification(_)) | None => None,
+    })
+}
+
+pub(super) fn stored_session_credential_issuer(
+    db_dir: &std::path::Path,
+) -> Result<Option<String>, ClientError> {
+    Ok(match load_session_credential(db_dir)? {
+        Some(StoredSessionCredential::Active(tokens)) => Some(tokens.issuer.clone()),
+        Some(StoredSessionCredential::PendingDeviceCertification(pending)) => {
+            Some(pending.issuer.clone())
+        }
+        None => None,
+    })
+}
+
+fn load_pending_login(db_dir: &std::path::Path) -> Result<Option<StoredPendingLogin>, ClientError> {
+    Ok(match load_session_credential(db_dir)? {
+        Some(StoredSessionCredential::PendingDeviceCertification(pending)) => Some(*pending),
+        Some(StoredSessionCredential::Active(_)) | None => None,
+    })
+}
+
+fn store_session_tokens(
+    db_dir: &std::path::Path,
+    tokens: &StoredSessionTokens,
+) -> Result<(), ClientError> {
+    tokens.validate()?;
+    let encoded = Zeroizing::new(
+        serde_json::to_vec(&StoredSessionCredential::Active(
+            StoredSessionTokens::from_account_tokens(
+                &tokens.issuer,
+                &AccountTokenSet {
+                    access_token: Zeroizing::new(tokens.access_token.clone()),
+                    access_expires_at_ms: tokens.access_expires_at_ms,
+                    refresh_token: Zeroizing::new(tokens.refresh_token.clone()),
+                    refresh_expires_at_ms: tokens.refresh_expires_at_ms,
+                },
+            ),
+        ))
+        .map_err(|_| ClientError::IncompleteAccountState)?,
+    );
+    store_account_secret(db_dir, AccountSecretKind::SessionTokens, &encoded)
+        .map_err(ClientError::KeyStore)
+}
+
+fn store_pending_login(
+    db_dir: &std::path::Path,
+    pending: StoredPendingLogin,
+) -> Result<(), ClientError> {
+    pending.validate()?;
+    let encoded = Zeroizing::new(
+        serde_json::to_vec(&StoredSessionCredential::PendingDeviceCertification(
+            Box::new(pending),
+        ))
+        .map_err(|_| ClientError::IncompleteAccountState)?,
+    );
+    store_account_secret(db_dir, AccountSecretKind::SessionTokens, &encoded)
+        .map_err(ClientError::KeyStore)
+}
+
+pub(super) fn acquire_session_token_set_lock(
+    db_dir: &std::path::Path,
+) -> Result<File, ClientError> {
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(db_dir.join(SESSION_TOKEN_SET_LOCK_FILE_NAME))
+        .map_err(ClientError::Io)?;
+    match lock_file.try_lock() {
+        Ok(()) => Ok(lock_file),
+        Err(TryLockError::WouldBlock) => Err(ClientError::Busy),
+        Err(TryLockError::Error(error)) => Err(ClientError::Io(error)),
+    }
 }
 
 fn account_session_state(
@@ -1309,7 +1768,11 @@ fn parse_uuid(value: &str) -> Result<Uuid, ClientError> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        sync::Mutex,
+    };
 
     use taskveil_sync::LocalSyncStore;
     use tempfile::TempDir;
@@ -1332,6 +1795,193 @@ mod tests {
             sync: Mutex::new(super::super::SyncRuntimeState::default()),
             operation_busy: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    #[test]
+    fn versioned_session_token_set_round_trips_as_one_payload() {
+        let expected = StoredSessionTokens {
+            version: SESSION_TOKEN_SET_VERSION,
+            issuer: "https://sync.example.com".to_string(),
+            access_token: "access-secret".to_string(),
+            access_expires_at_ms: 1_800_000_000_000,
+            refresh_token: "refresh-secret".to_string(),
+            refresh_expires_at_ms: 1_801_000_000_000,
+        };
+        let encoded = Zeroizing::new(serde_json::to_vec(&expected).expect("encode token set"));
+        let loaded: StoredSessionTokens =
+            serde_json::from_slice(&encoded).expect("decode token set");
+        loaded.validate().expect("validate token set");
+        assert_eq!(loaded.version, SESSION_TOKEN_SET_VERSION);
+        assert_eq!(loaded.issuer, "https://sync.example.com");
+        assert_eq!(loaded.access_token, "access-secret");
+        assert_eq!(loaded.refresh_token, "refresh-secret");
+        assert_eq!(loaded.access_expires_at_ms, 1_800_000_000_000);
+        assert_eq!(loaded.refresh_expires_at_ms, 1_801_000_000_000);
+
+        assert!(serde_json::from_slice::<StoredSessionTokens>(b"legacy-single-token").is_err());
+    }
+
+    #[test]
+    fn expired_challenge_with_still_valid_access_retries_certification_before_refresh() {
+        let challenge_expires_at_ms = 10 * 60 * 1_000;
+        let now_ms = challenge_expires_at_ms + 1;
+        let access_expires_at_ms = 15 * 60 * 1_000;
+
+        assert_eq!(
+            pending_login_network_step(now_ms, access_expires_at_ms),
+            PendingLoginNetworkStep::Certify
+        );
+        assert_eq!(
+            pending_login_network_step(access_expires_at_ms, access_expires_at_ms),
+            PendingLoginNetworkStep::RefreshCertifiedDevice
+        );
+    }
+
+    #[test]
+    fn active_credential_blocks_origin_change() {
+        let temp = TempDir::new().expect("temp profile");
+        let client = open_test_client(temp.path(), [0x31; 32]);
+        let tokens = StoredSessionTokens {
+            version: SESSION_TOKEN_SET_VERSION,
+            issuer: "https://sync.example.com".to_string(),
+            access_token: "access-secret".to_string(),
+            access_expires_at_ms: 1_900_000_000_000,
+            refresh_token: "refresh-secret".to_string(),
+            refresh_expires_at_ms: 1_901_000_000_000,
+        };
+        store_session_tokens(temp.path(), &tokens).expect("store token set");
+
+        assert!(client
+            .set_sync_server_url("https://attacker.example".to_string())
+            .is_err());
+        client
+            .set_sync_server_url("HTTPS://SYNC.EXAMPLE.COM:443/".to_string())
+            .expect("same canonical origin");
+        assert_eq!(
+            client.sync_server_url().unwrap(),
+            "https://sync.example.com"
+        );
+        delete_account_secret(temp.path(), AccountSecretKind::SessionTokens)
+            .expect("remove test token");
+    }
+
+    #[tokio::test]
+    async fn logout_retains_credential_until_remote_revocation_succeeds() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let issuer = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for status in ["500 Internal Server Error", "200 OK"] {
+                let (mut stream, _) = listener.accept().expect("accept request");
+                let mut request = [0u8; 2048];
+                let _ = stream.read(&mut request).expect("read request");
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: 2\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{{}}"
+                )
+                .expect("write response");
+            }
+        });
+        let temp = TempDir::new().expect("temp profile");
+        let client = open_test_client(temp.path(), [0x32; 32]);
+        store_session_tokens(
+            temp.path(),
+            &StoredSessionTokens {
+                version: SESSION_TOKEN_SET_VERSION,
+                issuer,
+                access_token: "access-secret".to_string(),
+                access_expires_at_ms: 1_900_000_000_000,
+                refresh_token: "refresh-secret".to_string(),
+                refresh_expires_at_ms: 1_901_000_000_000,
+            },
+        )
+        .expect("store token set");
+
+        assert!(client.account_logout().await.is_err());
+        assert!(load_session_tokens(temp.path()).unwrap().is_some());
+        client
+            .account_logout()
+            .await
+            .expect("remote revocation succeeds");
+        assert!(load_session_credential(temp.path()).unwrap().is_none());
+        server.join().expect("test server thread");
+    }
+
+    #[test]
+    fn process_restart_restores_origin_bound_session() {
+        let temp = TempDir::new().expect("temp profile");
+        let first = open_test_client(temp.path(), [0x33; 32]);
+        for (key, value) in [
+            (ACCOUNT_EMAIL_SETTING_KEY, "restart@example.com"),
+            (
+                ACCOUNT_USER_ID_SETTING_KEY,
+                "00000000-0000-4000-8000-000000000001",
+            ),
+            (
+                ACCOUNT_TENANT_ID_SETTING_KEY,
+                "00000000-0000-4000-8000-000000000002",
+            ),
+            (
+                ACCOUNT_DEVICE_ID_SETTING_KEY,
+                "00000000-0000-4000-8000-000000000003",
+            ),
+        ] {
+            first.set_setting_value(key, value).unwrap();
+        }
+        store_session_tokens(
+            temp.path(),
+            &StoredSessionTokens {
+                version: SESSION_TOKEN_SET_VERSION,
+                issuer: "https://sync.example.com".to_string(),
+                access_token: "access-secret".to_string(),
+                access_expires_at_ms: 1_900_000_000_000,
+                refresh_token: "refresh-secret".to_string(),
+                refresh_expires_at_ms: 1_901_000_000_000,
+            },
+        )
+        .unwrap();
+        drop(first);
+
+        let restarted = open_test_client(temp.path(), [0x33; 32]);
+        let session = restarted.account_session_state().unwrap();
+        assert!(session.logged_in);
+        assert_eq!(session.email.as_deref(), Some("restart@example.com"));
+        assert_eq!(
+            stored_session_credential_issuer(temp.path()).unwrap(),
+            Some("https://sync.example.com".to_string())
+        );
+        delete_account_secret(temp.path(), AccountSecretKind::SessionTokens).unwrap();
+    }
+
+    #[test]
+    fn session_token_set_lock_excludes_another_profile_instance() {
+        let temp = TempDir::new().expect("temp profile");
+        let first = acquire_session_token_set_lock(temp.path()).expect("first session lock");
+        assert!(matches!(
+            acquire_session_token_set_lock(temp.path()),
+            Err(ClientError::Busy)
+        ));
+        drop(first);
+        acquire_session_token_set_lock(temp.path()).expect("session lock after release");
+    }
+
+    #[tokio::test]
+    async fn two_client_instances_exclude_refresh_and_logout_mutations() {
+        let temp = TempDir::new().expect("temp profile");
+        let first = open_test_client(temp.path(), [0x34; 32]);
+        let second = open_test_client(temp.path(), [0x34; 32]);
+        let first_mutation =
+            acquire_session_token_set_lock(&first.db_dir).expect("first client mutation lock");
+
+        assert!(matches!(
+            second.access_token(true).await,
+            Err(ClientError::Busy)
+        ));
+        assert!(matches!(
+            second.account_logout().await,
+            Err(ClientError::Busy)
+        ));
+        drop(first_mutation);
+        acquire_session_token_set_lock(&second.db_dir).expect("second client can continue");
     }
 
     #[test]

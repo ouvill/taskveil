@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH expired AS (\n             SELECT id FROM opaque_registration_states\n             WHERE expires_at <= now()\n             ORDER BY expires_at, id\n             LIMIT $1\n         )\n         DELETE FROM opaque_registration_states\n         USING expired\n         WHERE opaque_registration_states.id = expired.id",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "952f9513a4fd6706c1823b8ada53f3c9172e6e5a355a9ea9710dc664c89bf798"
+}

@@ -8,10 +8,11 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use taskveil_domain::{List, Task, TaskContent, TaskSeries, TaskSeriesConfig, TaskTemplate, Uuid};
 
 use crate::{
-    account::AccountClient, decrypt_plaintext, merge_lww, EncryptedSyncState, EnvelopeError, Hlc,
-    PullRecord, PushOp, PushStatus, SyncCollection, SyncEngine, SyncEngineError, SyncPlaintext,
-    SyncRunSummary, LISTS_COLLECTION, SYNC_CURSOR_NAME, SYNC_UPGRADE_REQUIRED_SETTING_KEY,
-    TASKS_COLLECTION, TASK_SERIES_COLLECTION, TEMPLATES_COLLECTION,
+    account::{AccountClient, AccountClientError},
+    decrypt_plaintext, merge_lww, EncryptedSyncState, EnvelopeError, Hlc, PullRecord, PushOp,
+    PushStatus, SyncCollection, SyncEngine, SyncEngineError, SyncPlaintext, SyncRunSummary,
+    LISTS_COLLECTION, SYNC_CURSOR_NAME, SYNC_UPGRADE_REQUIRED_SETTING_KEY, TASKS_COLLECTION,
+    TASK_SERIES_COLLECTION, TEMPLATES_COLLECTION,
 };
 
 use crate::enqueue::{
@@ -29,6 +30,25 @@ const MAX_PUSH_DRAIN_ITERATIONS: usize = 100;
 const QUARANTINE_REPLAY_BATCH_LIMIT: usize = 100;
 const FULL_RESYNC_PAGE_LIMIT: i64 = 100;
 const FULL_RESYNC_SWEEP_BATCH_LIMIT: usize = 100;
+
+fn sync_engine_error_to_string(error: SyncEngineError) -> String {
+    match error {
+        SyncEngineError::Server(status) if status == reqwest::StatusCode::UNAUTHORIZED => {
+            "unauthorized".to_string()
+        }
+        SyncEngineError::EntitlementRequired => "entitlement required".to_string(),
+        SyncEngineError::UpgradeRequired { .. } => "upgrade required".to_string(),
+        _ => "sync failed".to_string(),
+    }
+}
+
+fn account_sync_error_to_string(error: AccountClientError) -> String {
+    match error {
+        AccountClientError::Server(401) => "unauthorized".to_string(),
+        AccountClientError::EntitlementRequired => "entitlement required".to_string(),
+        _ => "sync failed".to_string(),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ApplyDisposition {
@@ -65,7 +85,7 @@ pub struct ActiveSyncContext {
     pub server_url: String,
     pub tenant_id: Uuid,
     pub device_id: String,
-    pub session_token: String,
+    pub session_token: crate::SecretString,
     pub keys: LocalSyncKeys,
     pub manifest_auth_key: zeroize::Zeroizing<[u8; 32]>,
 }
@@ -120,7 +140,7 @@ where
     let engine = SyncEngine::new(
         context.server_url.clone(),
         context.tenant_id,
-        context.session_token.clone(),
+        context.session_token.expose(),
     )
     .map_err(|_| "sync failed".to_string())?;
     let mut summary = SyncRunSummary::default();
@@ -154,7 +174,7 @@ where
         Err(SyncEngineError::EntitlementRequired) => {
             return Err("entitlement required".to_string());
         }
-        Err(_) => return Err("sync failed".to_string()),
+        Err(error) => return Err(sync_engine_error_to_string(error)),
     };
     if validate_preflight_key_state(&context, &preflight, store, now_ms).is_err() {
         context.keys = key_refresher.refresh().await?;
@@ -248,7 +268,7 @@ where
         let push_outcome = engine
             .push_batch(push_ops)
             .await
-            .map_err(|_| "sync failed".to_string())?;
+            .map_err(sync_engine_error_to_string)?;
         for outcome in push_outcome.outcomes {
             match outcome.status {
                 PushStatus::Accepted | PushStatus::NoOp => {
@@ -315,10 +335,10 @@ where
             .acknowledge_key_generation(
                 context.tenant_id,
                 preflight.active_key_generation,
-                &context.session_token,
+                context.session_token.expose(),
             )
             .await
-            .map_err(|_| "sync failed".to_string())?;
+            .map_err(account_sync_error_to_string)?;
     }
 
     Ok(summary)
@@ -574,7 +594,7 @@ where
         let page = engine
             .pull_page(since, 100)
             .await
-            .map_err(|_| "sync failed".to_string())?;
+            .map_err(sync_engine_error_to_string)?;
         match apply_pull_page(&page, context, store, now_ms, false) {
             Ok(page_summary) => merge_summary(summary, page_summary),
             Err(PageApplyError::MissingKey) => {
@@ -617,7 +637,7 @@ where
             engine
                 .ack_continuity(proof)
                 .await
-                .map_err(|_| "sync failed".to_string())?;
+                .map_err(sync_engine_error_to_string)?;
             return Ok(refreshed);
         }
     }
@@ -645,7 +665,7 @@ where
         let start = engine
             .begin_full_resync()
             .await
-            .map_err(|_| "sync failed".to_string())?;
+            .map_err(sync_engine_error_to_string)?;
         let mut transaction = store
             .begin_write_transaction()
             .map_err(|_| "sync failed".to_string())?;
@@ -671,7 +691,7 @@ where
                         FULL_RESYNC_PAGE_LIMIT,
                     )
                     .await
-                    .map_err(|_| "sync failed".to_string())?;
+                    .map_err(sync_engine_error_to_string)?;
                 if page.has_more && page.next_cursor.is_none() {
                     return Err("sync failed".to_string());
                 }
@@ -736,7 +756,7 @@ where
                         Some(progress.continuity_generation),
                     )
                     .await
-                    .map_err(|_| "sync failed".to_string())?;
+                    .map_err(sync_engine_error_to_string)?;
                 let reached_closure = page.reached_closure();
                 let page_updated_at = now_ms()?;
                 let apply = apply_full_resync_page(
@@ -840,7 +860,7 @@ where
                             Some(progress.continuity_generation),
                         )
                         .await
-                        .map_err(|_| "sync failed".to_string())?;
+                        .map_err(sync_engine_error_to_string)?;
                     let proof = closure
                         .closure_proof
                         .clone()
@@ -849,7 +869,7 @@ where
                     engine
                         .ack_continuity(proof)
                         .await
-                        .map_err(|_| "sync failed".to_string())?;
+                        .map_err(sync_engine_error_to_string)?;
                     return Ok(refreshed_keys);
                 }
             }
@@ -3985,7 +4005,7 @@ mod tests {
             server_url: "http://localhost".to_string(),
             tenant_id: uuid(100),
             device_id: "local".to_string(),
-            session_token: "token".to_string(),
+            session_token: crate::SecretString::new("token"),
             keys: LocalSyncKeys {
                 tenant_id: test_tenant_id(),
                 tenant_root_dek: Some(Zeroizing::new(
@@ -3996,6 +4016,16 @@ mod tests {
             },
             manifest_auth_key: crate::derive_personal_manifest_auth_key(&[0x41; 32]).unwrap(),
         }
+    }
+
+    #[test]
+    fn active_context_debug_never_renders_bearer_token() {
+        let mut context = context_with_keys(&[]);
+        context.session_token = crate::SecretString::new("bearer-secret");
+        let rendered = format!("{context:?}");
+
+        assert!(rendered.contains("[REDACTED]"));
+        assert!(!rendered.contains("bearer-secret"));
     }
 
     fn test_hlc(counter: u32, device_id: &str) -> Hlc {

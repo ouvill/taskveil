@@ -12,6 +12,10 @@ pub fn router() -> Router<SharedState> {
     Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(auth::authorization_server_metadata),
+        )
         .nest("/v1/auth", auth::router())
         .nest("/v1", billing::webhook_router())
         .nest(
@@ -57,6 +61,7 @@ mod tests {
         let state = Arc::new(AppState {
             pool,
             billing: BillingService::unavailable_for_tests(BillingEnvironment::Sandbox),
+            auth_issuer: "http://localhost".to_string(),
         });
         let (status, Json(body)) = ready(State(state)).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);

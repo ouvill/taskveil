@@ -6,7 +6,6 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use reqwest::StatusCode;
 use thiserror::Error;
 use uuid::Uuid;
-use zeroize::Zeroizing;
 
 use crate::{
     protocol::{
@@ -14,7 +13,7 @@ use crate::{
         PullResponse, PushRequest, SyncCollection, SyncRecordState as WireRecordState,
         SYNC_PROTOCOL_VERSION_HEADER,
     },
-    Hlc,
+    Hlc, SecretString,
 };
 
 pub use crate::protocol::PushStatus;
@@ -23,6 +22,8 @@ pub use crate::protocol::PushStatus;
 pub enum SyncEngineError {
     #[error("server URL is empty")]
     EmptyServerUrl,
+    #[error("server URL is not a secure origin")]
+    InvalidServerOrigin,
     #[error("HTTP request failed")]
     Http(#[from] reqwest::Error),
     #[error("server rejected sync request: {0}")]
@@ -48,7 +49,7 @@ pub enum SyncEngineError {
 pub struct SyncEngine {
     base_url: String,
     tenant_id: Uuid,
-    session_token: Zeroizing<String>,
+    session_token: SecretString,
     http: reqwest::Client,
 }
 
@@ -169,7 +170,7 @@ impl SyncEngine {
         Ok(Self {
             base_url,
             tenant_id,
-            session_token: Zeroizing::new(session_token.into()),
+            session_token: SecretString::new(session_token),
             http,
         })
     }
@@ -249,7 +250,7 @@ impl SyncEngine {
                 "{}/v2/tenants/{}/preflight",
                 self.base_url, self.tenant_id
             ))
-            .bearer_auth(self.session_token.as_str())
+            .bearer_auth(self.session_token.expose())
             .header(
                 SYNC_PROTOCOL_VERSION_HEADER,
                 protocol::SYNC_PROTOCOL_VERSION.to_string(),
@@ -276,7 +277,7 @@ impl SyncEngine {
                 "{}/v2/tenants/{}/push",
                 self.base_url, self.tenant_id
             ))
-            .bearer_auth(self.session_token.as_str())
+            .bearer_auth(self.session_token.expose())
             .header(
                 SYNC_PROTOCOL_VERSION_HEADER,
                 protocol::SYNC_PROTOCOL_VERSION.to_string(),
@@ -298,7 +299,7 @@ impl SyncEngine {
                 "{}/v2/tenants/{}/resync/start",
                 self.base_url, self.tenant_id
             ))
-            .bearer_auth(self.session_token.as_str())
+            .bearer_auth(self.session_token.expose())
             .header(
                 SYNC_PROTOCOL_VERSION_HEADER,
                 protocol::SYNC_PROTOCOL_VERSION.to_string(),
@@ -330,7 +331,7 @@ impl SyncEngine {
                 "{}/v2/tenants/{}/resync/base",
                 self.base_url, self.tenant_id
             ))
-            .bearer_auth(self.session_token.as_str())
+            .bearer_auth(self.session_token.expose())
             .header(
                 SYNC_PROTOCOL_VERSION_HEADER,
                 protocol::SYNC_PROTOCOL_VERSION.to_string(),
@@ -366,7 +367,7 @@ impl SyncEngine {
                 "{}/v2/tenants/{}/pull",
                 self.base_url, self.tenant_id
             ))
-            .bearer_auth(self.session_token.as_str())
+            .bearer_auth(self.session_token.expose())
             .header(
                 SYNC_PROTOCOL_VERSION_HEADER,
                 protocol::SYNC_PROTOCOL_VERSION.to_string(),
@@ -393,7 +394,7 @@ impl SyncEngine {
                 "{}/v2/tenants/{}/continuity/ack",
                 self.base_url, self.tenant_id
             ))
-            .bearer_auth(self.session_token.as_str())
+            .bearer_auth(self.session_token.expose())
             .header(
                 SYNC_PROTOCOL_VERSION_HEADER,
                 protocol::SYNC_PROTOCOL_VERSION.to_string(),
@@ -417,11 +418,11 @@ fn sync_response_error(status: StatusCode) -> SyncEngineError {
 }
 
 fn normalize_base_url(mut value: String) -> Result<String, SyncEngineError> {
-    value = value.trim().trim_end_matches('/').to_string();
+    value = value.trim().to_string();
     if value.is_empty() {
         return Err(SyncEngineError::EmptyServerUrl);
     }
-    Ok(value)
+    crate::canonical_server_origin(&value).map_err(|_| SyncEngineError::InvalidServerOrigin)
 }
 
 fn validate_push_ops(ops: &[PushOp]) -> Result<(), SyncEngineError> {
@@ -701,6 +702,16 @@ mod tests {
     fn rejects_empty_server_url() {
         let error = SyncEngine::new(" ", Uuid::now_v7(), "token").unwrap_err();
         assert!(matches!(error, SyncEngineError::EmptyServerUrl));
+    }
+
+    #[test]
+    fn debug_never_renders_bearer_token() {
+        let engine =
+            SyncEngine::new("https://sync.example.com", Uuid::now_v7(), "bearer-secret").unwrap();
+        let rendered = format!("{engine:?}");
+
+        assert!(rendered.contains("[REDACTED]"));
+        assert!(!rendered.contains("bearer-secret"));
     }
 
     #[test]

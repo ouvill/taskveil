@@ -641,7 +641,7 @@ pub async fn require_sync_entitlement(
     )
     .fetch_optional(&mut *tx)
     .await?
-    .ok_or_else(AppError::unauthorized)?;
+    .ok_or_else(AppError::invalid_bearer_token)?;
     if tenant.kind != "personal" {
         return Err(AppError::forbidden());
     }

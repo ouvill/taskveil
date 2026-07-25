@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT certificate_fingerprint AS \"certificate_fingerprint!\" FROM devices\n         WHERE id = $1 AND user_id = $2 AND certificate IS NOT NULL\n           AND revoked_at IS NULL AND (key_expires_at IS NULL OR key_expires_at > now())",
+  "query": "SELECT certificate_fingerprint AS \"certificate_fingerprint!\" FROM devices\n         WHERE id = $1 AND user_id = $2 AND certificate IS NOT NULL\n           AND certified_at IS NOT NULL\n           AND revoked_at IS NULL AND (key_expires_at IS NULL OR key_expires_at > now())",
   "describe": {
     "columns": [
       {
@@ -25,5 +25,5 @@
       true
     ]
   },
-  "hash": "843426076156b60c273b13c00bcffbe7a3add0292c6fd8d1d9e76f7136687468"
+  "hash": "8fd035ccd762653f862317dae658f74614d41393c1e111c5ff2bf1bf0599e05b"
 }

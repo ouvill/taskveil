@@ -124,6 +124,7 @@ fi
 
 export DATABASE_URL="postgres://${RUNTIME_USER}:${RUNTIME_PASSWORD}@localhost:${POSTGRES_PORT}/${POSTGRES_DB}"
 export PORT="$SERVER_PORT"
+export TASKVEIL_AUTH_ISSUER="${TASKVEIL_AUTH_ISSUER:-http://localhost:${PORT}}"
 export RUST_LOG="${RUST_LOG:-info,taskveil_server=debug}"
 
 echo "Starting taskveil-server on http://localhost:${PORT}"

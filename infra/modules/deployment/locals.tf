@@ -14,7 +14,8 @@ locals {
     "POST /v1/auth/login/start",
     "POST /v1/auth/login/finish",
     "POST /v1/auth/device/certify",
-    "POST /v1/auth/logout",
+    "POST /v1/auth/token",
+    "POST /v1/auth/revoke",
     "POST /v1/auth/key-wrappers",
   ])
   tags = {
