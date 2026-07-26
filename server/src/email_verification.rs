@@ -411,8 +411,8 @@ impl EmailVerificationService {
         tx: &mut Transaction<'_, Postgres>,
         current_digest: &[u8; VERSIONED_DIGEST_BYTES],
         candidates: &[Vec<u8>],
+        now: DateTime<Utc>,
     ) -> Result<(bool, DateTime<Utc>), AppError> {
-        let now = Utc::now();
         sqlx::query(
             "DELETE FROM email_registration_delivery_limits
              WHERE canonical_email_digest = ANY($1) AND expires_at <= now()",
@@ -624,7 +624,12 @@ impl EmailVerificationService {
         let handoff = decode_handoff_challenge(&request.handoff_challenge)?;
         let request_id = Uuid::now_v7();
         let opaque_credential_id = Uuid::now_v7();
-        let now = Utc::now();
+        // PostgreSQL timestamps have microsecond precision. Use the transaction
+        // clock as the canonical source so persisted deadlines and encrypted
+        // replay responses contain the exact same instant.
+        let now: DateTime<Utc> = sqlx::query_scalar("SELECT now()")
+            .fetch_one(&mut *tx)
+            .await?;
         let otp_expires_at = now + Duration::minutes(OTP_TTL_MINUTES);
         let expires_at = now + Duration::minutes(REGISTRATION_REQUEST_TTL_MINUTES);
         let (otp, otp_digest) = self.generate_otp(request_id, 1);
@@ -657,6 +662,7 @@ impl EmailVerificationService {
                 &mut tx,
                 &canonical_digest,
                 &canonical_digest_candidates,
+                now,
             )
             .await?
         } else {
@@ -970,7 +976,11 @@ impl EmailVerificationService {
             .fetch_one(&mut *tx)
             .await?;
         }
-        let now = Utc::now();
+        // Keep comparisons, database writes, and the replayable response on
+        // PostgreSQL's transaction clock and timestamp precision.
+        let now: DateTime<Utc> = sqlx::query_scalar("SELECT now()")
+            .fetch_one(&mut *tx)
+            .await?;
         let challenge_allows_delivery = resend_count < MAX_RESENDS_PER_CHALLENGE
             && stored_next_retry_at <= now
             && last_delivery_at
@@ -981,6 +991,7 @@ impl EmailVerificationService {
                     &mut tx,
                     &canonical_digest,
                     &canonical_digest_candidates,
+                    now,
                 )
                 .await?
             } else {
