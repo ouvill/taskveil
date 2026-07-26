@@ -639,14 +639,29 @@ fn validate_windows_object_security(
     let process_token = open_current_process_token()?;
     let token_user_buffer = token_user_buffer(process_token.0)?;
     let token_user = unsafe { (*token_user_buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid };
-    if token_user.is_null() || unsafe { EqualSid(owner, token_user) } == 0 {
+    if token_user.is_null() {
+        return Err(ClientError::ProfileLockUnsupported);
+    }
+
+    let local_system_sid = well_known_sid(WinLocalSystemSid)?;
+    let administrators_sid = well_known_sid(WinBuiltinAdministratorsSid)?;
+    // Windows uses the token's default owner for newly created objects. For an
+    // elevated member of the built-in Administrators group that owner is
+    // commonly BUILTIN\Administrators rather than TokenUser. Treat the two
+    // machine-wide principals that are already inside our trusted boundary as
+    // valid owners, while the DACL checks below still reject every untrusted
+    // writer.
+    if unsafe { EqualSid(owner, token_user) } == 0
+        && unsafe { EqualSid(owner, local_system_sid.as_ptr().cast_mut().cast()) } == 0
+        && unsafe { EqualSid(owner, administrators_sid.as_ptr().cast_mut().cast()) } == 0
+    {
         return Err(ClientError::ProfileLockUnsupported);
     }
     verify_current_token_access(descriptor, process_token.0, desired_current_access)?;
 
     let trusted_sids = [
-        well_known_sid(WinLocalSystemSid)?,
-        well_known_sid(WinBuiltinAdministratorsSid)?,
+        local_system_sid,
+        administrators_sid,
         well_known_sid(WinCreatorOwnerSid)?,
         well_known_sid(WinCreatorOwnerRightsSid)?,
     ];

@@ -255,6 +255,10 @@ OS別fail-closed契約は未確定である。本work itemはこれらを
   拒否することを確認した。`git diff --check`にも合格した。Linux / macOS /
   Windows platform matrixの初回実行では、GitHub runner既定temp rootのowner / inherited
   ACLが製品のfail-closed profile条件を満たさず、全profile testが
-  `ProfileLockUnsupported`になった。製品側のACL検証は緩和せず、Windows job専用の
-  owner-only test temp rootを作成して再検証する。
+  `ProfileLockUnsupported`になった。Windows job専用のowner-only test temp rootを
+  作成した再実行では、そのroot作成は成功したが、elevated Administrators tokenが
+  新規child objectのownerを`TokenUser`ではなく`BUILTIN\Administrators`へ設定する
+  Windows標準動作を、製品側が誤って拒否した。owner許可は`TokenUser`、
+  `LOCAL SYSTEM`、`BUILTIN\Administrators`だけに限定し、handleから取得したDACLの
+  untrusted writer拒否は維持した。修正後のWindows platform matrixを再検証する。
 - 検証者: 独立review agent、Codex root orchestrator
