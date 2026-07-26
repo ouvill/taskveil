@@ -66,11 +66,7 @@ void main() {
           body: 'A task reminder is due.',
           snoozeActionTitle: '+1 hour',
         ),
-        payload: const ReminderNotificationPayload(
-          reminderId: 'reminder-id',
-          taskId: 'task-id',
-          listId: 'list-id',
-        ),
+        payload: const ReminderNotificationPayload(reminderId: 'reminder-id'),
       );
 
       final scheduledCall = methodCalls.singleWhere(
@@ -91,8 +87,6 @@ void main() {
       expect(payload, {
         'owner': reminderNotificationCategoryId,
         'reminderId': 'reminder-id',
-        'taskId': 'task-id',
-        'listId': 'list-id',
       });
     },
   );

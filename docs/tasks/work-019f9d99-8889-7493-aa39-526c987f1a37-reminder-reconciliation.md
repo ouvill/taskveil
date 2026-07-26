@@ -1,7 +1,7 @@
 ---
 id: 019f9d99-8889-7493-aa39-526c987f1a37
 title: Durable reminder notification reconciliation
-status: active
+status: done
 lane: critical
 milestone: maintenance
 ---
@@ -82,18 +82,22 @@ OSローカル通知を再構築可能なderived stateとして扱い、domain m
 
 ## 6. 受け入れ基準
 
-- [ ] `LATEST_MIGRATION_VERSION`が5で、`0001`〜`0004`が不変である。
-- [ ] reminder作成・更新・snoozeはschedule、削除・task close / deleteはcancel、
+- [x] `LATEST_MIGRATION_VERSION`が5で、`0001`〜`0004`が不変である。
+- [x] reminder作成・更新・snoozeはschedule、削除・task close / deleteはcancel、
       reopen / list移動はschedule commandを同じDB transactionで記録する。
-- [ ] platform IDはDBに永続化され、正整数・一意で、占有済みIDを再利用しない。
-- [ ] batch commandはtask / list contextをJOINで返し、reminderごとの全件探索を行わない。
-- [ ] OS API成功後だけ同じcommand revisionをACKし、stale ACKは新commandを消さない。
-- [ ] schedule / cancel失敗後もDB mutationとUI refreshは成功し、commandが再試行可能に残る。
-- [ ] 再起動時に未ACK commandとDB正本からOS通知状態を収束できる。
-- [ ] 初回reconcileは最初のFlutter frame後に開始する。
-- [ ] payload / log /履歴へtask title、note、鍵、token等を含めない。
-- [ ] Rust API変更後にFRB 2.12.0 codegenを実行し、生成物を手編集していない。
-- [ ] 関連する全品質ゲートが成功する。
+- [x] platform IDはDBに永続化され、正整数・一意で、占有済みIDを再利用しない。
+- [x] batch commandはtask / list contextをJOINで返し、reminderごとの全件探索を行わない。
+- [x] OS API成功後だけ同じcommand revisionをACKし、stale ACKは新commandを消さない。
+- [x] schedule / cancel失敗後もDB mutationとUI refreshは成功し、commandが再試行可能に残る。
+- [x] transient失敗はforeground中のbounded exponential backoff、permission許可、
+      foreground復帰、process restartで再試行し、background / dispose後にtimerを残さない。
+- [x] orphan / noncanonical cleanup失敗はrebuild intentを保持し、同一serviceで再試行する。
+- [x] 再起動時に未ACK commandとDB正本からOS通知状態を収束できる。
+- [x] 初回reconcileは最初のFlutter frame後に開始する。
+- [x] 新規OS payloadはowner + reminder IDだけとし、task / list ID、title、note、鍵、
+      token等を含めない。旧3-ID payloadはdecode互換だけに限定する。
+- [x] Rust API変更後にFRB 2.12.0 codegenを実行し、生成物を手編集していない。
+- [x] 関連する全品質ゲートが成功する。
 
 ## 7. 制約・注意事項
 
@@ -130,11 +134,15 @@ OSローカル通知を再構築可能なderived stateとして扱い、domain m
   reminder / task / list / effective schedule timeをbatch取得する。OS API成功後だけ
   `(reminder_id, revision)`一致でACKし、stale ACKは後続commandを削除しない。
 - Flutter workerはsingle-flightでcommandをdrainする。schedule / cancel失敗時は
-  commandを残し、再要求またはprocess restart後に再試行する。OS通知は固定owner payload
-  のみをcleanupし、現在の通知IDにはUUID hashを使用しない。
+  commandを残し、foreground中の1、2、4、8、16、30秒bounded backoff、permission許可、
+  foreground復帰、process restartで再試行する。background / dispose時はtimerをcancelし、
+  1 foreground activationの自動試行回数を制限する。OS通知cleanup失敗もrebuild intentを
+  保持して同じbackoffで再走査し、現在の通知IDにはUUID hashを使用しない。
 - provider、snooze、同期後処理をDB-firstへ変更し、通知plugin失敗でcommit済みdomain
   mutationをrollbackまたは失敗表示しない。初回reconcileは`runApp`後の最初のframeで
-  開始する。payloadとlogへtitle、note、鍵、token等を追加していない。
+  開始する。新規OS payloadはowner + reminder IDだけとし、task / list ID、title、note、
+  鍵、token等を含めない。旧3-ID payloadは既存navigation / snooze / cleanupのdecode互換
+  に限定した。
 - Rust client / FRBへprepare、batch list、revision ACKのtyped APIを追加し、FRB
   2.12.0のconfig同値生成を行った。正規config-file commandはsandbox内のFlutter SDK
   cache書込制約により実行できず、独立検証側で生成差分を再確認する。
@@ -145,30 +153,43 @@ OSローカル通知を再構築可能なderived stateとして扱い、domain m
   stale ACK、cancel後retire、起動時再構築、task close / reopenをRust testで固定した。
 - Flutter testへschedule失敗、cancel失敗、service restart、DB-first provider、
   permission denial、task lifecycle、orphan / 非canonical ID cleanup、snooze、
-  first-frame後reconcileを追加した。
+  first-frame後reconcileを追加した。独立レビュー後、schedule / cancel / cleanup失敗から
+  同一service内でのbackoff回復、retry上限、background cancel / foreground resume、
+  dispose、permission成功、最小payloadと旧3-ID decode互換を追加した。
 - `cargo fmt --all -- --check`: PASS。
 - `cargo clippy --workspace -- -D warnings`: PASS。
 - `cargo test -p taskveil-storage`: 93件PASS、既存performance test 1件のみintentional
   ignore。
-- `cargo test --workspace`: 通知変更を含むtestはPASS。sandboxがlocal socket bindを
-  禁止したため`taskveil-client`の既存HTTP server test 3件だけ環境起因で失敗し、
-  非sandbox独立検証へ引き継いだ。
+- `cargo test --workspace`: sandbox外の独立再実行で全件PASS
+  （storage 93件 + performance 1件intentional ignore、client 123件、
+  sync 103件、server unit / integration、bridge 3件を含む）。
 - `env CARGO_TARGET_DIR=target cargo build --release`（`app/rust`）: PASS。
-- Dart analyzerによる`app`全体解析: PASS。`flutter analyze` / `flutter test`は
-  Flutter SDK cache書込とlocal test socketがsandboxで拒否されたため、独立検証側で
-  実行する。
+- Dart analyzerと`flutter analyze`: PASS。
+- 初回の`flutter test test/reminder_notifications_test.dart`: 10件PASS。providerの
+  fire-and-forget workerとfailure injectionが競合しないよう、restart testは
+  domain mutationをbridgeへ直接commitしてからservice failureを1回注入する。
+  独立レビュー修正後は同一service回復等を加えた15件とAndroid通知3件、合計18件が
+  最終差分でPASSした。
+- `flutter test`: 300件PASS、visual QA harness 1件intentional skip。
+- config同値の`flutter_rust_bridge_codegen generate`を独立再実行し、生成差分なし。
 - hardcoded strings、client boundary、boundary fixtureの3 scriptsと
   `git diff --check`: PASS。
 - `0001`〜`0004`に対するbase commitとの差分がないことを確認した。
 
 ### Commit
 
-- この完了報告を含むcommit。
+- `85fe508 fix: reconcile reminders from durable state`
+- 独立レビュー修正と本完了報告を含むfollow-up commit。
 
 ### 未解決事項・独立検証
 
 - 実OS上の通知表示、permission lifecycle、アプリ強制終了を跨ぐ挙動はこの環境では
   実行していない。plugin gatewayと永続command境界をfailure injectionで検証した。
-- 独立検証担当が最終HEADに対して正規同値FRB codegen差分、対象・全Flutter test、
-  sandbox外で必要な全Rust gateを再実行して合否を追記するまでは`status: active`を
-  維持する。
+- 独立検証では初回に、同一process内の自動再試行欠落、cleanup失敗時のrebuild intent
+  消失、OS payloadのtask / list ID過剰保持をP1 2件・P2 1件として指摘した。すべてを
+  bounded backoff / lifecycle制御、cleanup再試行、current / legacy payload分離で修正した。
+- 最終差分のreminder通知15件とAndroid通知3件は独立環境で全件PASSし、Dart analyzer、
+  hardcoded strings、client boundary、boundary fixtureもPASSした。初回統合HEADでは
+  full Flutter 300件PASS、visual QA 1件intentional skip、workspace Rust全件PASSを確認済み。
+  最終修正はRust / FRB生成物を変更していない。
+- 判定: 指摘3件は解消され、Issue #57の受け入れ基準に対して合格。

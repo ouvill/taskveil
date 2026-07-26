@@ -748,12 +748,14 @@ final reminderNotificationGatewayProvider =
     );
 
 final reminderNotificationServiceProvider =
-    Provider<ReminderNotificationService>(
-      (ref) => ReminderNotificationService(
+    Provider<ReminderNotificationService>((ref) {
+      final service = ReminderNotificationService(
         bridge: ref.watch(bridgeServiceProvider),
         gateway: ref.watch(reminderNotificationGatewayProvider),
-      ),
-    );
+      );
+      ref.onDispose(service.dispose);
+      return service;
+    });
 
 final timerClockProvider = Provider<TimerClock>(
   (ref) => const SystemTimerClock(),

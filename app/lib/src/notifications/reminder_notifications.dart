@@ -16,21 +16,23 @@ typedef NotificationResponseHandler =
     Future<void> Function(ReminderNotificationResponse response);
 
 class ReminderNotificationPayload {
-  const ReminderNotificationPayload({
+  const ReminderNotificationPayload({required this.reminderId})
+    : taskId = null,
+      listId = null;
+
+  const ReminderNotificationPayload._legacy({
     required this.reminderId,
     required this.taskId,
     required this.listId,
   });
 
   final String reminderId;
-  final String taskId;
-  final String listId;
+  final String? taskId;
+  final String? listId;
 
   String encode() => jsonEncode({
     'owner': reminderNotificationCategoryId,
     'reminderId': reminderId,
-    'taskId': taskId,
-    'listId': listId,
   });
 
   static ReminderNotificationPayload? decode(String? value) {
@@ -58,27 +60,43 @@ class ReminderNotificationPayload {
       return null;
     }
     final owner = decoded['owner'];
-    final isCurrent = owner == reminderNotificationCategoryId;
-    final isLegacy =
+    final isCurrent =
+        owner == reminderNotificationCategoryId &&
+        decoded.length == 2 &&
+        decoded.containsKey('reminderId');
+    final isOwnedLegacy =
+        owner == reminderNotificationCategoryId &&
+        decoded.length == 4 &&
+        decoded.containsKey('reminderId') &&
+        decoded.containsKey('taskId') &&
+        decoded.containsKey('listId');
+    final isOwnerlessLegacy =
         allowLegacy &&
         owner == null &&
         decoded.length == 3 &&
         decoded.containsKey('reminderId') &&
         decoded.containsKey('taskId') &&
         decoded.containsKey('listId');
-    if (!isCurrent && !isLegacy) {
+    if (!isCurrent && !isOwnedLegacy && !isOwnerlessLegacy) {
       return null;
     }
     final reminderId = decoded['reminderId'];
     final taskId = decoded['taskId'];
     final listId = decoded['listId'];
-    if (reminderId is! String || taskId is! String || listId is! String) {
+    if (reminderId is! String) {
       return null;
     }
-    return ReminderNotificationPayload(
+    if ((isOwnedLegacy || isOwnerlessLegacy) &&
+        (taskId is! String || listId is! String)) {
+      return null;
+    }
+    if (isCurrent) {
+      return ReminderNotificationPayload(reminderId: reminderId);
+    }
+    return ReminderNotificationPayload._legacy(
       reminderId: reminderId,
-      taskId: taskId,
-      listId: listId,
+      taskId: taskId as String,
+      listId: listId as String,
     );
   }
 }
@@ -282,14 +300,29 @@ class FlutterLocalReminderNotificationGateway
 }
 
 class ReminderNotificationService {
-  ReminderNotificationService({required this.bridge, required this.gateway});
+  ReminderNotificationService({
+    required this.bridge,
+    required this.gateway,
+    List<Duration> retryDelays = _defaultRetryDelays,
+    this.retryTimerFactory = _systemRetryTimerFactory,
+  }) : _retryDelays = List.unmodifiable(retryDelays),
+       assert(
+         retryDelays.isNotEmpty &&
+             retryDelays.every((delay) => delay > Duration.zero),
+       );
 
   final BridgeService bridge;
   final ReminderNotificationGateway gateway;
+  final ReminderRetryTimerFactory retryTimerFactory;
+  final List<Duration> _retryDelays;
   ReminderNotificationContent? _content;
   Future<void>? _reconciliation;
+  Timer? _retryTimer;
   bool _reconcileAgain = false;
   bool _rebuildRequested = false;
+  bool _foreground = true;
+  bool _disposed = false;
+  int _retryAttempt = 0;
 
   static const _commandBatchSize = 128;
 
@@ -306,23 +339,97 @@ class ReminderNotificationService {
 
   Future<bool> requestPermissions() async {
     try {
-      return await gateway.requestPermissions();
+      final granted = await gateway.requestPermissions();
+      if (granted) {
+        requestReconciliation(rebuild: true);
+      }
+      return granted;
     } catch (_) {
       return false;
     }
   }
 
   void requestReconciliation({bool rebuild = false}) {
+    _requestReconciliation(rebuild: rebuild, resetRetryBudget: true);
+  }
+
+  void setForeground(bool foreground) {
+    if (_disposed) {
+      return;
+    }
+    if (!foreground) {
+      _foreground = false;
+      _retryTimer?.cancel();
+      _retryTimer = null;
+      return;
+    }
+    _foreground = true;
+    _requestReconciliation(rebuild: true, resetRetryBudget: true);
+  }
+
+  void dispose() {
+    if (_disposed) {
+      return;
+    }
+    _disposed = true;
+    _foreground = false;
+    _retryTimer?.cancel();
+    _retryTimer = null;
+    _reconcileAgain = false;
+    _rebuildRequested = false;
+  }
+
+  void _requestReconciliation({
+    required bool rebuild,
+    required bool resetRetryBudget,
+  }) {
+    if (_disposed) {
+      return;
+    }
+    if (resetRetryBudget) {
+      _retryAttempt = 0;
+      _retryTimer?.cancel();
+      _retryTimer = null;
+    }
+    _reconcileAgain = true;
+    _rebuildRequested = _rebuildRequested || rebuild;
+    if (!_foreground) {
+      return;
+    }
     unawaited(
-      reconcilePending(rebuild: rebuild).catchError((Object error) {
+      _startReconciliation().catchError((Object error) {
         debugPrint('Taskveil reminder reconciliation deferred after failure.');
       }),
     );
   }
 
   Future<void> reconcilePending({bool rebuild = false}) {
+    if (_disposed) {
+      return Future.value();
+    }
+    _retryAttempt = 0;
+    _retryTimer?.cancel();
+    _retryTimer = null;
     _reconcileAgain = true;
     _rebuildRequested = _rebuildRequested || rebuild;
+    if (!_foreground) {
+      return Future.value();
+    }
+    return _startReconciliation();
+  }
+
+  @visibleForTesting
+  Future<void> settleForTesting() async {
+    while (true) {
+      final running = _reconciliation;
+      if (running == null) {
+        return;
+      }
+      await running;
+    }
+  }
+
+  Future<void> _startReconciliation() {
     final running = _reconciliation;
     if (running != null) {
       return running;
@@ -333,22 +440,42 @@ class ReminderNotificationService {
   }
 
   Future<void> _runReconciliation() async {
+    var needsRetry = false;
+    var activeRebuild = false;
     try {
-      while (_reconcileAgain) {
+      while (_reconcileAgain && _foreground && !_disposed) {
         _reconcileAgain = false;
         final rebuild = _rebuildRequested;
         _rebuildRequested = false;
-        await _reconcileOnce(rebuild: rebuild);
+        activeRebuild = rebuild;
+        final outcome = await _reconcileOnce(rebuild: rebuild);
+        activeRebuild = false;
+        if (outcome.needsRetry) {
+          needsRetry = true;
+          _reconcileAgain = true;
+          _rebuildRequested = _rebuildRequested || outcome.requiresRebuild;
+          break;
+        }
       }
+    } catch (_) {
+      needsRetry = true;
+      _reconcileAgain = true;
+      _rebuildRequested = _rebuildRequested || activeRebuild;
+      debugPrint('Taskveil reminder reconciliation deferred after failure.');
     } finally {
       _reconciliation = null;
+      if (needsRetry || _reconcileAgain) {
+        _scheduleRetry();
+      } else {
+        _retryAttempt = 0;
+      }
     }
   }
 
-  Future<void> _reconcileOnce({required bool rebuild}) async {
+  Future<_ReconciliationOutcome> _reconcileOnce({required bool rebuild}) async {
     final content = _content;
     if (content == null) {
-      return;
+      return const _ReconciliationOutcome.complete();
     }
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     final initialCommands = rebuild
@@ -357,14 +484,20 @@ class ReminderNotificationService {
             nowMs: nowMs,
             limit: _commandBatchSize,
           );
-    if (rebuild) {
-      await _removeNoncanonicalPendingNotifications(initialCommands);
-    }
+    final cleanupSucceeded =
+        !rebuild ||
+        await _removeNoncanonicalPendingNotifications(initialCommands);
     var commands = initialCommands;
     while (commands.isNotEmpty) {
+      if (!_foreground || _disposed) {
+        return _ReconciliationOutcome.retry(requiresRebuild: rebuild);
+      }
       var failedCount = 0;
       var staleAckObserved = false;
       for (final command in commands) {
+        if (!_foreground || _disposed) {
+          return _ReconciliationOutcome.retry(requiresRebuild: rebuild);
+        }
         try {
           await _applyCommand(command, content);
           final acknowledged = await bridge.ackReminderNotificationCommand(
@@ -381,20 +514,25 @@ class ReminderNotificationService {
           'Taskveil reminder reconciliation deferred '
           '$failedCount notification command(s).',
         );
-        return;
+        return _ReconciliationOutcome.retry(requiresRebuild: !cleanupSucceeded);
       }
       if (!staleAckObserved &&
           (rebuild || commands.length < _commandBatchSize)) {
-        return;
+        return cleanupSucceeded
+            ? const _ReconciliationOutcome.complete()
+            : const _ReconciliationOutcome.retry(requiresRebuild: true);
       }
       commands = await bridge.listReminderNotificationCommands(
         nowMs: DateTime.now().millisecondsSinceEpoch,
         limit: _commandBatchSize,
       );
     }
+    return cleanupSucceeded
+        ? const _ReconciliationOutcome.complete()
+        : const _ReconciliationOutcome.retry(requiresRebuild: true);
   }
 
-  Future<void> _removeNoncanonicalPendingNotifications(
+  Future<bool> _removeNoncanonicalPendingNotifications(
     List<ReminderNotificationCommandDto> commands,
   ) async {
     final expected = {
@@ -405,6 +543,9 @@ class ReminderNotificationService {
     final scheduled = await gateway.pendingReminderNotifications();
     var failedCount = 0;
     for (final notification in scheduled) {
+      if (!_foreground || _disposed) {
+        return false;
+      }
       if (expected[notification.payload.reminderId] ==
           notification.notificationId) {
         continue;
@@ -421,6 +562,31 @@ class ReminderNotificationService {
         '$failedCount stale notification cancellation(s).',
       );
     }
+    return failedCount == 0;
+  }
+
+  void _scheduleRetry() {
+    if (_disposed ||
+        !_foreground ||
+        _retryTimer != null ||
+        _retryAttempt >= _retryDelays.length) {
+      return;
+    }
+    final delay = _retryDelays[_retryAttempt];
+    _retryAttempt += 1;
+    _retryTimer = retryTimerFactory(delay, () {
+      _retryTimer = null;
+      if (_disposed || !_foreground) {
+        return;
+      }
+      unawaited(
+        _startReconciliation().catchError((Object error) {
+          debugPrint(
+            'Taskveil reminder reconciliation deferred after failure.',
+          );
+        }),
+      );
+    });
   }
 
   Future<void> _applyCommand(
@@ -439,11 +605,7 @@ class ReminderNotificationService {
           notificationId: command.platformId,
           scheduledAt: DateTime.fromMillisecondsSinceEpoch(scheduledAt),
           content: content,
-          payload: ReminderNotificationPayload(
-            reminderId: command.reminderId,
-            taskId: taskId,
-            listId: listId,
-          ),
+          payload: ReminderNotificationPayload(reminderId: command.reminderId),
         );
         return;
       case ReminderNotificationActionDto.cancel:
@@ -474,6 +636,33 @@ class ReminderNotificationService {
     }
     requestReconciliation();
   }
+}
+
+typedef ReminderRetryTimerFactory =
+    Timer Function(Duration delay, void Function() callback);
+
+const _defaultRetryDelays = <Duration>[
+  Duration(seconds: 1),
+  Duration(seconds: 2),
+  Duration(seconds: 4),
+  Duration(seconds: 8),
+  Duration(seconds: 16),
+  Duration(seconds: 30),
+];
+
+Timer _systemRetryTimerFactory(Duration delay, void Function() callback) =>
+    Timer(delay, callback);
+
+class _ReconciliationOutcome {
+  const _ReconciliationOutcome.complete()
+    : needsRetry = false,
+      requiresRebuild = false;
+
+  const _ReconciliationOutcome.retry({required this.requiresRebuild})
+    : needsRetry = true;
+
+  final bool needsRetry;
+  final bool requiresRebuild;
 }
 
 ReminderNotificationResponse reminderResponseFromPlugin(

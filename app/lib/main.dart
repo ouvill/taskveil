@@ -82,9 +82,10 @@ Future<void> main() async {
       initializationError: initializationError,
       overrides: [
         if (reminderNotificationService != null)
-          reminderNotificationServiceProvider.overrideWithValue(
-            reminderNotificationService,
-          ),
+          reminderNotificationServiceProvider.overrideWith((ref) {
+            ref.onDispose(reminderNotificationService!.dispose);
+            return reminderNotificationService;
+          }),
         if (timerNotificationService != null)
           timerNotificationServiceProvider.overrideWithValue(
             timerNotificationService,
@@ -197,6 +198,14 @@ class _TaskveilAppShellState extends ConsumerState<_TaskveilAppShell>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     final onboardingCompleted = ref.read(onboardingStatusProvider).value;
+    if (state == AppLifecycleState.resumed) {
+      ref.read(reminderNotificationServiceProvider).setForeground(true);
+    } else if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      ref.read(reminderNotificationServiceProvider).setForeground(false);
+    }
     if (state == AppLifecycleState.resumed && onboardingCompleted == true) {
       ref.read(appForegroundProvider.notifier).setForeground(true);
       unawaited(_settleRecurrenceAndSync());
