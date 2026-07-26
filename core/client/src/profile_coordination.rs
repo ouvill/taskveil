@@ -107,7 +107,7 @@ impl ProfileCoordinator {
         std::fs::create_dir_all(db_dir).map_err(ClientError::Io)?;
         let canonical_root = db_dir
             .canonicalize()
-            .map_err(|_| ClientError::ProfileLockUnsupported)?;
+            .map_err(|_| profile_coordination_failure("canonicalize"))?;
         let (identity, lock_handles) = Self::open_lock_handles(&canonical_root)?;
         let registry = PROCESS_COORDINATORS.get_or_init(|| Mutex::new(HashMap::new()));
         let mut registry = registry.lock().map_err(|_| ClientError::RuntimeState)?;
@@ -275,7 +275,7 @@ impl ProfileCoordinator {
         let verified_root_info = windows_handle_info(&root_verifier)?;
         validate_windows_directory_info(verified_root_info)?;
         if root_info.identity != verified_root_info.identity {
-            return Err(ClientError::ProfileLockUnsupported);
+            return Err(profile_coordination_failure("root_identity"));
         }
 
         let lock_handle = open_windows_lock_file(&canonical_root.join(PROFILE_LOCK_FILE_NAME))?;
@@ -476,7 +476,7 @@ fn open_windows_directory_handle(path: &Path) -> Result<File, ClientError> {
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
     let file = options
         .open(path)
-        .map_err(|_| ClientError::ProfileLockUnsupported)?;
+        .map_err(|_| profile_coordination_failure("open_directory"))?;
     make_windows_handle_non_inheritable(&file)?;
     Ok(file)
 }
@@ -557,13 +557,13 @@ fn open_windows_read_write_handle(path: &Path, create_new: bool) -> Result<File,
 fn make_windows_handle_non_inheritable(file: &File) -> Result<(), ClientError> {
     if unsafe { SetHandleInformation(file.as_raw_handle() as HANDLE, HANDLE_FLAG_INHERIT, 0) } == 0
     {
-        return Err(ClientError::ProfileLockUnsupported);
+        return Err(profile_coordination_failure("set_handle_information"));
     }
     let mut flags = 0;
     if unsafe { GetHandleInformation(file.as_raw_handle() as HANDLE, &mut flags) } == 0
         || flags & HANDLE_FLAG_INHERIT != 0
     {
-        return Err(ClientError::ProfileLockUnsupported);
+        return Err(profile_coordination_failure("get_handle_information"));
     }
     Ok(())
 }
@@ -824,9 +824,13 @@ fn reject_untrusted_raw_write_aces(
 
 #[cfg(windows)]
 fn windows_security_failure(reason: &'static str) -> ClientError {
-    #[cfg(test)]
-    eprintln!("taskveil windows profile security rejection: {reason}");
-    #[cfg(not(test))]
+    profile_coordination_failure(reason)
+}
+
+fn profile_coordination_failure(reason: &'static str) -> ClientError {
+    #[cfg(all(windows, test))]
+    eprintln!("taskveil windows profile coordination rejection: {reason}");
+    #[cfg(not(all(windows, test)))]
     let _ = reason;
     ClientError::ProfileLockUnsupported
 }
@@ -957,7 +961,7 @@ fn windows_handle_info(file: &File) -> Result<WindowsHandleInfo, ClientError> {
         GetFileInformationByHandle(file.as_raw_handle() as HANDLE, std::ptr::addr_of_mut!(info))
     };
     if result == 0 {
-        return Err(ClientError::ProfileLockUnsupported);
+        return Err(profile_coordination_failure("file_information"));
     }
     Ok(WindowsHandleInfo {
         identity: ProfileIdentity {
@@ -975,7 +979,7 @@ fn validate_windows_directory_info(info: WindowsHandleInfo) -> Result<(), Client
     if info.attributes & FILE_ATTRIBUTE_DIRECTORY == 0
         || info.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
     {
-        return Err(ClientError::ProfileLockUnsupported);
+        return Err(profile_coordination_failure("directory_attributes"));
     }
     Ok(())
 }
@@ -985,7 +989,7 @@ fn validate_windows_lock_info(info: WindowsHandleInfo) -> Result<(), ClientError
     if info.attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0
         || info.link_count != 1
     {
-        return Err(ClientError::ProfileLockUnsupported);
+        return Err(profile_coordination_failure("lock_attributes"));
     }
     Ok(())
 }
