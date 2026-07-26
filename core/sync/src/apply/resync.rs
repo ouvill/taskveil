@@ -460,7 +460,14 @@ pub(super) fn page_apply_error_to_string(error: PageApplyError) -> String {
 
 fn normalize_local_sync_error(error: String) -> String {
     match error.as_str() {
-        "sync lease busy" | "sync lease lost" | "database busy" => error,
+        "clock skew retryable"
+        | "credential unavailable"
+        | "account-bound unavailable"
+        | "profile busy"
+        | "credential busy"
+        | "sync lease busy"
+        | "sync lease lost"
+        | "database busy" => error,
         _ => "sync failed".to_string(),
     }
 }
@@ -482,7 +489,16 @@ mod error_tests {
 
     #[test]
     fn page_apply_preserves_coordination_error_categories() {
-        for expected in ["sync lease busy", "sync lease lost", "database busy"] {
+        for expected in [
+            "clock skew retryable",
+            "credential unavailable",
+            "account-bound unavailable",
+            "profile busy",
+            "credential busy",
+            "sync lease busy",
+            "sync lease lost",
+            "database busy",
+        ] {
             assert_eq!(
                 page_apply_error_to_string(PageApplyError::Hard(expected.to_string())),
                 expected

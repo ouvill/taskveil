@@ -727,7 +727,7 @@ impl TaskveilClient {
     }
 
     fn create_list_mode(&self) -> Result<CreateListMode, ClientError> {
-        self.ensure_account_runtime_restored()?;
+        self.ensure_local_crypto_runtime_restored()?;
         let account = self.account_state()?;
         match &account.crypto {
             CryptoRuntimeState::Anonymous => Ok(CreateListMode::Anonymous),

@@ -58,6 +58,7 @@ fn sync_engine_error_to_string(error: SyncEngineError) -> String {
         }
         SyncEngineError::EntitlementRequired => "entitlement required".to_string(),
         SyncEngineError::UpgradeRequired { .. } => "upgrade required".to_string(),
+        SyncEngineError::ClockSkewRetryable => "clock skew retryable".to_string(),
         _ => "sync failed".to_string(),
     }
 }

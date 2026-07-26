@@ -8,26 +8,48 @@ use taskveil_sync::{
 };
 
 use super::{
-    now_ms, CryptoRuntimeState, SyncRuntimeState, TaskveilClient, INITIAL_BACKFILL_CURSOR_NAME,
+    now_ms, AccountReadiness, CryptoRuntimeState, SyncRuntimeState, TaskveilClient,
+    INITIAL_BACKFILL_CURSOR_NAME,
 };
 use crate::{ClientError, RealtimeTicket, SqliteSyncStore, SyncStatus};
 
 const SYNC_LEASE_TTL_MS: i64 = 5 * 60 * 1_000;
 
+enum SyncReadiness {
+    LoggedOut,
+    Ready(Box<ActiveSyncContext>),
+    CredentialUnavailable,
+    AccountBoundUnavailable,
+}
+
 impl TaskveilClient {
     pub fn sync_status(&self) -> Result<SyncStatus, ClientError> {
         let _operation = self.begin_operation()?;
-        let logged_in = self.has_active_sync_context()?;
+        let logged_in = match self.sync_readiness()? {
+            SyncReadiness::LoggedOut => false,
+            SyncReadiness::Ready(_) => true,
+            SyncReadiness::CredentialUnavailable => return Err(ClientError::CredentialUnavailable),
+            SyncReadiness::AccountBoundUnavailable => {
+                return Err(ClientError::AccountBoundUnavailable)
+            }
+        };
         let state = self.sync_state()?;
         Ok(sync_status(logged_in, &state))
     }
 
     pub async fn sync_now(&self) -> Result<SyncStatus, ClientError> {
         let operation = self.begin_operation()?;
-        if !self.has_active_sync_context()? {
-            let state = self.sync_state()?;
-            return Ok(sync_status(false, &state));
-        }
+        let context = match self.sync_readiness()? {
+            SyncReadiness::LoggedOut => {
+                let state = self.sync_state()?;
+                return Ok(sync_status(false, &state));
+            }
+            SyncReadiness::Ready(context) => *context,
+            SyncReadiness::CredentialUnavailable => return Err(ClientError::CredentialUnavailable),
+            SyncReadiness::AccountBoundUnavailable => {
+                return Err(ClientError::AccountBoundUnavailable)
+            }
+        };
         {
             let mut state = self.sync_state()?;
             if state.running {
@@ -37,11 +59,10 @@ impl TaskveilClient {
             state.last_error = None;
         }
         let running = SyncRunningGuard { client: self };
-        let result = self.run_sync_now().await;
+        let result = self.run_sync_now(context).await;
         let timestamp = now_ms()?;
-        let logged_in = self.has_active_sync_context()?;
         let mut state = self.sync_state()?;
-        let (status, surfaced_error) = finish_sync_run(logged_in, &mut state, result, timestamp);
+        let (status, surfaced_error) = finish_sync_run(true, &mut state, result, timestamp);
         drop(state);
         drop(running);
         drop(operation);
@@ -55,16 +76,19 @@ impl TaskveilClient {
     /// session token or tenant/device identifiers to the frontend.
     pub async fn realtime_ticket(&self) -> Result<RealtimeTicket, ClientError> {
         let _operation = self.begin_operation()?;
-        self.access_token(false).await?;
-        let context = self
-            .active_sync_context()?
-            .ok_or(ClientError::AccountRequest)?;
+        let context = match self.sync_readiness()? {
+            SyncReadiness::Ready(context) => context,
+            SyncReadiness::LoggedOut | SyncReadiness::CredentialUnavailable => {
+                return Err(ClientError::CredentialUnavailable)
+            }
+            SyncReadiness::AccountBoundUnavailable => {
+                return Err(ClientError::AccountBoundUnavailable)
+            }
+        };
+        let token = self.access_token(false).await?;
         let client =
             AccountClient::new(&context.server_url).map_err(|_| ClientError::AccountRequest)?;
-        let response = match client
-            .realtime_ticket(context.tenant_id, context.session_token.expose())
-            .await
-        {
+        let response = match client.realtime_ticket(context.tenant_id, &token).await {
             Err(AccountClientError::Server(401)) => {
                 let token = self.access_token(true).await?;
                 client.realtime_ticket(context.tenant_id, &token).await
@@ -82,19 +106,25 @@ impl TaskveilClient {
         })
     }
 
-    async fn run_sync_now(&self) -> Result<SyncRunSummary, ClientError> {
-        self.ensure_account_runtime_restored()?;
+    async fn run_sync_now(
+        &self,
+        mut context: ActiveSyncContext,
+    ) -> Result<SyncRunSummary, ClientError> {
         let mut store = SqliteSyncStore::new_secret(self.db_path.clone(), self.db_key());
         let lease_owner = taskveil_domain::Uuid::now_v7().to_string();
         store
             .acquire_sync_lease(&lease_owner, self.loaded_runtime_epoch(), SYNC_LEASE_TTL_MS)
             .map_err(|error| map_sync_run_error(map_sync_lease_error(error)))?;
         let result = async {
-            self.access_token_for_sync(false, &mut store).await?;
-            match self.run_sync_attempt(&mut store).await {
+            let token = self.access_token_for_sync(false, &mut store).await?;
+            context.server_url = token.issuer.clone();
+            context.session_token = taskveil_sync::SecretString::new(token.to_string());
+            match self.run_sync_attempt(&context, &mut store).await {
                 Err(error) if error == "unauthorized" => {
-                    self.access_token_for_sync(true, &mut store).await?;
-                    self.run_sync_attempt(&mut store)
+                    let token = self.access_token_for_sync(true, &mut store).await?;
+                    context.server_url = token.issuer.clone();
+                    context.session_token = taskveil_sync::SecretString::new(token.to_string());
+                    self.run_sync_attempt(&context, &mut store)
                         .await
                         .map_err(map_sync_run_error)
                 }
@@ -114,19 +144,16 @@ impl TaskveilClient {
 
     async fn run_sync_attempt(
         &self,
+        context: &ActiveSyncContext,
         store: &mut SqliteSyncStore,
     ) -> Result<SyncRunSummary, String> {
-        let context = self
-            .active_sync_context()
-            .map_err(|error| map_sync_lease_error_from_client(&error))?
-            .ok_or_else(|| "sync failed".to_string())?;
         let mut clock = || now_ms().map_err(|error| error.to_string());
         let mut key_refresher = ProductionKeyRefresher {
             client: self,
             lease: store.active_lease().map_err(map_sync_lease_error)?,
         };
         let mut pre_push = |store: &mut SqliteSyncStore| {
-            self.run_initial_backfill_if_needed(store)
+            self.run_initial_backfill_if_needed(context, store)
                 .map_err(|error| map_sync_lease_error_from_client(&error))
         };
         async {
@@ -166,13 +193,13 @@ impl TaskveilClient {
 
     fn run_initial_backfill_if_needed(
         &self,
+        context: &ActiveSyncContext,
         store: &mut SqliteSyncStore,
     ) -> Result<(), ClientError> {
-        if self.active_sync_context()?.is_none()
-            || store
-                .get_cursor_seq(INITIAL_BACKFILL_CURSOR_NAME)
-                .map_err(map_sync_run_error)?
-                .is_some()
+        if store
+            .get_cursor_seq(INITIAL_BACKFILL_CURSOR_NAME)
+            .map_err(map_sync_run_error)?
+            .is_some()
         {
             return Ok(());
         }
@@ -185,9 +212,6 @@ impl TaskveilClient {
         let tasks = self.with_task_repository(|repository| Ok(repository.list_all_for_sync()?))?;
         let timer_sessions =
             self.with_timer_repository(|repository| Ok(repository.list_completed()?))?;
-        let context = self
-            .active_sync_context()?
-            .ok_or(ClientError::AccountRequest)?;
         let mut clock = || now_ms().map_err(|error| error.to_string());
         let mut transaction = store
             .begin_write_transaction()
@@ -212,15 +236,50 @@ impl TaskveilClient {
         transaction.commit().map_err(map_sync_run_error)
     }
 
-    fn active_sync_context(&self) -> Result<Option<ActiveSyncContext>, ClientError> {
-        self.ensure_account_runtime_restored()?;
+    fn sync_readiness(&self) -> Result<SyncReadiness, ClientError> {
+        match self.resolve_account_readiness()? {
+            AccountReadiness::LoggedOut => return Ok(SyncReadiness::LoggedOut),
+            AccountReadiness::CredentialUnavailable => {
+                return Ok(SyncReadiness::CredentialUnavailable)
+            }
+            AccountReadiness::AccountBoundUnavailable => {
+                return Ok(SyncReadiness::AccountBoundUnavailable)
+            }
+            AccountReadiness::Ready => {}
+        }
         let account = self.account_state()?;
-        let Some(session) = account.session.clone().filter(|session| session.logged_in) else {
-            return Ok(None);
-        };
+        let session = account
+            .session
+            .clone()
+            .filter(|session| session.logged_in)
+            .ok_or(ClientError::CredentialUnavailable)?;
         let CryptoRuntimeState::Ready(crypto) = &account.crypto else {
-            return Ok(None);
+            return Ok(SyncReadiness::AccountBoundUnavailable);
         };
+        let session_user_id = session
+            .user_id
+            .as_deref()
+            .ok_or(ClientError::IncompleteAccountState)?
+            .parse::<taskveil_domain::Uuid>()
+            .map_err(|_| ClientError::IncompleteAccountState)?;
+        let session_tenant_id = session
+            .tenant_id
+            .as_deref()
+            .ok_or(ClientError::IncompleteAccountState)?
+            .parse::<taskveil_domain::Uuid>()
+            .map_err(|_| ClientError::IncompleteAccountState)?;
+        let session_device_id = session
+            .device_id
+            .as_deref()
+            .ok_or(ClientError::IncompleteAccountState)?
+            .parse::<taskveil_domain::Uuid>()
+            .map_err(|_| ClientError::IncompleteAccountState)?;
+        if session_user_id != crypto.user_id()
+            || session_tenant_id != crypto.tenant_id()
+            || session_device_id != crypto.device_id()
+        {
+            return Err(ClientError::ProfileIdentityMismatch);
+        }
         let tenant_id = crypto.tenant_id();
         let device_id = crypto.device_id().to_string();
         let keys = crypto.sync_keys().clone();
@@ -228,24 +287,20 @@ impl TaskveilClient {
             taskveil_sync::derive_personal_manifest_auth_key(crypto.master_key())
                 .map_err(|_| ClientError::AccountBoundUnavailable)?;
         drop(account);
-        let Some(token) = self.current_access_token()? else {
-            return Ok(None);
-        };
-        if token.is_empty() || !session.logged_in {
-            return Ok(None);
+        let token = self
+            .current_access_token()?
+            .ok_or(ClientError::CredentialUnavailable)?;
+        if token.is_empty() {
+            return Ok(SyncReadiness::CredentialUnavailable);
         }
-        Ok(Some(ActiveSyncContext {
+        Ok(SyncReadiness::Ready(Box::new(ActiveSyncContext {
             server_url: token.issuer.clone(),
             tenant_id,
             device_id,
             session_token: taskveil_sync::SecretString::new(token.to_string()),
             keys,
             manifest_auth_key,
-        }))
-    }
-
-    fn has_active_sync_context(&self) -> Result<bool, ClientError> {
-        Ok(self.active_sync_context()?.is_some())
+        })))
     }
 }
 
@@ -282,6 +337,11 @@ pub(super) fn map_sync_run_error(error: String) -> ClientError {
     match error.as_str() {
         "upgrade required" => ClientError::UpgradeRequired,
         "entitlement required" => ClientError::EntitlementRequired,
+        "clock skew retryable" => ClientError::ClockSkewRetryable,
+        "credential unavailable" => ClientError::CredentialUnavailable,
+        "account-bound unavailable" => ClientError::AccountBoundUnavailable,
+        "profile busy" => ClientError::ProfileBusy,
+        "credential busy" => ClientError::Busy,
         "sync lease busy" => ClientError::SyncLeaseBusy,
         "sync lease lost" => ClientError::LeaseLost,
         "database busy" => ClientError::DatabaseBusy,
@@ -291,6 +351,13 @@ pub(super) fn map_sync_run_error(error: String) -> ClientError {
 
 fn map_sync_lease_error_from_client(error: &ClientError) -> String {
     match error {
+        ClientError::UpgradeRequired => "upgrade required".to_string(),
+        ClientError::EntitlementRequired => "entitlement required".to_string(),
+        ClientError::ClockSkewRetryable => "clock skew retryable".to_string(),
+        ClientError::CredentialUnavailable => "credential unavailable".to_string(),
+        ClientError::AccountBoundUnavailable => "account-bound unavailable".to_string(),
+        ClientError::ProfileBusy => "profile busy".to_string(),
+        ClientError::Busy => "credential busy".to_string(),
         ClientError::SyncLeaseBusy => "sync lease busy".to_string(),
         ClientError::LeaseLost
         | ClientError::Storage(taskveil_storage::StorageError::SyncLeaseLost)
@@ -406,9 +473,35 @@ fn finish_sync_run(
             state.last_error = Some("database busy".to_string());
             surfaced_error = Some(ClientError::DatabaseBusy);
         }
-        Err(_) => {
+        Err(error @ ClientError::ClockSkewRetryable) => {
+            state.last_failure_at = Some(timestamp);
+            state.last_error = Some("clock skew retryable".to_string());
+            surfaced_error = Some(error);
+        }
+        Err(error @ ClientError::CredentialUnavailable) => {
+            state.last_failure_at = Some(timestamp);
+            state.last_error = Some("credential unavailable".to_string());
+            surfaced_error = Some(error);
+        }
+        Err(error @ ClientError::AccountBoundUnavailable) => {
+            state.last_failure_at = Some(timestamp);
+            state.last_error = Some("account-bound unavailable".to_string());
+            surfaced_error = Some(error);
+        }
+        Err(error @ ClientError::ProfileBusy) => {
+            state.last_failure_at = Some(timestamp);
+            state.last_error = Some("profile busy".to_string());
+            surfaced_error = Some(error);
+        }
+        Err(error @ ClientError::Busy) => {
+            state.last_failure_at = Some(timestamp);
+            state.last_error = Some("credential busy".to_string());
+            surfaced_error = Some(error);
+        }
+        Err(error) => {
             state.last_failure_at = Some(timestamp);
             state.last_error = Some("sync failed".to_string());
+            surfaced_error = Some(error);
         }
     }
     (sync_status(logged_in, state), surfaced_error)
@@ -432,7 +525,7 @@ mod tests {
         assert!(!status.running);
         assert_eq!(status.last_failure_at, Some(42));
         assert_eq!(status.last_error.as_deref(), Some("sync failed"));
-        assert!(surfaced_error.is_none());
+        assert!(matches!(surfaced_error, Some(ClientError::AccountRequest)));
     }
 
     #[test]
@@ -449,7 +542,16 @@ mod tests {
             map_sync_lease_error_from_client(&ClientError::SyncLeaseBusy),
             "sync lease busy"
         );
+        assert_eq!(
+            map_sync_lease_error_from_client(&ClientError::ClockSkewRetryable),
+            "clock skew retryable"
+        );
         for expected in [
+            ClientError::ClockSkewRetryable,
+            ClientError::CredentialUnavailable,
+            ClientError::AccountBoundUnavailable,
+            ClientError::ProfileBusy,
+            ClientError::Busy,
             ClientError::SyncLeaseBusy,
             ClientError::LeaseLost,
             ClientError::DatabaseBusy,
@@ -462,7 +564,14 @@ mod tests {
             assert!(matches!(
                 surfaced_error,
                 Some(
-                    ClientError::SyncLeaseBusy | ClientError::LeaseLost | ClientError::DatabaseBusy
+                    ClientError::ClockSkewRetryable
+                        | ClientError::CredentialUnavailable
+                        | ClientError::AccountBoundUnavailable
+                        | ClientError::ProfileBusy
+                        | ClientError::Busy
+                        | ClientError::SyncLeaseBusy
+                        | ClientError::LeaseLost
+                        | ClientError::DatabaseBusy
                 )
             ));
         }

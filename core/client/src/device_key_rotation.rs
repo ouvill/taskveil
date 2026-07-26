@@ -25,7 +25,7 @@ impl TaskveilClient {
     /// active/pending capsule protocol. Returns the committed DK generation.
     pub fn rotate_device_key(&self) -> Result<u64, ClientError> {
         let _operation = self.begin_exclusive_operation()?;
-        self.ensure_account_runtime_restored()?;
+        self.ensure_local_crypto_runtime_restored()?;
 
         let wrapping_material = {
             let account = self.account_state()?;
