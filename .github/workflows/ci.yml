@@ -201,6 +201,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "failed to remove inherited temp ACLs" }
           & icacls.exe $secureTemp /grant:r "${currentUser}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F"
           if ($LASTEXITCODE -ne 0) { throw "failed to grant secure temp ACLs" }
+          $aclProbe = Join-Path $secureTemp "taskveil-acl-probe"
+          New-Item -ItemType Directory -Path $aclProbe -Force | Out-Null
+          Write-Host "Profile fixture owner: $((Get-Acl $aclProbe).Owner)"
+          & icacls.exe $aclProbe
+          if ($LASTEXITCODE -ne 0) { throw "failed to inspect inherited profile ACLs" }
+          Remove-Item -LiteralPath $aclProbe
           "TMP=$secureTemp" >> $env:GITHUB_ENV
           "TEMP=$secureTemp" >> $env:GITHUB_ENV
 
