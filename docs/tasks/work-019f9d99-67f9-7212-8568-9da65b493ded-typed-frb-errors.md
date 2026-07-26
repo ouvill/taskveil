@@ -1,7 +1,7 @@
 ---
 id: 019f9d99-67f9-7212-8568-9da65b493ded
 title: Typed FRB error outcomes
-status: active
+status: done
 lane: critical
 milestone: maintenance
 ---
@@ -64,7 +64,7 @@ FRB 2.12.0が提供するtyped `Result<T, E>`を使用し、新規error transpor
 - core `ClientError`のdomain分類やstorage schemaの再設計。
 - server wire problem-details形式の変更。
 - telemetryへraw errorやPIIを追加すること。
-- package追加、push、PR、merge。
+- 新規package追加、または本PRの自己merge。
 
 ## 5. 実装手順
 
@@ -78,17 +78,17 @@ FRB 2.12.0が提供するtyped `Result<T, E>`を使用し、新規error transpor
 
 ## 6. 受け入れ基準
 
-- [ ] bridge errorはclosed stable code、allowlist済みarguments、retryableだけを持つ。
-- [ ] path、SQLite detail、UUID、入力値、server body、secretがDTO / Debug / UIへ出ない。
-- [ ] credential、upgrade、profile/database/lease busy、crypto unavailable、
+- [x] bridge errorはclosed stable code、allowlist済みarguments、retryableだけを持つ。
+- [x] path、SQLite detail、UUID、入力値、server body、secretがDTO / Debug / UIへ出ない。
+- [x] credential、upgrade、profile/database/lease busy、crypto unavailable、
       validation、storage、unknownが区別される。
-- [ ] public FRB APIに`Result<_, String>`と`map_err(|e| e.to_string())`が残らない。
-- [ ] `SyncStatus.last_error`がraw stringではなくtyped outcomeになる。
-- [ ] Flutterはstable codeからARB localizationを選び、raw `.toString()`を表示しない。
-- [ ] production `greet` / `createDraftTask`がFRB surfaceと生成物から削除される。
-- [ ] 一時encrypted profileを使う実CRUD/error mapping integration testが成功する。
-- [ ] FRB正規codegen、Rust / Flutter全品質ゲート、boundary negative testが成功する。
-- [ ] 独立検証でP1 / P2相当の未解決指摘がない。
+- [x] public FRB APIに`Result<_, String>`と`map_err(|e| e.to_string())`が残らない。
+- [x] `SyncStatus.last_error`がraw stringではなくtyped outcomeになる。
+- [x] Flutterはstable codeからARB localizationを選び、raw `.toString()`を表示しない。
+- [x] production `greet` / `createDraftTask`がFRB surfaceと生成物から削除される。
+- [x] 一時encrypted profileを使う実CRUD/error mapping integration testが成功する。
+- [x] FRB正規codegen、Rust / Flutter全品質ゲート、boundary negative testが成功する。
+- [x] 独立検証でP1 / P2相当の未解決指摘がない。
 
 ## 7. 制約・注意事項
 
@@ -170,8 +170,8 @@ FRB 2.12.0が提供するtyped `Result<T, E>`を使用し、新規error transpor
   - encrypted profile / redaction focused Flutter test: 4 pass
   - `sh app/tool/check_client_boundaries.sh`: pass
   - `git diff --check`: pass
-- push / PR / mergeは行っていない。baseに未公開security候補を含むため、
-  security advisoryの公式merge後に依存順を保って公開する。
+- security候補とsettings / internal metadata境界の公式merge後、Issue #65固有の
+  2 commitだけをpublic `main`へ載せ直し、公開PRとして提出する。
 
 ### 独立検証
 
@@ -189,5 +189,26 @@ FRB 2.12.0が提供するtyped `Result<T, E>`を使用し、新規error transpor
   - client 126、sync 103、bridge 2、auth integration 2: pass
   - Calendar / bridge localization / encrypted CRUD対象Flutter 16: pass
   - `flutter analyze`、focused clippy、boundary / hardcoded / diff check: pass
-- 最終判定: 再レビュー待ち
+- 最終判定: APPROVE（P0 / P1 / P2残存なし）
 - 検証者: issue54 independent reviewer
+
+### Public main再構築検証
+
+- 作業日: 2026-07-27
+- base: public `main` `18ad3c94456ae7a1ae19219753f9016624eb7ecf`
+- 再構築: settings境界より後のIssue #65固有2 commitだけをrebaseし、競合なし。
+- FRB正規codegen: pass、生成差分なし。
+- `cargo fmt --all -- --check`: pass
+- `cargo clippy --workspace --all-targets -- -D warnings`: pass
+- client 128、sync 98、bridge 2とdoc test: pass
+- `cargo test --workspace`: 機能テストとDocker統合テストはpass。並行負荷時に
+  SQLCipher 10k性能testのHome中央値が959 msとなり750 ms上限を超えたため、
+  閾値を変更せず同一testを単独再実行し、Home 417 ms、Calendar 71 msでpass。
+- bridge release build、`flutter analyze`: pass
+- `flutter test`: 303 pass、visual QA harness 1 intentional skip。CI前提の
+  performance fixtureを事前buildした実SQLCipher testはHome 568 ms、
+  Calendar 150 msでpass。
+- hardcoded strings、client boundary、boundary negative test、
+  `git diff --check`: pass。
+- 既存独立レビューのP0 / P1 / P2残存なし判定を維持し、現行baseへの再構築差分で
+  新たなP0 / P1 / P2 / P3指摘なし。
