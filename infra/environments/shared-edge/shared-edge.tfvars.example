@@ -1,0 +1,3 @@
+base_domain           = "example.invalid"
+cloudflare_account_id = "replace-with-account-id"
+cloudflare_zone_id    = "replace-with-zone-id"

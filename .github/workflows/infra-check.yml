@@ -53,6 +53,12 @@ jobs:
           tofu -chdir=infra/bootstrap/state init -backend=false
           tofu -chdir=infra/bootstrap/state validate
 
+      - name: Validate shared edge
+        run: |
+          tofu -chdir=infra/environments/shared-edge init -backend=false
+          tofu -chdir=infra/environments/shared-edge validate
+          tofu -chdir=infra/environments/shared-edge test
+
       - name: Validate staging
         run: |
           tofu -chdir=infra/environments/staging init -backend=false

@@ -3,7 +3,7 @@ use std::{collections::HashMap, env, ffi::OsString, sync::Arc, time::Duration as
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
-use reqwest::{redirect::Policy, Client, StatusCode, Url};
+use reqwest::{header::CONTENT_LENGTH, redirect::Policy, Client, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use thiserror::Error;
@@ -361,6 +361,7 @@ impl RealtimeGateway {
         let response = enabled
             .client
             .post(enabled.publish_url.clone())
+            .header(CONTENT_LENGTH, body.len())
             .header("X-Taskveil-Realtime-Key-Id", &enabled.publish_current.id)
             .header("X-Taskveil-Realtime-Timestamp", timestamp)
             .header("X-Taskveil-Realtime-Signature", signature)
@@ -707,6 +708,7 @@ mod tests {
         );
         assert_eq!(headers["X-Taskveil-Realtime-Key-Id"], "publish-current");
         assert_eq!(headers["X-Taskveil-Realtime-Timestamp"], "1784059200");
+        assert_eq!(headers[CONTENT_LENGTH], body.len().to_string());
         let signature = URL_SAFE_NO_PAD
             .decode(headers["X-Taskveil-Realtime-Signature"].to_str().unwrap())
             .unwrap();

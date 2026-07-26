@@ -50,6 +50,7 @@ export async function publish(
   return SELF.fetch("https://example.com/v1/publish", {
     body,
     headers: {
+      "Content-Length": String(body.byteLength),
       "Content-Type": "application/json",
       "X-Taskveil-Realtime-Key-Id": options.kid ?? env.PUBLISH_KEY_CURRENT_ID,
       "X-Taskveil-Realtime-Signature": signature,

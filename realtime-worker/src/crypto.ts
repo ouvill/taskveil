@@ -1,6 +1,5 @@
 import {
   KEY_ID_PATTERN,
-  MAX_PUBLISH_BODY_BYTES,
   MAX_PUBLISH_SKEW_SECONDS,
   MAX_TICKET_BYTES,
   OPAQUE_TAG_PATTERN,
@@ -9,6 +8,7 @@ import {
   type PublishPayload,
   type TicketPayload,
 } from "./contracts";
+import { readPublishBody } from "./body";
 
 const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
 const encoder = new TextEncoder();
@@ -88,16 +88,8 @@ export async function verifyPublish(
   keys: SigningKeySet,
   nowSeconds: number,
 ): Promise<VerifiedPublish | null> {
-  const contentLength = request.headers.get("Content-Length");
-  if (contentLength !== null) {
-    const parsedLength = parseCanonicalInteger(contentLength);
-    if (parsedLength === null || parsedLength > MAX_PUBLISH_BODY_BYTES) {
-      return null;
-    }
-  }
-
-  const body = new Uint8Array(await request.arrayBuffer());
-  if (body.byteLength > MAX_PUBLISH_BODY_BYTES) return null;
+  const body = await readPublishBody(request);
+  if (!body) return null;
 
   const kid = request.headers.get("X-Taskveil-Realtime-Key-Id");
   const timestampText = request.headers.get("X-Taskveil-Realtime-Timestamp");

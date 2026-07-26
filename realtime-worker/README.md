@@ -8,8 +8,13 @@ forwards record data, cursors, tenant UUIDs, or device UUIDs.
 
 - `GET /v1/connect` requires `Upgrade: websocket` and a 300-second ticket in
   `Authorization: Bearer <ticket>`.
-- `POST /v1/publish` requires the ADR-019 key ID, Unix timestamp, and HMAC
-  headers. A valid request fans out exactly `{"v":1,"type":"changed"}`.
+- `POST /v1/publish` requires the ADR-019 key ID, Unix timestamp, HMAC headers,
+  and exactly one canonical decimal `Content-Length` in the range `0..=512`.
+  The Worker validates the header before reading, then reads the byte stream
+  through a BYOB reader with a 513-byte probe ceiling. A missing, malformed,
+  under-reported, over-reported, or oversized body is cancelled before HMAC
+  verification and is never forwarded to a Durable Object. A valid request
+  fans out exactly `{"v":1,"type":"changed"}`.
 
 Both routes select the tenant Durable Object through
 `REALTIME_CHANNELS.jurisdiction("eu").getByName(opaqueChannel)`. The test suite
@@ -33,6 +38,15 @@ No production values belong in this repository. The values in
 public deterministic test material.
 
 Wranglerは`staging` / `production`の別Worker環境とversion / deploymentを管理する。Custom DomainはOpenTofuが`realtime.<environment>.<base-domain>`を対応するWorker serviceへ接続し、version upload時のCLI optionにはしない。productionのapply / deploy workflowはない。どちらの環境もWorker code内の`REALTIME_CHANNELS.jurisdiction("eu")`を維持する。
+
+OpenTofuは同じhost/pathへCloudflare zone-level WAF custom ruleを設定し、canonical
+`Content-Length: 0..512`と実body 512 bytes以下をWorker実行前にも強制する。
+`http.request.body.size`と正規表現はCloudflare Enterprise planを必要とするため、
+zone-level phase entrypointは専用shared-edge stateがstaging / production両hostname分を
+一括所有し、環境別deployment stateは参照も変更もしない。初回shared-edge applyと
+production release前にplan entitlement、`Zone WAF Write`権限、両hostでのrule active
+状態を人間が確認する。WAFは多層防御であり、Workerの513-byte bounded readを
+無効化・省略してはならない。
 
 ## Observability
 

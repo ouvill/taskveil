@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { evictDurableObject, runInDurableObject, SELF } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CHANGE_FRAME, MAX_CONNECTIONS, type ConnectionAttachment } from "../src/contracts";
+import { readPublishBody } from "../src/body";
 import { verifyPublish, verifyTicket } from "../src/crypto";
 import fixture from "./fixtures/realtime-hmac-v1.json";
 import {
@@ -42,6 +43,7 @@ describe("ticket authentication", () => {
     const request = new Request("https://example.com/v1/publish", {
       body: vector.publish.body,
       headers: {
+        "Content-Length": String(new TextEncoder().encode(vector.publish.body).byteLength),
         "X-Taskveil-Realtime-Key-Id": vector.publish.key_id,
         "X-Taskveil-Realtime-Signature": vector.publish.signature,
         "X-Taskveil-Realtime-Timestamp": String(vector.publish.timestamp),
@@ -209,6 +211,42 @@ describe("publish authentication and fan-out", () => {
   });
 });
 
+describe("publish body boundary", () => {
+  it("rejects absent, malformed, negative, and oversized Content-Length before reading", async () => {
+    for (const contentLength of [undefined, "01", "-1", "1.0", "513"]) {
+      const fixture = byteStreamRequest(4_096, contentLength);
+      expect(await readPublishBody(fixture.request)).toBeNull();
+      expect(fixture.observation.bytesProvided).toBe(0);
+      expect(fixture.observation.maxRequestedBytes).toBe(0);
+      expect(fixture.observation.cancelled).toBe(true);
+    }
+  });
+
+  it("reads no more than 513 bytes and cancels under-reported or oversized streams", async () => {
+    for (const [actualLength, contentLength] of [
+      [4_096, "1"],
+      [4_096, "512"],
+    ] as const) {
+      const fixture = byteStreamRequest(actualLength, contentLength);
+      expect(await readPublishBody(fixture.request)).toBeNull();
+      expect(fixture.observation.bytesProvided).toBe(513);
+      expect(fixture.observation.maxRequestedBytes).toBe(513);
+      expect(fixture.observation.cancelled).toBe(true);
+    }
+  });
+
+  it("rejects over-reported length and accepts an exact 512-byte stream", async () => {
+    const overReported = byteStreamRequest(511, "512");
+    expect(await readPublishBody(overReported.request)).toBeNull();
+    expect(overReported.observation.bytesProvided).toBe(511);
+
+    const exact = byteStreamRequest(512, "512");
+    expect(await readPublishBody(exact.request)).toEqual(new Uint8Array(512));
+    expect(exact.observation.bytesProvided).toBe(512);
+    expect(exact.observation.maxRequestedBytes).toBe(513);
+  });
+});
+
 describe("connection lifecycle", () => {
   it("replaces the previous socket for the same device", async () => {
     const first = accept(await connect(DEVICE_A));
@@ -315,4 +353,58 @@ function connectWithToken(token: string): Promise<Response> {
   return SELF.fetch("https://example.com/v1/connect", {
     headers: { Authorization: `Bearer ${token}`, Upgrade: "websocket" },
   });
+}
+
+function byteStreamRequest(
+  actualLength: number,
+  contentLength: string | undefined,
+): {
+  request: Request;
+  observation: {
+    bytesProvided: number;
+    cancelled: boolean;
+    maxRequestedBytes: number;
+  };
+} {
+  const observation = {
+    bytesProvided: 0,
+    cancelled: false,
+    maxRequestedBytes: 0,
+  };
+  const body = new ReadableStream({
+    type: "bytes",
+    pull(controller) {
+      const request = controller.byobRequest;
+      if (!request) throw new Error("expected a BYOB request");
+      const view = request.view;
+      if (!view) throw new Error("expected a BYOB view");
+      observation.maxRequestedBytes = Math.max(
+        observation.maxRequestedBytes,
+        view.byteLength,
+      );
+      const remaining = actualLength - observation.bytesProvided;
+      if (remaining === 0) {
+        controller.close();
+        return;
+      }
+      const provided = Math.min(view.byteLength, remaining);
+      new Uint8Array(view.buffer, view.byteOffset, provided).fill(0);
+      observation.bytesProvided += provided;
+      request.respond(provided);
+      if (observation.bytesProvided === actualLength) controller.close();
+    },
+    cancel() {
+      observation.cancelled = true;
+    },
+  });
+  const headers = new Headers();
+  if (contentLength !== undefined) headers.set("Content-Length", contentLength);
+  return {
+    request: new Request("https://example.com/v1/publish", {
+      body,
+      headers,
+      method: "POST",
+    }),
+    observation,
+  };
 }
