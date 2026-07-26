@@ -632,7 +632,7 @@ fn validate_windows_object_security(
         )
     };
     if status != ERROR_SUCCESS || descriptor.is_null() || owner.is_null() || dacl.is_null() {
-        return Err(ClientError::ProfileLockUnsupported);
+        return Err(windows_security_failure("security_descriptor"));
     }
     let _descriptor = LocalAllocation(descriptor);
 
@@ -640,7 +640,7 @@ fn validate_windows_object_security(
     let token_user_buffer = token_user_buffer(process_token.0)?;
     let token_user = unsafe { (*token_user_buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid };
     if token_user.is_null() {
-        return Err(ClientError::ProfileLockUnsupported);
+        return Err(windows_security_failure("token_user"));
     }
 
     let local_system_sid = well_known_sid(WinLocalSystemSid)?;
@@ -655,7 +655,7 @@ fn validate_windows_object_security(
         && unsafe { EqualSid(owner, local_system_sid.as_ptr().cast_mut().cast()) } == 0
         && unsafe { EqualSid(owner, administrators_sid.as_ptr().cast_mut().cast()) } == 0
     {
-        return Err(ClientError::ProfileLockUnsupported);
+        return Err(windows_security_failure("owner"));
     }
     verify_current_token_access(descriptor, process_token.0, desired_current_access)?;
 
@@ -669,7 +669,7 @@ fn validate_windows_object_security(
     let mut entries: *mut EXPLICIT_ACCESS_W = std::ptr::null_mut();
     let status = unsafe { GetExplicitEntriesFromAclW(dacl, &mut entry_count, &mut entries) };
     if status != ERROR_SUCCESS || (entry_count != 0 && entries.is_null()) {
-        return Err(ClientError::ProfileLockUnsupported);
+        return Err(windows_security_failure("acl_entries"));
     }
     let _entries = LocalAllocation(entries.cast());
     let dangerous = FILE_WRITE_DATA
@@ -693,21 +693,21 @@ fn validate_windows_object_security(
     )?;
     for entry in unsafe { std::slice::from_raw_parts(entries, entry_count as usize) } {
         if !entry.Trustee.pMultipleTrustee.is_null() {
-            return Err(ClientError::ProfileLockUnsupported);
+            return Err(windows_security_failure("multiple_trustee"));
         }
         let sid: PSID = match entry.Trustee.TrusteeForm {
             TRUSTEE_IS_SID => entry.Trustee.ptstrName.cast(),
             TRUSTEE_IS_OBJECTS_AND_SID => {
                 let object = entry.Trustee.ptstrName.cast::<OBJECTS_AND_SID>();
                 if object.is_null() {
-                    return Err(ClientError::ProfileLockUnsupported);
+                    return Err(windows_security_failure("object_trustee"));
                 }
                 unsafe { (*object).pSid.cast() }
             }
-            _ => return Err(ClientError::ProfileLockUnsupported),
+            _ => return Err(windows_security_failure("trustee_form")),
         };
         if sid.is_null() {
-            return Err(ClientError::ProfileLockUnsupported);
+            return Err(windows_security_failure("trustee_sid"));
         }
         if unsafe { EqualSid(sid, token_user) } != 0
             || trusted_sids
@@ -723,7 +723,7 @@ fn validate_windows_object_security(
         let mut effective = 0;
         let status = unsafe { GetEffectiveRightsFromAclW(dacl, &trustee, &mut effective) };
         if status != ERROR_SUCCESS || effective & dangerous != 0 {
-            return Err(ClientError::ProfileLockUnsupported);
+            return Err(windows_security_failure("untrusted_effective_write"));
         }
     }
     Ok(())
@@ -745,7 +745,7 @@ fn reject_untrusted_raw_write_aces(
     for index in 0..u32::from(ace_count) {
         let mut raw_ace = std::ptr::null_mut();
         if unsafe { GetAce(dacl, index, &mut raw_ace) } == 0 || raw_ace.is_null() {
-            return Err(ClientError::ProfileLockUnsupported);
+            return Err(windows_security_failure("raw_ace"));
         }
         let header = unsafe {
             std::ptr::read_unaligned(raw_ace.cast::<windows_sys::Win32::Security::ACE_HEADER>())
@@ -758,7 +758,7 @@ fn reject_untrusted_raw_write_aces(
         }
         let ace_size = usize::from(header.AceSize);
         if ace_size < std::mem::size_of::<windows_sys::Win32::Security::ACE_HEADER>() + 4 {
-            return Err(ClientError::ProfileLockUnsupported);
+            return Err(windows_security_failure("raw_ace_size"));
         }
         let mask = unsafe {
             std::ptr::read_unaligned(
@@ -783,7 +783,7 @@ fn reject_untrusted_raw_write_aces(
             ACCESS_ALLOWED_ACE_TYPE | ACCESS_ALLOWED_CALLBACK_ACE_TYPE => 8,
             ACCESS_ALLOWED_OBJECT_ACE_TYPE | ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE => {
                 if ace_size < 12 {
-                    return Err(ClientError::ProfileLockUnsupported);
+                    return Err(windows_security_failure("object_ace_size"));
                 }
                 let object_flags =
                     unsafe { std::ptr::read_unaligned(raw_ace.cast::<u8>().add(8).cast::<u32>()) };
@@ -792,23 +792,23 @@ fn reject_untrusted_raw_write_aces(
             }
             // Compound allow ACEs are not supported by AccessCheck on current
             // Windows versions, and their two-SID layout differs.
-            4 => return Err(ClientError::ProfileLockUnsupported),
+            4 => return Err(windows_security_failure("compound_allow_ace")),
             // Known deny, audit, alarm, label, resource, policy, and trust ACEs
             // do not grant access. An unknown inheritable ACE with a dangerous
             // mask fails closed because its grant semantics/layout are unknown.
             1..=3 | 6..=8 | 10 | 12..=21 => continue,
-            _ => return Err(ClientError::ProfileLockUnsupported),
+            _ => return Err(windows_security_failure("unknown_allow_ace")),
         };
         if sid_offset >= ace_size {
-            return Err(ClientError::ProfileLockUnsupported);
+            return Err(windows_security_failure("raw_sid_offset"));
         }
         let sid: PSID = unsafe { raw_ace.cast::<u8>().add(sid_offset).cast() };
         if sid.is_null() || unsafe { IsValidSid(sid) } == 0 {
-            return Err(ClientError::ProfileLockUnsupported);
+            return Err(windows_security_failure("raw_sid"));
         }
         let sid_length = unsafe { GetLengthSid(sid) } as usize;
         if sid_length == 0 || sid_offset.saturating_add(sid_length) > ace_size {
-            return Err(ClientError::ProfileLockUnsupported);
+            return Err(windows_security_failure("raw_sid_size"));
         }
         if unsafe { EqualSid(sid, token_user) } != 0
             || trusted_sids
@@ -817,9 +817,18 @@ fn reject_untrusted_raw_write_aces(
         {
             continue;
         }
-        return Err(ClientError::ProfileLockUnsupported);
+        return Err(windows_security_failure("untrusted_raw_write"));
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn windows_security_failure(reason: &'static str) -> ClientError {
+    #[cfg(test)]
+    eprintln!("taskveil windows profile security rejection: {reason}");
+    #[cfg(not(test))]
+    let _ = reason;
+    ClientError::ProfileLockUnsupported
 }
 
 #[cfg(windows)]
