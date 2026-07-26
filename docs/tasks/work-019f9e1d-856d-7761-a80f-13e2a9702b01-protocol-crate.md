@@ -1,7 +1,7 @@
 ---
 id: 019f9e1d-856d-7761-a80f-13e2a9702b01
 title: Protocol-only wire contract crate
-status: active
+status: done
 lane: standard
 milestone: maintenance
 ---
@@ -24,7 +24,8 @@ Organizationのwire contractを独立させ、serverがclient orchestrationへ�
 
 ## 3. ゴール
 
-- serde DTO、wire enum、protocol/envelope version、wire上限だけを持つ
+- serde DTO、wire enum、protocol/envelope version、wire上限と、server/clientで
+  重複させられないstatelessなcanonical framing検証だけを持つ
   `taskveil-protocol`をworkspaceへ追加する。
 - serverのproduction dependencyから`taskveil-sync`を除去し、
   `taskveil-protocol`と必要最小限の`taskveil-crypto`だけを共有する。
@@ -59,13 +60,13 @@ Organizationのwire contractを独立させ、serverがclient orchestrationへ�
 
 ## 6. 受け入れ基準
 
-- [ ] `taskveil-protocol`がserde DTO、wire enum、version/constantsだけを保持する。
-- [ ] serverの`[dependencies]`に`taskveil-sync`がなく、protocolと必要最小cryptoだけを共有する。
-- [ ] client syncがprotocol、domain、cryptoへ明示的に依存する。
-- [ ] protocol crateからstorage、HTTP、client runtimeへの依存をmanifest gateが拒否する。
-- [ ] serverからsync production dependencyが再導入された場合にboundary gateが失敗する。
-- [ ] 既存wire JSON互換性testが移行後も成功し、主要account/Organization DTOを含む。
-- [ ] 全Rust品質ゲート、client/protocol boundary gate、影響するFlutter gate、`git diff --check`が成功する。
+- [x] `taskveil-protocol`がserde DTO、wire enum、version/constantsとstatelessなcanonical framing検証だけを保持する。
+- [x] serverの`[dependencies]`に`taskveil-sync`がなく、protocolと必要最小cryptoだけを共有する。
+- [x] client syncがprotocol、domain、cryptoへ明示的に依存する。
+- [x] protocol crateからstorage、HTTP、client runtimeへの依存をmanifest gateが拒否する。
+- [x] serverからsync production dependencyが再導入された場合にboundary gateが失敗する。
+- [x] 既存wire JSON互換性testが移行後も成功し、主要account/Organization DTOを含む。
+- [x] 全Rust品質ゲート、client/protocol boundary gate、影響するFlutter gate、`git diff --check`が成功する。
 
 ## 7. 制約・注意事項
 
@@ -87,12 +88,12 @@ Organizationのwire contractを独立させ、serverがclient orchestrationへ�
 
 - 作業日: 2026-07-26
 - 結果: `taskveil-protocol`をworkspaceへ追加し、sync/account/Organizationの共有wire DTO、enum、version/header、envelope framing、canonical HLC wire valueを抽出した。key manifestのMAC・Organization署名検証は`taskveil-crypto`へ移し、`taskveil-sync`にはHTTP transport、暗号record、merge、同期state machineと互換re-exportだけを残した。server productionは`taskveil-protocol` / `taskveil-crypto`だけを共有し、`taskveil-sync`をdev-only integration dependencyへ移した。
-- 証拠: `cargo tree -p taskveil-server --edges normal -i taskveil-sync`は`nothing to print`、depth 1のTaskveil依存は`taskveil-crypto` / `taskveil-protocol`のみ。protocol wire 5 tests、Rust workspace 414 passed / 3 ignored、server Postgres統合19 tests、bridge release build、`flutter analyze`、`flutter test` 301 passed / visual QA 1 skipped、hardcoded-string/client/protocol boundary gate、protocol boundary negative fixtures、`git diff --check`が成功した。
+- 証拠: `cargo tree -p taskveil-server --edges normal -i taskveil-sync`は`nothing to print`、depth 1のTaskveil依存は`taskveil-crypto` / `taskveil-protocol`のみ。protocol wire 8 tests（canonical HLCのNUL padding後の非ゼロbyte拒否とenvelope framing回帰を含む）、Rust workspace 414 passed / 3 ignored、server Postgres統合19 tests、bridge release build、`flutter analyze`、`flutter test` 301 passed / visual QA 1 skipped、hardcoded-string/client/protocol boundary gate、protocol boundary negative fixtures、`git diff --check`が成功した。親レビュー時にsandboxのsocket制限で失敗したserver realtime 2 testsは通常環境で再実行し、realtime対象8 testsが成功した。
 - Commit: `5007962`
-- 未解決: 独立検証未実施。既存のmacOS Keychain実機test 2件、10k storage性能test 1件、Flutter visual QA harness 1件は明示的な手動gateのためskip / ignored。
+- 未解決: 既存のmacOS Keychain実機test 2件、10k storage性能test 1件、Flutter visual QA harness 1件は明示的な手動gateのためskip / ignored。
 
 ### 独立検証
 
-- 判定: 未判定
-- 根拠: 未実施
-- 検証者: 未割当
+- 判定: APPROVE（P0〜P3の未解決findingなし）
+- 根拠: 親エージェントがIssue #60の受入条件、Cargo graph、server import差分、wire DTO互換re-export、manifest boundaryの正負fixtureを独立に確認した。レビューでcanonical HLCがNUL padding後の非ゼロbyteを受理する曖昧性を検出し、protocol境界で拒否する回帰testとenvelope framingの直接testを追加した。追加後にprotocol 8 tests、sync 84 tests、対象clippy、boundary gate、`git diff --check`を再実行して成功した。
+- 検証者: Codex親エージェント

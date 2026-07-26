@@ -53,6 +53,9 @@ impl WireHlc {
             .iter()
             .position(|byte| *byte == 0)
             .unwrap_or(device_bytes.len());
+        if device_bytes[unpadded_len..].iter().any(|byte| *byte != 0) {
+            return Err(HlcWireError::InvalidDeviceId);
+        }
         let device_id = String::from_utf8(device_bytes[..unpadded_len].to_vec())
             .map_err(|_| HlcWireError::InvalidDeviceId)?;
         if device_id.is_empty()
@@ -110,5 +113,22 @@ mod tests {
         assert_eq!(decoded.wall_ms, 42);
         assert_eq!(decoded.counter, 7);
         assert_eq!(decoded.device_id, "device-a");
+    }
+
+    #[test]
+    fn non_zero_bytes_after_device_padding_are_rejected() {
+        let mut device_hex = format!("{:0<128}", "6465766963652d61");
+        device_hex.replace_range(126..128, "62");
+        let encoded = format!(
+            "01{:020}{:010}{}",
+            (42_i128 - i64::MIN as i128) as u64,
+            7,
+            device_hex,
+        );
+
+        assert_eq!(
+            WireHlc::decode(&encoded),
+            Err(HlcWireError::InvalidDeviceId)
+        );
     }
 }

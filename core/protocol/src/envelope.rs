@@ -50,3 +50,46 @@ pub fn parse_envelope_header(blob: &[u8]) -> Result<EnvelopeHeader, EnvelopeHead
         key_generation,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn envelope(suite_id: u16, key_generation: u64) -> Vec<u8> {
+        let mut blob = Vec::with_capacity(ENVELOPE_MIN_LEN);
+        blob.extend_from_slice(ENVELOPE_MAGIC);
+        blob.extend_from_slice(&suite_id.to_be_bytes());
+        blob.extend_from_slice(&key_generation.to_be_bytes());
+        blob.resize(ENVELOPE_MIN_LEN, 0);
+        blob
+    }
+
+    #[test]
+    fn canonical_header_preserves_suite_and_generation() {
+        assert_eq!(
+            parse_envelope_header(&envelope(2, 7)),
+            Ok(EnvelopeHeader {
+                suite_id: 2,
+                key_generation: 7,
+            })
+        );
+    }
+
+    #[test]
+    fn framing_rejects_wrong_magic_zero_generation_and_oversized_blob() {
+        let mut wrong_magic = envelope(2, 7);
+        wrong_magic[..4].copy_from_slice(b"TDE4");
+        assert_eq!(
+            parse_envelope_header(&wrong_magic),
+            Err(EnvelopeHeaderError::UnsupportedVersion)
+        );
+        assert_eq!(
+            parse_envelope_header(&envelope(2, 0)),
+            Err(EnvelopeHeaderError::InvalidGeneration)
+        );
+        assert_eq!(
+            parse_envelope_header(&vec![0; MAX_ENCRYPTED_BLOB_LEN + 1]),
+            Err(EnvelopeHeaderError::BlobTooLarge)
+        );
+    }
+}
