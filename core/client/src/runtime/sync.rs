@@ -8,8 +8,8 @@ use taskveil_sync::{
 };
 
 use super::{
-    now_ms, AccountReadiness, CryptoRuntimeState, SyncRuntimeState, TaskveilClient,
-    INITIAL_BACKFILL_CURSOR_NAME,
+    now_ms, AccountReadiness, CryptoRuntimeState, NetworkOperationContext, SyncRuntimeState,
+    TaskveilClient, INITIAL_BACKFILL_CURSOR_NAME,
 };
 use crate::{ClientError, RealtimeTicket, SqliteSyncStore, SyncStatus};
 
@@ -38,8 +38,9 @@ impl TaskveilClient {
     }
 
     pub async fn sync_now(&self) -> Result<SyncStatus, ClientError> {
-        let operation = self.begin_operation()?;
-        let context = match self.sync_readiness()? {
+        let (network, readiness) =
+            self.prepare_network_operation(TaskveilClient::sync_readiness)?;
+        let context = match readiness {
             SyncReadiness::LoggedOut => {
                 let state = self.sync_state()?;
                 return Ok(sync_status(false, &state));
@@ -59,13 +60,12 @@ impl TaskveilClient {
             state.last_error = None;
         }
         let running = SyncRunningGuard { client: self };
-        let result = self.run_sync_now(context).await;
+        let result = self.run_sync_now(context, network).await;
         let timestamp = now_ms()?;
         let mut state = self.sync_state()?;
         let (status, surfaced_error) = finish_sync_run(true, &mut state, result, timestamp);
         drop(state);
         drop(running);
-        drop(operation);
         match surfaced_error {
             Some(error) => Err(error),
             None => Ok(status),
@@ -109,11 +109,12 @@ impl TaskveilClient {
     async fn run_sync_now(
         &self,
         mut context: ActiveSyncContext,
+        network: NetworkOperationContext,
     ) -> Result<SyncRunSummary, ClientError> {
-        let mut store = SqliteSyncStore::new_secret(self.db_path.clone(), self.db_key());
+        let mut store = SqliteSyncStore::new_secret(self.db_path.clone(), network.db_key);
         let lease_owner = taskveil_domain::Uuid::now_v7().to_string();
         store
-            .acquire_sync_lease(&lease_owner, self.loaded_runtime_epoch(), SYNC_LEASE_TTL_MS)
+            .acquire_sync_lease(&lease_owner, network.runtime_epoch, SYNC_LEASE_TTL_MS)
             .map_err(|error| map_sync_run_error(map_sync_lease_error(error)))?;
         let result = async {
             let token = self.access_token_for_sync(false, &mut store).await?;
@@ -170,7 +171,8 @@ impl TaskveilClient {
                 let settlement = self
                     .settle_after_sync_pull(store, timestamp)
                     .map_err(|error| map_sync_lease_error_from_client(&error))?;
-                if !settlement.outbox_changed {
+                let dirty = dirty_follow_up_required(store, settlement.outbox_changed)?;
+                if !dirty {
                     break;
                 }
                 let follow_up = taskveil_sync::run_sync_now_with_key_refresh_and_pre_push(
@@ -183,7 +185,12 @@ impl TaskveilClient {
                 .await?;
                 add_sync_summary(&mut summary, &follow_up);
                 if !settlement.has_more {
-                    break;
+                    // Linearize completion at a durable empty-outbox read. A
+                    // mutation that committed while the follow-up awaited the
+                    // transport is therefore included before this run returns.
+                    if store.list_outbox_heads(1)?.is_empty() {
+                        break;
+                    }
                 }
             }
             Ok::<_, String>(summary)
@@ -333,6 +340,13 @@ fn add_sync_summary(target: &mut SyncRunSummary, value: &SyncRunSummary) {
     target.resolved_quarantine_count += value.resolved_quarantine_count;
 }
 
+fn dirty_follow_up_required<S: LocalSyncStore>(
+    store: &mut S,
+    settlement_changed_outbox: bool,
+) -> Result<bool, String> {
+    Ok(settlement_changed_outbox || !store.list_outbox_heads(1)?.is_empty())
+}
+
 pub(super) fn map_sync_run_error(error: String) -> ClientError {
     match error.as_str() {
         "upgrade required" => ClientError::UpgradeRequired,
@@ -392,7 +406,7 @@ impl SyncKeyRefresher for ProductionKeyRefresher<'_> {
         &'a mut self,
     ) -> Pin<Box<dyn Future<Output = Result<LocalSyncKeys, String>> + Send + 'a>> {
         Box::pin(async move {
-            let loaded_epoch = self.client.loaded_runtime_epoch();
+            let lease_epoch = self.lease.runtime_epoch;
             let keys = self
                 .client
                 .refresh_tenant_keys_for_sync(self.lease.clone())
@@ -405,7 +419,7 @@ impl SyncKeyRefresher for ProductionKeyRefresher<'_> {
             .load_runtime()
             .map_err(map_sync_lease_error)?
             .runtime_epoch;
-            if durable_epoch != loaded_epoch {
+            if durable_epoch != lease_epoch {
                 return Err("sync lease lost".to_string());
             }
             Ok(keys)
@@ -509,6 +523,15 @@ fn finish_sync_run(
 
 #[cfg(test)]
 mod tests {
+    use std::task::{Context, Poll, Waker};
+
+    use taskveil_storage::open_encrypted;
+    use taskveil_sync::{
+        EncryptedSyncState, LocalMutationSyncStore, NewLocalSyncOutboxEntry, SyncCollection,
+    };
+    use tempfile::TempDir;
+    use zeroize::Zeroizing;
+
     use super::*;
 
     #[test]
@@ -575,5 +598,62 @@ mod tests {
                 )
             ));
         }
+    }
+
+    #[test]
+    fn canceling_a_polled_sync_future_clears_instance_running_state() {
+        const DB_KEY: [u8; 32] = [0x91; 32];
+        let temp = TempDir::new().unwrap();
+        let db_path = temp.path().join("cancel.sqlite3");
+        drop(open_encrypted(&db_path, &DB_KEY).unwrap());
+        let client = TaskveilClient {
+            db_dir: temp.path().to_path_buf(),
+            profile_coordinator: TaskveilClient::pinned_test_coordinator(temp.path(), &db_path),
+            db_path,
+            db_key: std::sync::Mutex::new(Zeroizing::new(DB_KEY)),
+            account: std::sync::Mutex::new(super::super::AccountRuntimeState {
+                session: None,
+                session_restored: true,
+                loaded_credential_generation: None,
+                crypto: CryptoRuntimeState::Anonymous,
+            }),
+            sync: std::sync::Mutex::new(SyncRuntimeState::default()),
+            runtime_epoch: std::sync::atomic::AtomicI64::new(1),
+            capsule_generation: std::sync::atomic::AtomicU64::new(1),
+        };
+        let mut future = Box::pin(async {
+            client.sync_state().unwrap().running = true;
+            let _running = SyncRunningGuard { client: &client };
+            std::future::pending::<()>().await;
+        });
+        let mut context = Context::from_waker(Waker::noop());
+        assert_eq!(future.as_mut().poll(&mut context), Poll::Pending);
+        assert!(client.sync_state().unwrap().running);
+
+        drop(future);
+
+        assert!(!client.sync_state().unwrap().running);
+    }
+
+    #[test]
+    fn durable_outbox_head_requests_dirty_follow_up_without_settlement_changes() {
+        let temp = TempDir::new().unwrap();
+        let mut store = SqliteSyncStore::new(temp.path().join("dirty.sqlite3"), [0x92; 32]);
+        assert!(!dirty_follow_up_required(&mut store, false).unwrap());
+        store
+            .put_outbox_head(NewLocalSyncOutboxEntry {
+                op_id: taskveil_domain::Uuid::now_v7(),
+                record_id: taskveil_domain::Uuid::now_v7(),
+                collection: SyncCollection::Lists,
+                base_revision_hlc: None,
+                revision_hlc: "0000000000001:00000:device".to_string(),
+                state: EncryptedSyncState::Tombstone {
+                    delete_hlc: "0000000000001:00000:device".to_string(),
+                },
+                created_at: 1,
+            })
+            .unwrap();
+
+        assert!(dirty_follow_up_required(&mut store, false).unwrap());
     }
 }

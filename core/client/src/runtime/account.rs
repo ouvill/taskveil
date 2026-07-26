@@ -19,6 +19,7 @@ use taskveil_crypto::{
 use taskveil_domain::Uuid;
 use taskveil_storage::{
     open_encrypted, ListRepository, LocalCryptoRepository, SqliteLocalCryptoRepository,
+    SqliteProfileCoordinationRepository,
 };
 #[cfg(test)]
 use taskveil_sync::SYNC_LOCAL_HLC_SETTING_KEY;
@@ -1372,8 +1373,49 @@ impl TaskveilClient {
             };
             crypto.sync_keys().clone()
         };
-        let previous_generation = local_keys.tenant_generation;
-        let sync_keys = remote_keys;
+        if remote_keys.tenant_generation < local_keys.tenant_generation {
+            return Err(ClientError::AccountBoundUnavailable);
+        }
+        self.commit_tenant_key_cutover(
+            lease,
+            LocalCryptoIdentity {
+                tenant_id,
+                user_id,
+                device_id,
+            },
+            &master_key,
+            remote_keys,
+        )
+    }
+
+    fn commit_tenant_key_cutover(
+        &self,
+        lease: taskveil_storage::SyncLease,
+        identity: LocalCryptoIdentity,
+        master_key: &[u8; KEY_LEN],
+        sync_keys: LocalSyncKeys,
+    ) -> Result<LocalSyncKeys, ClientError> {
+        // Remote fetch and unwrap happen before this fenced local cutover.
+        // Do not reacquire a profile guard while holding the sync lease: the
+        // lease-fenced transaction and epoch-CAS publication preserve the
+        // documented profile -> lease -> transaction lock order.
+        let lease_epoch = lease.runtime_epoch;
+        let previous_generation = {
+            let account = self.account_state()?;
+            let CryptoRuntimeState::Ready(crypto) = &account.crypto else {
+                return Err(ClientError::AccountBoundUnavailable);
+            };
+            if crypto.tenant_id() != identity.tenant_id
+                || crypto.user_id() != identity.user_id
+                || crypto.device_id() != identity.device_id
+            {
+                return Err(ClientError::LeaseLost);
+            }
+            crypto.sync_keys().tenant_generation
+        };
+        if sync_keys.tenant_generation < previous_generation {
+            return Err(ClientError::LeaseLost);
+        }
         let mut cutover_store = crate::SqliteSyncStore::new_secret_with_lease(
             self.db_path.clone(),
             self.db_key(),
@@ -1390,7 +1432,7 @@ impl TaskveilClient {
             taskveil_sync::enqueue_rotation_backfill(
                 &mut transaction,
                 &sync_keys,
-                &device_id.to_string(),
+                &identity.device_id.to_string(),
                 taskveil_sync::BackfillRecords {
                     lists: &snapshot.lists,
                     templates: &snapshot.templates,
@@ -1404,16 +1446,7 @@ impl TaskveilClient {
         }
         let cutover_now = now_ms()?;
         let crypto = transaction
-            .persist_local_crypto_context(
-                LocalCryptoIdentity {
-                    tenant_id,
-                    user_id,
-                    device_id,
-                },
-                &master_key,
-                sync_keys.clone(),
-                cutover_now,
-            )
+            .persist_local_crypto_context(identity, master_key, sync_keys.clone(), cutover_now)
             .map_err(super::sync::map_sync_run_error)?;
         transaction
             .set_setting(
@@ -1422,10 +1455,28 @@ impl TaskveilClient {
                 cutover_now,
             )
             .map_err(super::sync::map_sync_run_error)?;
+        let expected_runtime_epoch = if transaction.has_runtime_cutover() {
+            lease_epoch.checked_add(1).ok_or(ClientError::LeaseLost)?
+        } else {
+            lease_epoch
+        };
         transaction
             .commit()
             .map_err(super::sync::map_sync_run_error)?;
-        self.account_state()?.crypto = CryptoRuntimeState::Ready(Box::new(crypto));
+        let coordination = SqliteProfileCoordinationRepository::new(open_encrypted(
+            &self.db_path,
+            &self.db_key(),
+        )?);
+        // Serialize in-memory account publication, then reject a stale
+        // post-commit publisher if another profile transition won either the
+        // durable epoch or this instance's atomic epoch in the meantime.
+        let mut account = self.account_state()?;
+        let runtime = coordination.load_runtime()?;
+        if runtime.runtime_epoch != expected_runtime_epoch {
+            return Err(ClientError::LeaseLost);
+        }
+        self.publish_runtime_epoch_if_current(lease_epoch, expected_runtime_epoch)?;
+        account.crypto = CryptoRuntimeState::Ready(Box::new(crypto));
         Ok(sync_keys)
     }
 
@@ -2790,6 +2841,21 @@ mod tests {
         assert_eq!(repeated_attempts, 2);
     }
 
+    #[test]
+    fn runtime_epoch_publication_rejects_a_stale_cutover() {
+        let temp = TempDir::new().expect("temp profile");
+        let client = open_test_client(temp.path(), [0x37; 32]);
+        let original_epoch = client.loaded_runtime_epoch();
+        let newer_epoch = original_epoch.checked_add(1).unwrap();
+        client.publish_runtime_epoch(newer_epoch);
+
+        assert!(matches!(
+            client.publish_runtime_epoch_if_current(original_epoch, newer_epoch),
+            Err(ClientError::LeaseLost)
+        ));
+        assert_eq!(client.loaded_runtime_epoch(), newer_epoch);
+    }
+
     #[tokio::test]
     async fn two_client_instances_exclude_refresh_and_logout_mutations() {
         let temp = TempDir::new().expect("temp profile");
@@ -2962,6 +3028,114 @@ mod tests {
         ));
         assert!(load_session_credential(temp.path()).unwrap().is_none());
         server.join().expect("refresh server");
+    }
+
+    #[test]
+    fn key_cutover_backfills_mutation_committed_after_remote_fetch() {
+        const DB_KEY: [u8; 32] = [0x3b; 32];
+        const MASTER_KEY: [u8; KEY_LEN] = [0x41; KEY_LEN];
+        let temp = TempDir::new().unwrap();
+        let client = open_test_client(temp.path(), DB_KEY);
+        let tenant_id = Uuid::now_v7();
+        let identity = LocalCryptoIdentity {
+            tenant_id,
+            user_id: Uuid::now_v7(),
+            device_id: Uuid::now_v7(),
+        };
+        let generation_one = LocalSyncKeys {
+            tenant_id,
+            tenant_root_dek: Some(Zeroizing::new([0x42; KEY_LEN])),
+            tenant_generation: 1,
+            historical_tenant_root_deks: Vec::new(),
+        };
+        let crypto = persist_local_crypto_context(
+            client.db_path(),
+            &DB_KEY,
+            identity,
+            &MASTER_KEY,
+            generation_one.clone(),
+            100,
+        )
+        .unwrap();
+        let runtime = SqliteProfileCoordinationRepository::new(
+            open_encrypted(client.db_path(), &DB_KEY).unwrap(),
+        )
+        .load_runtime()
+        .unwrap();
+        client.publish_runtime_epoch(runtime.runtime_epoch);
+        {
+            let mut account = client.account_state().unwrap();
+            account.session_restored = true;
+            account.crypto = CryptoRuntimeState::Ready(Box::new(crypto));
+        }
+
+        // This models a verified remote response already fetched at the
+        // network barrier. The local mutation deliberately commits after that
+        // fetch and before the fenced cutover transaction starts.
+        let generation_two = LocalSyncKeys {
+            tenant_id,
+            tenant_root_dek: Some(Zeroizing::new([0x43; KEY_LEN])),
+            tenant_generation: 2,
+            historical_tenant_root_deks: vec![(1, generation_one.tenant_root_dek.clone().unwrap())],
+        };
+        let list = client
+            .create_list("Committed after key fetch".to_string())
+            .unwrap();
+        let before = SqliteSyncStore::new(client.db_path().to_path_buf(), DB_KEY)
+            .list_all_outbox_heads(10)
+            .unwrap();
+        let old_head = before
+            .iter()
+            .find(|entry| entry.record_id == list.id)
+            .unwrap();
+        let old_op_id = old_head.op_id;
+        let EncryptedSyncState::Live { blob, .. } = &old_head.state else {
+            panic!("created list must have a live outbox head");
+        };
+        assert_eq!(
+            taskveil_sync::parse_envelope_header(blob)
+                .unwrap()
+                .key_generation,
+            1
+        );
+
+        let mut lease_store =
+            SqliteSyncStore::new_secret(client.db_path().to_path_buf(), client.db_key());
+        lease_store
+            .acquire_sync_lease("key-cutover", runtime.runtime_epoch, 60_000)
+            .unwrap();
+        let lease = lease_store.active_lease().unwrap();
+        client
+            .commit_tenant_key_cutover(lease, identity, &MASTER_KEY, generation_two)
+            .unwrap();
+
+        let after = SqliteSyncStore::new(client.db_path().to_path_buf(), DB_KEY)
+            .list_all_outbox_heads(10)
+            .unwrap();
+        let rotated = after
+            .iter()
+            .find(|entry| entry.record_id == list.id)
+            .expect("post-fetch mutation must survive key cutover");
+        assert_ne!(rotated.op_id, old_op_id);
+        let EncryptedSyncState::Live { blob, .. } = &rotated.state else {
+            panic!("rotation backfill must keep a live head");
+        };
+        assert_eq!(
+            taskveil_sync::parse_envelope_header(blob)
+                .unwrap()
+                .key_generation,
+            2
+        );
+        let durable_runtime = SqliteProfileCoordinationRepository::new(
+            open_encrypted(client.db_path(), &DB_KEY).unwrap(),
+        )
+        .load_runtime()
+        .unwrap();
+        assert_eq!(client.loaded_runtime_epoch(), durable_runtime.runtime_epoch);
+        assert!(matches!(
+            lease_store.preflight_network_request(),
+            Err(error) if error == "sync lease lost"
+        ));
     }
 
     #[test]

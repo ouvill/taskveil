@@ -328,6 +328,10 @@ impl SqliteSyncWriteTx {
         Ok(context)
     }
 
+    pub(crate) fn has_runtime_cutover(&self) -> bool {
+        self.runtime_cutover
+    }
+
     #[cfg(test)]
     pub(crate) fn bump_runtime_epoch(&mut self, now_ms: i64) -> Result<(), String> {
         self.transaction
@@ -1422,6 +1426,38 @@ mod tests {
             Err(error) => assert_eq!(error, "sync lease lost"),
             Ok(_) => panic!("production sync store opened an unfenced transaction"),
         }
+    }
+
+    #[test]
+    fn cancel_and_error_drop_release_the_sync_lease() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("lease-drop.sqlite3");
+
+        {
+            let mut canceled = SqliteSyncStore::new_secret(db_path.clone(), Zeroizing::new(DB_KEY));
+            canceled.acquire_sync_lease("canceled", 1, 60_000).unwrap();
+            // Dropping the future that owns this store follows this path.
+        }
+        {
+            let mut after_cancel =
+                SqliteSyncStore::new_secret(db_path.clone(), Zeroizing::new(DB_KEY));
+            after_cancel
+                .acquire_sync_lease("after-cancel", 1, 60_000)
+                .unwrap();
+        }
+
+        let transport_error = (|| -> Result<(), &'static str> {
+            let mut failed = SqliteSyncStore::new_secret(db_path.clone(), Zeroizing::new(DB_KEY));
+            failed
+                .acquire_sync_lease("failed", 1, 60_000)
+                .map_err(|_| "lease")?;
+            Err("transport")
+        })();
+        assert_eq!(transport_error, Err("transport"));
+        let mut after_error = SqliteSyncStore::new_secret(db_path, Zeroizing::new(DB_KEY));
+        after_error
+            .acquire_sync_lease("after-error", 1, 60_000)
+            .unwrap();
     }
 
     #[test]

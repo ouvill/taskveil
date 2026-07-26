@@ -1164,7 +1164,8 @@ mod tests {
         ListRepository, OwnedSqliteWriteTx, ReminderRepository, SettingsRepository,
         SqliteListRepository, SqliteProfileCoordinationRepository, SqliteReminderRepository,
         SqliteSettingsRepository, SqliteSyncStateRepository, SqliteTaskRepository,
-        SqliteTimerSessionRepository, SyncStateRepository, TaskRepository, TimerSessionRepository,
+        SqliteTimerSessionRepository, SyncOutboxState, SyncStateRepository, TaskRepository,
+        TimerSessionRepository,
     };
     use taskveil_sync::{LocalSyncKeys, SYNC_LOCAL_HLC_SETTING_KEY};
     use tempfile::TempDir;
@@ -1672,54 +1673,98 @@ mod tests {
     }
 
     #[test]
-    fn network_wait_allows_local_mutation_but_blocks_exclusive_profile_changes() {
+    fn blocked_network_phase_allows_local_mutation_and_short_exclusive_cutover() {
         let temp = TempDir::new().unwrap();
         let db_path = temp.path().join("gate.sqlite3");
-        let list = new_list(
+        let mut list = new_list(
             "Before".into(),
             fractional_index_after(None).unwrap(),
             BASE_MS,
         )
         .unwrap();
+        list.is_default = true;
         SqliteListRepository::new(open_encrypted(&db_path, &DB_KEY).unwrap())
             .insert(list.clone())
             .unwrap();
+        let tenant_id = Uuid::now_v7();
+        let master_key = [0x71; 32];
+        let crypto = persist_local_crypto_context(
+            &db_path,
+            &DB_KEY,
+            LocalCryptoIdentity {
+                tenant_id,
+                user_id: Uuid::now_v7(),
+                device_id: Uuid::now_v7(),
+            },
+            &master_key,
+            LocalSyncKeys {
+                tenant_id,
+                tenant_root_dek: Some(Zeroizing::new([0x72; 32])),
+                tenant_generation: 1,
+                historical_tenant_root_deks: Vec::new(),
+            },
+            BASE_MS,
+        )
+        .unwrap();
+        let runtime_epoch =
+            SqliteProfileCoordinationRepository::new(open_encrypted(&db_path, &DB_KEY).unwrap())
+                .load_runtime()
+                .unwrap()
+                .runtime_epoch;
         let client = TaskveilClient {
             db_dir: temp.path().to_path_buf(),
             profile_coordinator: TaskveilClient::pinned_test_coordinator(temp.path(), &db_path),
-            db_path,
+            db_path: db_path.clone(),
             db_key: Mutex::new(Zeroizing::new(DB_KEY)),
             account: Mutex::new(AccountRuntimeState {
                 session: None,
                 session_restored: true,
                 loaded_credential_generation: None,
-                crypto: CryptoRuntimeState::Anonymous,
+                crypto: CryptoRuntimeState::Ready(Box::new(crypto)),
             }),
             sync: Mutex::new(SyncRuntimeState::default()),
-            runtime_epoch: std::sync::atomic::AtomicI64::new(1),
+            runtime_epoch: std::sync::atomic::AtomicI64::new(runtime_epoch),
             capsule_generation: std::sync::atomic::AtomicU64::new(1),
         };
 
-        let network_operation = client.begin_operation().unwrap();
-        assert_eq!(
-            client
-                .rename_list(list.id, "Allowed during sync".into())
-                .unwrap()
-                .name,
-            "Allowed during sync"
-        );
-        assert!(matches!(
-            client.begin_exclusive_operation(),
-            Err(ClientError::ProfileBusy)
-        ));
-        drop(network_operation);
-        let _exclusive = client.begin_exclusive_operation().unwrap();
+        let (network_operation, ()) = client.prepare_network_operation(|_| Ok(())).unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                entered_tx.send(()).unwrap();
+                let _ = release_rx.recv_timeout(std::time::Duration::from_secs(5));
+                drop(network_operation);
+            });
+            entered_rx.recv().unwrap();
+
+            let created = client.create_list("Created during sync".into()).unwrap();
+            assert_eq!(
+                client
+                    .rename_list(created.id, "Updated during sync".into())
+                    .unwrap()
+                    .name,
+                "Updated during sync"
+            );
+            client.delete_list(created.id).unwrap();
+            let outbox = SqliteSyncStateRepository::new(open_encrypted(&db_path, &DB_KEY).unwrap())
+                .list_outbox_heads(10)
+                .unwrap();
+            let deleted = outbox
+                .iter()
+                .find(|entry| entry.record_id == created.id)
+                .expect("deleted record keeps a coalesced outbox head");
+            assert!(matches!(deleted.state, SyncOutboxState::Tombstone { .. }));
+            let exclusive = client.begin_exclusive_operation().unwrap();
+            drop(exclusive);
+            release_tx.send(()).unwrap();
+        });
         assert_eq!(
             client
                 .with_list_repository(|repository| Ok(repository.get(list.id)?))
                 .unwrap()
                 .name,
-            "Allowed during sync"
+            "Before"
         );
     }
 
