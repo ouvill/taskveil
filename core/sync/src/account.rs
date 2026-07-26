@@ -796,10 +796,10 @@ impl AccountClient {
         session_token: &str,
     ) -> Result<RealtimeTicketResponse, AccountClientError> {
         let response: RealtimeTicketWireResponse = self
-            .post_json(
+            .post_protocol_json(
                 &format!("/v2/tenants/{tenant_id}/realtime/ticket"),
                 &serde_json::json!({}),
-                Some(session_token),
+                session_token,
             )
             .await?;
         Ok(response.into())
