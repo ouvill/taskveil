@@ -23,7 +23,7 @@ use taskveil_protocol::sync::{
 };
 
 pub fn router() -> Router<SharedState> {
-    const BASE_SCAN_REQUEST_BODY_LIMIT: usize = 8 * 1024;
+    const RESYNC_TOKEN_REQUEST_BODY_LIMIT: usize = 8 * 1024;
     Router::new()
         .route("/{tenant_id}/preflight", get(preflight))
         .route("/{tenant_id}/push", post(push))
@@ -31,9 +31,12 @@ pub fn router() -> Router<SharedState> {
         .route("/{tenant_id}/resync/start", post(begin_full_resync))
         .route(
             "/{tenant_id}/resync/base",
-            post(scan_base).layer(DefaultBodyLimit::max(BASE_SCAN_REQUEST_BODY_LIMIT)),
+            post(scan_base).layer(DefaultBodyLimit::max(RESYNC_TOKEN_REQUEST_BODY_LIMIT)),
         )
-        .route("/{tenant_id}/resync/base/complete", post(complete_base))
+        .route(
+            "/{tenant_id}/resync/base/complete",
+            post(complete_base).layer(DefaultBodyLimit::max(RESYNC_TOKEN_REQUEST_BODY_LIMIT)),
+        )
         .route("/{tenant_id}/continuity/ack", post(ack_continuity))
         .route("/{tenant_id}/key-rotation", get(rotation_state))
         .route("/{tenant_id}/key-rotation/bundle", get(active_key_bundle))

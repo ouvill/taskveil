@@ -4005,6 +4005,17 @@ async fn resync_page_tokens_are_replayable_bound_and_require_idempotent_completi
         request_status(
             &fixture.app,
             Method::POST,
+            format!("/v2/tenants/{}/resync/base/complete", fixture.tenant_id),
+            Some(&fixture.token),
+            Some(json!({"completion_token": "x".repeat(9 * 1024)})),
+        )
+        .await,
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert_eq!(
+        request_status(
+            &fixture.app,
+            Method::POST,
             base_path,
             Some(&fixture.token),
             Some(json!({"page_token": start.page_token, "limit": 100})),

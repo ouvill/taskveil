@@ -220,16 +220,22 @@ OS別fail-closed契約は未確定である。本work itemはこれらを
 - 証拠: stale Anonymous / Ready、lease contention / expiry / takeover / fencing、
   child process強制終了後のOS lock回復、sleepに依存しないauthoritative expiry /
   takeover、旧ownerのrequest / commit拒否、path alias、異なるprofileの実process並行性、
-  stale root swap、同時mutation / sync testを追加した。WindowsにはINHERIT_ONLY ACE、
-  explicit child ACL、junction alias、root handle lifetimeのtestを追加した。
-  `cargo test -p taskveil-client -- --nocapture`は109件とdoc-test 4件が通過した。
+  stale root swap、同時mutation / sync testを追加した。実際の別processでstale clientを
+  保持したままcapsule rotationとSQLCipher rekeyを行い、旧keyの拒否、capsule /
+  DB keyの再読込、rotation後のmutation成功まで検証するtestも追加した。
+  WindowsにはINHERIT_ONLY ACE、explicit child ACL、junction alias、root handle
+  lifetimeのtestを追加した。`cargo test -p taskveil-client -- --nocapture`は
+  110件とdoc-test 4件が通過した。
   HLC / resync hardeningと認可policyを含む統合HEADでも
   `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
   `cargo fmt --all -- --check`、client boundary 2種、ADR structure、
-  `git diff --check`が通過した。独立レビューで見つかった
+  authorized sync route 2種、`git diff --check`が通過した。resync page tokenを受ける
+  `/resync/base`と`/resync/base/complete`の双方へ8 KiBのrequest body上限を適用した。
+  独立レビューで見つかった
   outer sync metadata、post-pull settlement、Tenant key cutover、profile identity pin、
-  Windows child ACLの漏れには、active lease伝播、同一transaction fence、
-  lifetime identity検証とhandle-based security検証を追加した。
+  Windows child ACL、実processでのcapsule rekey/reload、completion endpointのbody
+  limitの漏れには、active lease伝播、同一transaction fence、lifetime identity検証、
+  handle-based security検証、追加の実process / HTTP testを追加した。
 - Commit subject: `feat(client): coordinate shared profiles across processes`
 - 未解決: macOS hostからのWindows cross compileはWindows SDK header不在により
   `ring` / `aws-lc-sys`で停止するため、Windows固有testの実行確認はGitHub Actionsの
@@ -238,8 +244,9 @@ OS別fail-closed契約は未確定である。本work itemはこれらを
 
 ### 独立検証
 
-- 判定: code review承認済み、platform matrix待ち
-- 根拠: 2回の独立レビュー後にP0 / P1 / P2の未解決指摘はなく、統合HEADの
-  workspace品質ゲートも通過した。Linux / macOS / Windows platform matrixは
-  公開可能な統合branchのCIで最終確認する。
+- 判定: P2指摘修正済み、focused再reviewとplatform matrix待ち
+- 根拠: 独立レビューのP0 / P1指摘はなく、残ったP2 2件へ実process testと
+  request body limitを追加した。修正後のfocused再reviewは統合担当が実施する。
+  統合HEADのworkspace品質ゲートは通過済みで、Linux / macOS / Windows platform
+  matrixは公開可能な統合branchのCIで最終確認する。
 - 検証者: 独立review agent
