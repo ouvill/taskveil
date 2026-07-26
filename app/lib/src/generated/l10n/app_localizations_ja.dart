@@ -1237,6 +1237,13 @@ class AppLocalizationsJa extends AppLocalizations {
   String get billingUnavailable => '現在、課金情報を取得できません。';
 
   @override
+  String get billingRetryButton => '再試行';
+
+  @override
+  String get billingStaleNotice =>
+      '最後に確認できたサブスクリプション状態を表示しています。同期の利用可否は引き続きサーバーで確認されます。';
+
+  @override
   String get billingCancelled => '購入をキャンセルしました。';
 
   @override

@@ -650,6 +650,8 @@
   "billingRestoreButton": "Restore purchases",
   "billingManageButton": "Manage subscription",
   "billingUnavailable": "Billing is unavailable right now.",
+  "billingRetryButton": "Retry",
+  "billingStaleNotice": "Showing the last known subscription status. Sync access is still checked by the server.",
   "billingCancelled": "Purchase cancelled.",
   "billingPending": "Purchase pending. Pro will activate after your app store confirms payment.",
   "billingFailed": "Purchase couldn't be completed.",

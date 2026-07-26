@@ -18,6 +18,8 @@ import 'package:taskveil/src/rust/api.dart'
         AccountRegistrationStateDto,
         AccountSessionStateDto,
         BillingStateDto,
+        BridgeErrorCodeDto,
+        BridgeErrorDto,
         CalendarOccurrenceDto,
         CalendarOccurrenceKindDto_Completed,
         CalendarOccurrenceKindDto_DateDue,
@@ -90,6 +92,10 @@ final reminderBridgeProvider = Provider<ReminderBridgePort>(
 
 final billingStoreProvider = Provider<BillingStore>(
   (ref) => RevenueCatBillingStore(),
+);
+
+final billingStoreCoordinatorProvider = Provider<BillingStoreCoordinator>(
+  (ref) => BillingStoreCoordinator(ref.watch(billingStoreProvider)),
 );
 
 final realtimeTimerFactoryProvider = Provider<RealtimeTimerFactory>(
@@ -350,8 +356,16 @@ final syncServerUrlProvider =
 
 class AccountNotifier extends AsyncNotifier<AccountSessionStateDto> {
   @override
-  FutureOr<AccountSessionStateDto> build() {
-    return ref.watch(accountBridgeProvider).getAccountSessionState();
+  Future<AccountSessionStateDto> build() async {
+    final bridge = ref.watch(accountBridgeProvider);
+    final billingStore = ref.watch(billingStoreCoordinatorProvider);
+    final accountEpoch = billingStore.accountEpoch;
+    final session = await bridge.getAccountSessionState();
+    billingStore.initializeAdmission(
+      accountEpoch: accountEpoch,
+      loggedIn: session.loggedIn,
+    );
+    return session;
   }
 
   Future<AccountRegistrationPendingDto> registrationBegin({
@@ -387,13 +401,29 @@ class AccountNotifier extends AsyncNotifier<AccountSessionStateDto> {
     required String password,
     String? deviceName,
   }) async {
-    final result = await ref
-        .read(accountBridgeProvider)
-        .accountRegistrationComplete(
-          password: password,
-          deviceName: deviceName,
-        );
-    state = AsyncData(result.session);
+    final billingStore = ref.read(billingStoreCoordinatorProvider);
+    final previousSession = state.value;
+    final accountEpoch = billingStore.closeAdmission();
+    late final AccountAuthResultDto result;
+    try {
+      result = await ref
+          .read(accountBridgeProvider)
+          .accountRegistrationComplete(
+            password: password,
+            deviceName: deviceName,
+          );
+    } catch (error, stackTrace) {
+      await _reconcileFailedAccountOperation(
+        previousSession: previousSession,
+        accountEpoch: accountEpoch,
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+    if (result.session.loggedIn && billingStore.openAdmission(accountEpoch)) {
+      state = AsyncData(result.session);
+      ref.invalidate(syncServerUrlProvider);
+    }
     return result;
   }
 
@@ -409,26 +439,102 @@ class AccountNotifier extends AsyncNotifier<AccountSessionStateDto> {
     String? serverUrl,
     String? deviceName,
   }) async {
-    final result = await ref
-        .read(accountBridgeProvider)
-        .accountLogin(
-          email: email,
-          password: password,
-          serverUrl: serverUrl,
-          deviceName: deviceName,
-        );
-    state = AsyncData(result.session);
-    ref.invalidate(syncServerUrlProvider);
+    final billingStore = ref.read(billingStoreCoordinatorProvider);
+    final previousSession = state.value;
+    final accountEpoch = billingStore.closeAdmission();
+    late final AccountAuthResultDto result;
+    try {
+      result = await ref
+          .read(accountBridgeProvider)
+          .accountLogin(
+            email: email,
+            password: password,
+            serverUrl: serverUrl,
+            deviceName: deviceName,
+          );
+    } catch (error, stackTrace) {
+      await _reconcileFailedAccountOperation(
+        previousSession: previousSession,
+        accountEpoch: accountEpoch,
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+    if (result.session.loggedIn && billingStore.openAdmission(accountEpoch)) {
+      state = AsyncData(result.session);
+      ref.invalidate(syncServerUrlProvider);
+    }
     return result;
   }
 
   Future<void> logout() async {
+    final billingStore = ref.read(billingStoreCoordinatorProvider);
+    final previousSession = state.value;
+    final accountEpoch = billingStore.closeAdmission();
     final bridge = ref.read(accountBridgeProvider);
-    await bridge.accountLogout();
-    await ref.read(billingStoreProvider).accountLoggedOut();
-    state = AsyncData(await bridge.getAccountSessionState());
+    try {
+      if (!await billingStore.drainClosedAdmission(
+        accountEpoch: accountEpoch,
+      )) {
+        return;
+      }
+      await bridge.accountLogout();
+      await billingStore.accountLoggedOut(accountEpoch: accountEpoch);
+      final session = await bridge.getAccountSessionState();
+      if (ref.mounted) state = AsyncData(session);
+    } catch (error, stackTrace) {
+      await _reconcileFailedAccountOperation(
+        previousSession: previousSession,
+        accountEpoch: accountEpoch,
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  Future<Never> _reconcileFailedAccountOperation({
+    required AccountSessionStateDto? previousSession,
+    required int accountEpoch,
+    required Object error,
+    required StackTrace stackTrace,
+  }) async {
+    final safeError = _safeBridgeError(error);
+    if (!ref.mounted) Error.throwWithStackTrace(safeError, stackTrace);
+    final billingStore = ref.read(billingStoreCoordinatorProvider);
+    try {
+      final actual = await ref
+          .read(accountBridgeProvider)
+          .getAccountSessionState();
+      if (billingStore.isCurrentEpoch(accountEpoch)) {
+        if (_isSameLoggedInAccount(previousSession, actual)) {
+          billingStore.openAdmission(accountEpoch);
+          state = const AsyncLoading();
+          state = AsyncData(actual);
+        } else if (!actual.loggedIn) {
+          state = AsyncData(actual);
+        } else {
+          state = AsyncError(safeError, stackTrace);
+        }
+      }
+    } catch (_) {
+      if (billingStore.isCurrentEpoch(accountEpoch)) {
+        state = AsyncError(safeError, stackTrace);
+      }
+    }
+    Error.throwWithStackTrace(safeError, stackTrace);
   }
 }
+
+bool _isSameLoggedInAccount(
+  AccountSessionStateDto? previous,
+  AccountSessionStateDto actual,
+) =>
+    previous != null &&
+    previous.loggedIn &&
+    actual.loggedIn &&
+    previous.userId != null &&
+    previous.userId == actual.userId &&
+    previous.tenantId == actual.tenantId;
 
 final accountProvider =
     AsyncNotifierProvider<AccountNotifier, AccountSessionStateDto>(
@@ -440,120 +546,446 @@ class BillingUiState {
     required this.entitlement,
     required this.products,
     this.busy = false,
+    this.storeTransactionBusy = false,
+    this.storeReady = true,
+    this.isStale = false,
+    this.lastRefreshError,
     this.lastOutcome,
   });
 
   final BillingStateDto entitlement;
   final List<BillingProduct> products;
   final bool busy;
+  final bool storeTransactionBusy;
+  final bool storeReady;
+  final bool isStale;
+  final BridgeErrorDto? lastRefreshError;
   final BillingPurchaseOutcome? lastOutcome;
 
   BillingUiState copyWith({
     BillingStateDto? entitlement,
     List<BillingProduct>? products,
     bool? busy,
+    bool? storeTransactionBusy,
+    bool? storeReady,
+    bool? isStale,
+    BridgeErrorDto? lastRefreshError,
+    bool clearLastRefreshError = false,
     BillingPurchaseOutcome? lastOutcome,
   }) => BillingUiState(
     entitlement: entitlement ?? this.entitlement,
     products: products ?? this.products,
     busy: busy ?? this.busy,
+    storeTransactionBusy: storeTransactionBusy ?? this.storeTransactionBusy,
+    storeReady: storeReady ?? this.storeReady,
+    isStale: isStale ?? this.isStale,
+    lastRefreshError: clearLastRefreshError
+        ? null
+        : lastRefreshError ?? this.lastRefreshError,
     lastOutcome: lastOutcome ?? this.lastOutcome,
   );
 }
 
 class BillingNotifier extends AsyncNotifier<BillingUiState?> {
+  final Map<int, Future<void>> _operationTails = {};
+  final Map<int, Future<void>> _refreshesInFlight = {};
+  final Map<(int, String, String?), Future<void>> _storeActionsInFlight = {};
+  int _generation = 0;
+  int? _readyGeneration;
+  int? _accountEpoch;
+
   @override
   Future<BillingUiState?> build() async {
-    final account = await ref.watch(accountProvider.future);
-    if (!account.loggedIn) return null;
+    final generation = ++_generation;
+    _readyGeneration = null;
+    _accountEpoch = null;
+    ref.onDispose(() {
+      _generation += 1;
+      _readyGeneration = null;
+      _accountEpoch = null;
+    });
+    final accountFuture = ref.watch(accountProvider.future);
     final bridge = ref.watch(billingBridgeProvider);
-    final cached = await bridge.getCachedBilling();
+    final store = ref.watch(billingStoreCoordinatorProvider);
+    final account = await accountFuture;
+    if (!_isCurrent(generation)) return null;
+    if (!account.loggedIn) return null;
+    final accountEpoch = store.accountEpoch;
+    _accountEpoch = accountEpoch;
+    if (!store.isOpenEpoch(accountEpoch)) return null;
+    BillingStateDto? cached;
+    try {
+      cached = await bridge.getCachedBilling();
+    } catch (_) {
+      cached = null;
+    }
+    if (!_isCurrent(generation) || !store.isOpenEpoch(accountEpoch)) {
+      return null;
+    }
     late final BillingStateDto entitlement;
     try {
       entitlement = await bridge.billingBootstrap();
-    } catch (_) {
-      if (cached == null) rethrow;
-      return BillingUiState(entitlement: cached, products: const []);
+      if (!_isCurrent(generation)) return null;
+    } catch (error) {
+      if (!_isCurrent(generation)) return null;
+      if (cached == null) {
+        throw _safeBillingRefreshError(error);
+      }
+      if (!store.isOpenEpoch(accountEpoch)) return null;
+      final result = BillingUiState(
+        entitlement: cached,
+        products: const [],
+        storeReady: false,
+        isStale: true,
+        lastRefreshError: _safeBillingRefreshError(error),
+      );
+      _readyGeneration = generation;
+      return result;
     }
-    return _withStoreCatalog(entitlement);
+    final result = await _withStoreCatalog(
+      entitlement,
+      store,
+      generation,
+      accountEpoch,
+    );
+    if (!_isCurrent(generation) || result == null) return null;
+    _readyGeneration = generation;
+    return result;
   }
 
-  Future<BillingUiState> _withStoreCatalog(BillingStateDto entitlement) async {
-    final store = ref.read(billingStoreProvider);
+  Future<BillingUiState?> _withStoreCatalog(
+    BillingStateDto entitlement,
+    BillingStoreCoordinator store,
+    int generation,
+    int accountEpoch,
+  ) async {
     try {
-      await store.configure(
+      final products = await store.products(
+        accountEpoch: accountEpoch,
         appUserId: entitlement.providerAppUserId,
         environment: entitlement.environment,
       );
+      if (!_isCurrent(generation) || products == null) return null;
+      return BillingUiState(entitlement: entitlement, products: products);
+    } catch (error) {
+      if (!_isCurrent(generation) || !store.isOpenEpoch(accountEpoch)) {
+        return null;
+      }
       return BillingUiState(
         entitlement: entitlement,
-        products: await store.products(),
+        products: const [],
+        storeReady: false,
+        lastRefreshError: _safeBillingRefreshError(error),
       );
-    } catch (_) {
-      return BillingUiState(entitlement: entitlement, products: const []);
     }
   }
 
-  Future<void> refreshFromServer() async {
+  Future<void> refreshFromServer() {
+    if (!ref.mounted) return Future<void>.value();
+    final generation = _generation;
+    final inFlight = _refreshesInFlight[generation];
+    if (inFlight != null) return inFlight;
+    if (state.hasError) {
+      if (!_hasCurrentAccountEpoch) return Future<void>.value();
+      ref.invalidateSelf();
+      return Future<void>.value();
+    }
+    if (!_hasReadyState || !_hasCurrentAccountEpoch) {
+      return Future<void>.value();
+    }
+
+    late final Future<void> operation;
+    operation = _enqueue(_refreshFromServerOnce).whenComplete(() {
+      if (identical(_refreshesInFlight[generation], operation)) {
+        _refreshesInFlight.remove(generation);
+      }
+    });
+    _refreshesInFlight[generation] = operation;
+    return operation;
+  }
+
+  Future<void> _refreshFromServerOnce(int generation) async {
+    final accountEpoch = _accountEpoch;
+    if (!_isCurrent(generation) ||
+        accountEpoch == null ||
+        !_hasCurrentAccountEpoch) {
+      return;
+    }
     final current = state.value;
     if (current == null) return;
     state = AsyncData(current.copyWith(busy: true));
     try {
-      final entitlement = await ref
-          .read(billingBridgeProvider)
-          .refreshBilling();
-      state = AsyncData(await _withStoreCatalog(entitlement));
-    } catch (error, stackTrace) {
-      state = AsyncError(error, stackTrace);
-    }
-  }
-
-  Future<void> purchase(String productIdentifier) async {
-    await _runStoreAction(
-      () => ref.read(billingStoreProvider).purchase(productIdentifier),
-    );
-  }
-
-  Future<void> restore() async {
-    await _runStoreAction(() => ref.read(billingStoreProvider).restore());
-  }
-
-  Future<void> _runStoreAction(
-    Future<BillingPurchaseOutcome> Function() action,
-  ) async {
-    final current = state.value;
-    if (current == null || current.busy) return;
-    state = AsyncData(current.copyWith(busy: true));
-    try {
-      final outcome = await action();
-      if (outcome == BillingPurchaseOutcome.purchased) {
-        final entitlement = await ref
-            .read(billingBridgeProvider)
-            .refreshBilling();
-        final refreshed = await _withStoreCatalog(entitlement);
-        state = AsyncData(refreshed.copyWith(lastOutcome: outcome));
-      } else {
-        state = AsyncData(current.copyWith(busy: false, lastOutcome: outcome));
-      }
-    } catch (_) {
+      final bridge = ref.read(billingBridgeProvider);
+      final store = ref.read(billingStoreCoordinatorProvider);
+      final entitlement = await bridge.refreshBilling();
+      if (!_isCurrent(generation) || !_hasCurrentAccountEpoch) return;
+      final refreshed = await _withStoreCatalog(
+        entitlement,
+        store,
+        generation,
+        accountEpoch,
+      );
+      if (!_isCurrent(generation) || refreshed == null) return;
+      state = AsyncData(refreshed);
+    } catch (error) {
+      if (!_isCurrent(generation) || !_hasCurrentAccountEpoch) return;
       state = AsyncData(
         current.copyWith(
           busy: false,
-          lastOutcome: BillingPurchaseOutcome.failed,
+          isStale: true,
+          lastRefreshError: _safeBillingRefreshError(error),
         ),
       );
     }
   }
+
+  Future<void> purchase(String productIdentifier) {
+    return _runStoreAction(
+      ('purchase', productIdentifier),
+      (store, accountEpoch, entitlement) => store.purchase(
+        accountEpoch: accountEpoch,
+        appUserId: entitlement.providerAppUserId,
+        environment: entitlement.environment,
+        productIdentifier: productIdentifier,
+      ),
+    );
+  }
+
+  Future<void> restore() {
+    return _runStoreAction(
+      ('restore', null),
+      (store, accountEpoch, entitlement) => store.restore(
+        accountEpoch: accountEpoch,
+        appUserId: entitlement.providerAppUserId,
+        environment: entitlement.environment,
+      ),
+    );
+  }
+
+  Future<Uri?> managementUrl() async {
+    if (!ref.mounted || !_hasReadyState || !_hasStoreAdmission) return null;
+    final generation = _generation;
+    final accountEpoch = _accountEpoch!;
+    final current = state.value;
+    if (current == null || current.busy) return null;
+    final entitlement = current.entitlement;
+    state = AsyncData(current.copyWith(busy: true, storeTransactionBusy: true));
+    try {
+      final url = await ref
+          .read(billingStoreCoordinatorProvider)
+          .managementUrl(
+            accountEpoch: accountEpoch,
+            appUserId: entitlement.providerAppUserId,
+            environment: entitlement.environment,
+          );
+      if (!_isCurrent(generation) || !_hasCurrentAccountEpoch) return null;
+      state = AsyncData(
+        current.copyWith(busy: false, storeTransactionBusy: false),
+      );
+      return url;
+    } catch (_) {
+      if (!_isCurrent(generation) || !_hasCurrentAccountEpoch) return null;
+      state = AsyncData(
+        current.copyWith(busy: false, storeTransactionBusy: false),
+      );
+      return null;
+    }
+  }
+
+  Future<void> _runStoreAction(
+    (String, String?) actionKey,
+    Future<BillingPurchaseOutcome?> Function(
+      BillingStoreCoordinator store,
+      int accountEpoch,
+      BillingStateDto entitlement,
+    )
+    action,
+  ) {
+    if (!ref.mounted || !_hasReadyState || !_hasStoreAdmission) {
+      return Future<void>.value();
+    }
+    final generation = _generation;
+    final generationActionKey = (generation, actionKey.$1, actionKey.$2);
+    final inFlight = _storeActionsInFlight[generationActionKey];
+    if (inFlight != null) return inFlight;
+
+    late final Future<void> operation;
+    operation =
+        _enqueue(
+          (generation) => _runStoreActionOnce(action, generation),
+        ).whenComplete(() {
+          if (identical(
+            _storeActionsInFlight[generationActionKey],
+            operation,
+          )) {
+            _storeActionsInFlight.remove(generationActionKey);
+          }
+        });
+    _storeActionsInFlight[generationActionKey] = operation;
+    return operation;
+  }
+
+  Future<void> _runStoreActionOnce(
+    Future<BillingPurchaseOutcome?> Function(
+      BillingStoreCoordinator store,
+      int accountEpoch,
+      BillingStateDto entitlement,
+    )
+    action,
+    int generation,
+  ) async {
+    final accountEpoch = _accountEpoch;
+    if (!_isCurrent(generation) ||
+        accountEpoch == null ||
+        !_hasStoreAdmission) {
+      return;
+    }
+    final current = state.value;
+    if (current == null || current.busy) return;
+    state = AsyncData(current.copyWith(busy: true, storeTransactionBusy: true));
+    final store = ref.read(billingStoreCoordinatorProvider);
+    late final BillingPurchaseOutcome? outcome;
+    try {
+      outcome = await action(store, accountEpoch, current.entitlement);
+    } catch (_) {
+      if (!_isCurrent(generation) || !_hasCurrentAccountEpoch) return;
+      state = AsyncData(
+        current.copyWith(
+          busy: false,
+          storeTransactionBusy: false,
+          lastOutcome: BillingPurchaseOutcome.failed,
+        ),
+      );
+      return;
+    }
+    if (!_isCurrent(generation) || !_hasCurrentAccountEpoch) return;
+    if (outcome == null) return;
+    if (outcome != BillingPurchaseOutcome.purchased) {
+      state = AsyncData(
+        current.copyWith(
+          busy: false,
+          storeTransactionBusy: false,
+          lastOutcome: outcome,
+        ),
+      );
+      return;
+    }
+
+    // The native store transaction has completed. Keep the overall operation
+    // busy while reconciling the server-issued entitlement, but do not block
+    // logout on a network refresh that may be slow or unavailable.
+    state = AsyncData(
+      current.copyWith(busy: true, storeTransactionBusy: false),
+    );
+    try {
+      final entitlement = await ref
+          .read(billingBridgeProvider)
+          .refreshBilling();
+      if (!_isCurrent(generation) || !_hasCurrentAccountEpoch) return;
+      final refreshed = await _withStoreCatalog(
+        entitlement,
+        store,
+        generation,
+        accountEpoch,
+      );
+      if (!_isCurrent(generation) || refreshed == null) return;
+      state = AsyncData(refreshed.copyWith(lastOutcome: outcome));
+    } catch (error) {
+      if (!_isCurrent(generation) || !_hasCurrentAccountEpoch) return;
+      state = AsyncData(
+        current.copyWith(
+          busy: false,
+          storeTransactionBusy: false,
+          isStale: true,
+          lastRefreshError: _safeBillingRefreshError(error),
+          lastOutcome: outcome,
+        ),
+      );
+    }
+  }
+
+  Future<void> _enqueue(Future<void> Function(int generation) operation) {
+    final generation = _generation;
+    final previous = _operationTails[generation] ?? Future<void>.value();
+    late final Future<void> scheduled;
+    scheduled = previous
+        .then((_) async {
+          if (!_isCurrent(generation)) return;
+          try {
+            await operation(generation);
+          } catch (_) {
+            // Public billing operations are also called from lifecycle and
+            // realtime callbacks. Operation-specific paths publish a safe state;
+            // disposal and unexpected adapter failures must never escape an
+            // unawaited automatic recovery callback.
+          }
+        })
+        .whenComplete(() {
+          if (identical(_operationTails[generation], scheduled)) {
+            _operationTails.remove(generation);
+          }
+        });
+    _operationTails[generation] = scheduled;
+    return scheduled;
+  }
+
+  bool _isCurrent(int generation) => ref.mounted && generation == _generation;
+
+  bool get _hasReadyState =>
+      _readyGeneration == _generation && state.value != null;
+
+  bool get _hasCurrentAccountEpoch {
+    final accountEpoch = _accountEpoch;
+    return accountEpoch != null &&
+        ref.read(billingStoreCoordinatorProvider).isOpenEpoch(accountEpoch);
+  }
+
+  bool get _hasStoreAdmission {
+    final current = state.value;
+    final accountEpoch = _accountEpoch;
+    if (current == null ||
+        !current.storeReady ||
+        accountEpoch == null ||
+        !_hasCurrentAccountEpoch) {
+      return false;
+    }
+    final entitlement = current.entitlement;
+    return ref
+        .read(billingStoreCoordinatorProvider)
+        .isAdmitted(
+          accountEpoch: accountEpoch,
+          appUserId: entitlement.providerAppUserId,
+          environment: entitlement.environment,
+        );
+  }
+}
+
+BridgeErrorDto _safeBillingRefreshError(Object error) {
+  return _safeBridgeError(error);
+}
+
+BridgeErrorDto _safeBridgeError(Object error) {
+  if (error is BridgeErrorDto) return error;
+  return const BridgeErrorDto(
+    code: BridgeErrorCodeDto.internal,
+    arguments: [],
+    retryable: false,
+  );
 }
 
 final billingProvider = AsyncNotifierProvider<BillingNotifier, BillingUiState?>(
   BillingNotifier.new,
+  // Recovery is driven by resume, realtime reconnection, and explicit retry.
+  // Riverpod's default Exception retry would keep the typed AsyncError in a
+  // loading/retrying state for tens of seconds and hide the recovery control.
+  retry: (_, _) => null,
 );
 
 class SyncStatusNotifier extends AsyncNotifier<SyncStatusDto> {
   RealtimeSyncScheduler? _scheduler;
   bool _foreground = true;
   bool _connected = false;
+  bool _observedRealtimeConnectionState = false;
 
   @override
   FutureOr<SyncStatusDto> build() async {
@@ -596,8 +1028,28 @@ class SyncStatusNotifier extends AsyncNotifier<SyncStatusDto> {
   ]) => _scheduler?.trigger(kind);
 
   void setRealtimeConnected(bool connected) {
+    final recovered =
+        _observedRealtimeConnectionState && connected && !_connected;
+    _observedRealtimeConnectionState = true;
     _connected = connected;
     _scheduler?.setConnected(connected);
+    if (connected && (recovered || _billingNeedsRecovery())) {
+      unawaited(_recoverBillingWithoutEscaping());
+    }
+  }
+
+  bool _billingNeedsRecovery() {
+    final billing = ref.read(billingProvider);
+    return billing.hasError || billing.value?.isStale == true;
+  }
+
+  Future<void> _recoverBillingWithoutEscaping() async {
+    try {
+      await ref.read(billingProvider.notifier).refreshFromServer();
+    } catch (_) {
+      // Automatic network recovery is best effort. BillingNotifier preserves
+      // a typed stale/error state and retries at the next recovery trigger.
+    }
   }
 
   void setForeground(bool foreground) {

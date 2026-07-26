@@ -911,6 +911,8 @@ class _SignedInSection extends StatelessWidget {
     final colorScheme = theme.colorScheme;
     final email = account.email ?? '';
     final initial = email.trim().isEmpty ? '?' : email.trim()[0].toUpperCase();
+    final storeTransactionBusy =
+        billingAsync.value?.storeTransactionBusy ?? false;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -977,7 +979,7 @@ class _SignedInSection extends StatelessWidget {
         const SizedBox(height: AppSpacing.lg),
         Divider(color: colorScheme.outlineVariant),
         const SizedBox(height: AppSpacing.lg),
-        _BillingSection(billingAsync: billingAsync),
+        _BillingSection(billingAsync: billingAsync, accountBusy: busy),
         const SizedBox(height: AppSpacing.lg),
         Divider(color: colorScheme.outlineVariant),
         const SizedBox(height: AppSpacing.lg),
@@ -992,7 +994,7 @@ class _SignedInSection extends StatelessWidget {
         Divider(color: colorScheme.outlineVariant),
         _AccountActionRow(
           key: const ValueKey('account-logout'),
-          onPressed: busy ? null : onLogout,
+          onPressed: busy || storeTransactionBusy ? null : onLogout,
           icon: LucideIcons.logOut300,
           label: l10n.accountLogoutButton,
           destructive: true,
@@ -1003,9 +1005,13 @@ class _SignedInSection extends StatelessWidget {
 }
 
 class _BillingSection extends ConsumerWidget {
-  const _BillingSection({required this.billingAsync});
+  const _BillingSection({
+    required this.billingAsync,
+    required this.accountBusy,
+  });
 
   final AsyncValue<BillingUiState?> billingAsync;
+  final bool accountBusy;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -1017,7 +1023,20 @@ class _BillingSection extends ConsumerWidget {
         const SizedBox(height: AppSpacing.sm),
         billingAsync.when(
           loading: () => const LinearProgressIndicator(minHeight: 2),
-          error: (_, _) => Text(l10n.billingUnavailable),
+          error: (_, _) => Row(
+            children: [
+              Expanded(child: Text(l10n.billingUnavailable)),
+              const SizedBox(width: AppSpacing.sm),
+              TextButton(
+                onPressed: accountBusy
+                    ? null
+                    : () => ref
+                          .read(billingProvider.notifier)
+                          .refreshFromServer(),
+                child: Text(l10n.billingRetryButton),
+              ),
+            ],
+          ),
           data: (value) {
             if (value == null) return Text(l10n.billingStatusFree);
             final entitlement = value.entitlement;
@@ -1049,7 +1068,7 @@ class _BillingSection extends ConsumerWidget {
                   for (final product in value.products) ...[
                     _BillingProductTile(
                       product: product,
-                      busy: value.busy,
+                      busy: accountBusy || value.busy,
                       onPurchase: () => ref
                           .read(billingProvider.notifier)
                           .purchase(product.identifier),
@@ -1061,13 +1080,30 @@ class _BillingSection extends ConsumerWidget {
                   const SizedBox(height: AppSpacing.sm),
                   Text(_billingOutcome(l10n, outcome)),
                 ],
+                if (value.lastRefreshError case final error?) ...[
+                  const SizedBox(height: AppSpacing.sm),
+                  Text(bridgeErrorMessage(l10n, error)),
+                  if (value.isStale)
+                    Text(
+                      l10n.billingStaleNotice,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  TextButton(
+                    onPressed: accountBusy || value.busy
+                        ? null
+                        : () => ref
+                              .read(billingProvider.notifier)
+                              .refreshFromServer(),
+                    child: Text(l10n.billingRetryButton),
+                  ),
+                ],
                 const SizedBox(height: AppSpacing.sm),
                 Wrap(
                   spacing: AppSpacing.sm,
                   runSpacing: AppSpacing.xs,
                   children: [
                     TextButton.icon(
-                      onPressed: value.busy
+                      onPressed: accountBusy || value.busy || !value.storeReady
                           ? null
                           : () => ref.read(billingProvider.notifier).restore(),
                       icon: const Icon(LucideIcons.refreshCcw300),
@@ -1075,11 +1111,12 @@ class _BillingSection extends ConsumerWidget {
                     ),
                     if (entitlement.syncAllowed)
                       TextButton.icon(
-                        onPressed: value.busy
+                        onPressed:
+                            accountBusy || value.busy || !value.storeReady
                             ? null
                             : () async {
                                 final url = await ref
-                                    .read(billingStoreProvider)
+                                    .read(billingProvider.notifier)
                                     .managementUrl();
                                 if (url != null) {
                                   await launchUrl(

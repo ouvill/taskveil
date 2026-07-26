@@ -2341,6 +2341,18 @@ abstract class AppLocalizations {
   /// **'Billing is unavailable right now.'**
   String get billingUnavailable;
 
+  /// No description provided for @billingRetryButton.
+  ///
+  /// In en, this message translates to:
+  /// **'Retry'**
+  String get billingRetryButton;
+
+  /// No description provided for @billingStaleNotice.
+  ///
+  /// In en, this message translates to:
+  /// **'Showing the last known subscription status. Sync access is still checked by the server.'**
+  String get billingStaleNotice;
+
   /// No description provided for @billingCancelled.
   ///
   /// In en, this message translates to:
