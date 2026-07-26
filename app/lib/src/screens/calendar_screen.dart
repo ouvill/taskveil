@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:taskveil/src/core/civil_time.dart';
 import 'package:taskveil/src/core/providers.dart';
 import 'package:taskveil/src/core/task_due.dart';
 import 'package:taskveil/src/core/task_tree.dart';
@@ -308,7 +309,7 @@ class _CalendarScreenState extends ConsumerState<CalendarScreen> {
     final start = _weekStart(context, _anchorDay, weekStart);
     final days = [
       for (var index = 0; index < 7; index++)
-        DateTime(start.year, start.month, start.day + index),
+        localCivilDay(start, dayOffset: index),
     ];
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -351,7 +352,7 @@ class _CalendarScreenState extends ConsumerState<CalendarScreen> {
     final gridStart = _weekStart(context, monthStart, weekStart);
     final days = [
       for (var index = 0; index < 42; index++)
-        DateTime(gridStart.year, gridStart.month, gridStart.day + index),
+        localCivilDay(gridStart, dayOffset: index),
     ];
     final weekdays = days.take(7).toList(growable: false);
     return Column(
@@ -774,14 +775,14 @@ class _CalendarScreenState extends ConsumerState<CalendarScreen> {
       final start = _weekStart(context, _anchorDay, weekStart);
       return CalendarRange.local(
         start: start,
-        end: DateTime(start.year, start.month, start.day + 7),
+        end: localCivilDay(start, dayOffset: 7),
       );
     }
     final monthStart = DateTime(_anchorDay.year, _anchorDay.month);
     final start = _weekStart(context, monthStart, weekStart);
     return CalendarRange.local(
       start: start,
-      end: DateTime(start.year, start.month, start.day + 42),
+      end: localCivilDay(start, dayOffset: 42),
     );
   }
 
@@ -793,7 +794,7 @@ class _CalendarScreenState extends ConsumerState<CalendarScreen> {
     };
     final weekday = day.weekday % 7;
     final offset = (weekday - firstDay + 7) % 7;
-    return DateTime(day.year, day.month, day.day - offset);
+    return localCivilDay(day, dayOffset: -offset);
   }
 
   void _selectDay(DateTime day) {
@@ -1302,8 +1303,7 @@ Map<String, _CalendarTreeContext> _calendarTreeContexts(
 }
 
 DateTime _dateOnly(DateTime value) {
-  final local = value.toLocal();
-  return DateTime(local.year, local.month, local.day);
+  return localCivilDay(value);
 }
 
 bool _sameDay(DateTime a, DateTime b) =>

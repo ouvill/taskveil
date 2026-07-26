@@ -1,4 +1,5 @@
 import 'package:taskveil/src/core/bridge_service.dart';
+import 'package:taskveil/src/core/civil_time.dart';
 import 'package:taskveil/src/core/task_due.dart';
 import 'package:taskveil/src/core/providers.dart'
     show
@@ -115,8 +116,12 @@ class FakeBridgeService implements BridgeService {
 
     const rootTasksPerList = 700;
     const childTasksPerList = 220;
-    final todayStart = todayStartMs ?? _localDayStartMs(DateTime.now());
-    final tomorrowStart = todayStart + _fakeDayMs;
+    final now = DateTime.now();
+    final todayStart =
+        todayStartMs ?? localCivilDay(now).millisecondsSinceEpoch;
+    final tomorrowStart = todayStartMs == null
+        ? localCivilDay(now, dayOffset: 1).millisecondsSinceEpoch
+        : todayStart + _fakeDayMs;
     var dueTaskCount = 0;
     var closedTaskCount = 0;
 
@@ -1056,16 +1061,17 @@ class FakeBridgeService implements BridgeService {
     };
     final homeTargetIds = <String>{};
     for (final task in _tasks) {
-      final scheduledToday =
-          task.scheduledAt != null &&
-          task.scheduledAt! >= todayStartMs &&
-          task.scheduledAt! < tomorrowStartMs;
-      if ((task.due == null && !scheduledToday) ||
-          !activeListById.containsKey(task.listId)) {
+      if (!activeListById.containsKey(task.listId)) {
         continue;
       }
       if (task.status == 'todo' || task.status == 'in_progress') {
-        homeTargetIds.add(task.id);
+        final scheduledToday =
+            task.scheduledAt != null &&
+            task.scheduledAt! >= todayStartMs &&
+            task.scheduledAt! < tomorrowStartMs;
+        if (task.due != null || scheduledToday) {
+          homeTargetIds.add(task.id);
+        }
       } else if (task.status == 'done' || task.status == 'wont_do') {
         final completedAt = task.completedAt;
         if (completedAt != null &&
@@ -1711,11 +1717,6 @@ const int _fakeDayMs = Duration.millisecondsPerDay;
 
 int _fakeTimestamp(int sequence) =>
     _fakeClockBaseMs + (sequence * _fakeMinuteMs);
-
-int _localDayStartMs(DateTime dateTime) {
-  final local = dateTime.toLocal();
-  return DateTime(local.year, local.month, local.day).millisecondsSinceEpoch;
-}
 
 /// A recorded undo entry for [FakeBridgeService].
 ///
