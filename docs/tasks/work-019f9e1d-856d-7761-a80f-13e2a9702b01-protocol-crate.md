@@ -88,7 +88,7 @@ Organizationのwire contractを独立させ、serverがclient orchestrationへ�
 - 作業日: 2026-07-26
 - 結果: `taskveil-protocol`をworkspaceへ追加し、sync/account/Organizationの共有wire DTO、enum、version/header、envelope framing、canonical HLC wire valueを抽出した。key manifestのMAC・Organization署名検証は`taskveil-crypto`へ移し、`taskveil-sync`にはHTTP transport、暗号record、merge、同期state machineと互換re-exportだけを残した。server productionは`taskveil-protocol` / `taskveil-crypto`だけを共有し、`taskveil-sync`をdev-only integration dependencyへ移した。
 - 証拠: `cargo tree -p taskveil-server --edges normal -i taskveil-sync`は`nothing to print`、depth 1のTaskveil依存は`taskveil-crypto` / `taskveil-protocol`のみ。protocol wire 5 tests、Rust workspace 414 passed / 3 ignored、server Postgres統合19 tests、bridge release build、`flutter analyze`、`flutter test` 301 passed / visual QA 1 skipped、hardcoded-string/client/protocol boundary gate、protocol boundary negative fixtures、`git diff --check`が成功した。
-- Commit: 未コミット
+- Commit: `5007962`
 - 未解決: 独立検証未実施。既存のmacOS Keychain実機test 2件、10k storage性能test 1件、Flutter visual QA harness 1件は明示的な手動gateのためskip / ignored。
 
 ### 独立検証
