@@ -138,9 +138,11 @@ FRB 2.12.0が提供するtyped `Result<T, E>`を使用し、新規error transpor
   | `internal` | false | unsupported/unavailable runtime invariant |
 
 - `AccountClientError`はOPAQUE authentication rejection、HTTP transport、
-  response protocol decodeを別variantで表現する。remote transportはretryable
-  `syncFailure`、malformed response、URL/serialization、HTTP 5xx等のgeneric
-  account failureはfail-closedな`internal`とし、`unauthorized`へ誤分類しない。
+  response protocol decodeを別variantで表現する。remote transport、HTTP 408 / 5xxは
+  retryable `syncFailure`、malformed responseや未知のaccount failureはfail-closedな
+  `internal`とし、`unauthorized`へ誤分類しない。HTTP 400 / 422、404 / 410、409、
+  429とemail verification期限 / 再送期限はそれぞれstableなinput、not-found、
+  conflict、retryable busyへ分類する。
 - organization safety / roster / revoke / active key bundleを含む全公開remote
   account経路は同じallowlist mapperを使用する。
 
@@ -212,3 +214,44 @@ FRB 2.12.0が提供するtyped `Result<T, E>`を使用し、新規error transpor
   `git diff --check`: pass。
 - 既存独立レビューのP0 / P1 / P2残存なし判定を維持し、現行baseへの再構築差分で
   新たなP0 / P1 / P2 / P3指摘なし。
+
+### Email verification統合とfollow-up独立検証
+
+- follow-up独立検証の初回判定: Draft継続（P2 3件、P3 1件）
+- 対応:
+  - Account画面のaccount / server URL load、save、login、logout、organization
+    safety、sync statusに加え、email registration state / Recovery Key復旧、
+    登録開始、再送、OTP検証、完了、取消、Recovery Key確認をすべて同じ
+    code-based localizationへ統一した。未知のplugin例外は固定`internal`文言へ
+    fail closedし、payloadを表示しない。
+  - direct FRB errorと`SyncStatus.last_error`を同じ`ClientErrorKind` /
+    `SyncFailure`変換へ統一した。`ProfileIdentityMismatch`と
+    `IncompleteAccountState`は`accountBoundUnavailable`、transport / HTTP 408 /
+    5xxはretryable `syncFailure`となり、全15 codeのexhaustive testで一致を固定した。
+  - startup failure logはfixed eventとstable codeだけを出力し、error object、
+    stack trace、path、tokenを出さない専用mapperとredaction testへ置換した。
+  - client boundary fixtureは実`api/conversions.rs`とDart source treeを使用し、
+    `Result<_, String>`、toy API、raw Dart interpolation、必須変換file欠落の4負例が
+    必ず検出されるようにした。
+- email verification実装済み`main`への統合で、旧`AccountClientError::Http`参照が
+  登録のJSON decode / idempotent retry経路に4箇所残るcompile errorを検出した。
+  JSON decodeは`ProtocolDecode`、send failureは`Transport`としてretry後も区別して
+  返す根本修正を行い、メール登録の全FRB関数も`BridgeErrorDto`へ統一した。
+- 2026-07-27最終候補:
+  - base: `cc2521798ef937592f0a96829c70d82ba5ee940f`
+  - base-only rebase前後でbranch patch-id
+    `b286b0f0022d0ddd90d997bb4190ea1359370bef`と、fuzz / `Cargo.lock`を除く
+    source treeが一致。
+  - `flutter_rust_bridge_codegen generate --config-file
+    flutter_rust_bridge.yaml`: pass、生成差分なし。
+  - `cargo fmt --all -- --check`,
+    `cargo clippy --workspace -- -D warnings`: pass。
+  - `cargo test --workspace`: pass。client 140、crypto 54 + real Keychain 2 ignored、
+    domain 62、server unit 53 / auth 17 / billing 9 / migrations 3 / realtime 2 /
+    RLS 1 / sync-v2 27、storage 93 + manual perf 1 ignored、sync 101、bridge 3、
+    client doc test 4を含む。
+  - bridge release build、`flutter analyze`: pass。
+  - `flutter test`: 329 pass、visual QA harness 1 intentional skip。実SQLCipher
+    10k performanceはHome median 199 ms、Calendar median 99 msでpass。
+  - Account/email typed error対象Flutter 33、boundary正例 / 4負例、
+    hardcoded strings、`git diff --check`: pass。
