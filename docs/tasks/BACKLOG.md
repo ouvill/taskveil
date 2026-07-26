@@ -16,8 +16,8 @@ UUIDv7 work item方式のpilot中に残すlegacy backlogである。既存のLat
 | 候補 | 内容 | 出典・依存 |
 |---|---|---|
 | Windows / Linux本番Device Key Store | Windows current-user DPAPI、Linux Secret Serviceを実装し、平文 `device.key` / account secret fileを本番経路から除外する | ADR-011 / task-81。新規依存は人間承認が必要 |
-| CLI実接続 | 共通client/profile層からFlutter desktopと同じSQLCipher DBを開き、CRUD・検索・同期を提供する。macOSは同一Team / Keychain access groupで署名する | ADR-011。共通client/profileとOS secret storeに依存 |
-| MCPサーバー実接続 | CLIと同じ共通client/profile層からタスクCRUD・検索・同期をstdio MCPとして公開する | FTS5 task-62、sync task-72、ADR-011に依存 |
+| CLI実接続 | 共通client/profile層からFlutter desktopと同じSQLCipher DBを開き、CRUD・検索・同期を提供する。macOSは同一Team / Keychain access groupで署名する | ADR-011、Issue #55の共有profile coordination、production OS secret storeに依存。Issue #63でfail closed化し、実接続work item完了まで維持する |
+| MCPサーバー実接続 | CLIと同じ共通client/profile層からタスクCRUD・検索・同期をstdio MCPとして公開する | FTS5 task-62、sync task-72、ADR-011、Issue #55に依存。Issue #63でprotocolをadvertiseしないfail-closed stubへ固定し、実接続work item完了まで維持する |
 | サーバーのデバイス行重複排除 | 同一インストールからの再ログインで既存device rowを再利用する | 2026-07-10実機同期確認 |
 | Android Keystore DeviceKeyStore | Androidの開発用 `FileDeviceKeyStore` を本番用Android Keystore実装へ置き換える | 技術仕様§4.3 / task-74 |
 | Phase 1リリース前のlight固定 | ダークモード正式対応まで `themeMode` をlight固定する | 2026-07-06人間裁定 |
