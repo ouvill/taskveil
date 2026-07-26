@@ -58,7 +58,11 @@ lock hierarchyは次で固定する。
 4. SQLite transaction
 
 SQLite transaction内から上位lockを取得せず、network await中にSQLite transactionを
-保持しない。通常read、local mutation、sync runはprofile shared guardを使う。
+保持しない。通常readとlocal mutationはprofile shared guardを使う。sync runは短いshared
+guard内でcapsule / runtimeを再検証してDB keyとruntime epochをsnapshotした後、最初の
+network awaitより前にguardを解放する。以後のsingle-flightとcommit safetyはDB-backed
+lease / fencingが担う。Tenant key cutoverもlease保持中にprofile guardを再取得せず、
+fenced transactionとpost-commitのruntime epoch CASでstale publicationを拒否する。
 capsule recovery、migration、account/device bindingを変更するauth / logout、
 Device Key rotationはprofile exclusive guardを使い、別processの通常operation開始を止める。
 
@@ -100,6 +104,9 @@ epoch変更後に同じrunがleaseを取り直してはならず、profile runti
 再解決した新しいouter operationだけが次のleaseを取得する。
 local fenceは送信済みHTTP requestを取り消せないため、remote side effectは既存の
 `op_id`、base revision CAS、冪等ACKで再送安全にする。
+同期後のsettlementが新outboxを作った場合だけでなく、network待機中のlocal mutationが
+durable outbox headを残した場合も同じrunがfollow-up drainする。完了判定はfencedな
+empty-outbox readへ線形化し、それ以前にcommitしたmutationを取りこぼさない。
 
 公開errorは`ProfileBusy`、`SyncLeaseBusy`、`LeaseLost`、
 `ProfileLockUnsupported`、`DatabaseBusy`を区別する。

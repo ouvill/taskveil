@@ -284,6 +284,27 @@ impl TaskveilClient {
         self.begin_operation_with_profile(profile)
     }
 
+    /// Captures the durable inputs needed to start a network workflow without
+    /// retaining the profile guard across an `.await`.
+    ///
+    /// The profile guard remains the authority for capsule/runtime refresh,
+    /// while the returned epoch is fenced by the sync lease at every remote
+    /// and local commit boundary.
+    pub(super) fn prepare_network_operation<T>(
+        &self,
+        prepare: impl FnOnce(&Self) -> Result<T, ClientError>,
+    ) -> Result<(NetworkOperationContext, T), ClientError> {
+        let _operation = self.begin_operation()?;
+        let prepared = prepare(self)?;
+        Ok((
+            NetworkOperationContext {
+                db_key: self.db_key(),
+                runtime_epoch: self.loaded_runtime_epoch(),
+            },
+            prepared,
+        ))
+    }
+
     fn has_pending_capsule_locked(&self) -> Result<bool, ClientError> {
         use taskveil_crypto::{LocalKeyCapsuleSlot, LocalKeyCapsuleStore};
 
@@ -388,6 +409,22 @@ impl TaskveilClient {
         self.runtime_epoch.load(Ordering::Acquire)
     }
 
+    #[cfg(test)]
+    pub(super) fn publish_runtime_epoch(&self, runtime_epoch: i64) {
+        self.runtime_epoch.store(runtime_epoch, Ordering::Release);
+    }
+
+    pub(super) fn publish_runtime_epoch_if_current(
+        &self,
+        expected: i64,
+        runtime_epoch: i64,
+    ) -> Result<(), ClientError> {
+        self.runtime_epoch
+            .compare_exchange(expected, runtime_epoch, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|_| ClientError::LeaseLost)
+    }
+
     pub(super) fn retry_runtime_epoch_once<T>(
         &self,
         mut operation: impl FnMut() -> Result<T, ClientError>,
@@ -488,6 +525,11 @@ impl TaskveilClient {
 
 pub(super) struct OperationGuard {
     _profile: ProfileOperationGuard,
+}
+
+pub(super) struct NetworkOperationContext {
+    pub(super) db_key: Zeroizing<[u8; 32]>,
+    pub(super) runtime_epoch: i64,
 }
 
 #[allow(dead_code)] // Variant payloads own the RAII locks until operation drop.
