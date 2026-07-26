@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
+import 'package:taskveil/src/core/civil_time.dart';
 import 'package:taskveil/src/core/task_due.dart';
 import 'package:taskveil/src/rust/api.dart';
 import 'package:taskveil/src/rust/frb_generated.dart';
@@ -113,14 +114,15 @@ void main() {
 
   test('home smart view is exposed through Rust bridge', () async {
     final now = DateTime.now();
-    final todayStart = DateTime(
-      now.year,
-      now.month,
-      now.day,
+    final todayStart = localCivilDay(now).millisecondsSinceEpoch;
+    final tomorrowStart = localCivilDay(
+      now,
+      dayOffset: 1,
     ).millisecondsSinceEpoch;
-    final tomorrowStart = todayStart + const Duration(days: 1).inMilliseconds;
-    final dayAfterTomorrowStart =
-        tomorrowStart + const Duration(days: 1).inMilliseconds;
+    final dayAfterTomorrowStart = localCivilDay(
+      now,
+      dayOffset: 2,
+    ).millisecondsSinceEpoch;
     final todayList = await createList(name: 'Home bridge', sortOrder: 'tb0');
     final otherList = await createList(name: 'Other bridge', sortOrder: 'tb1');
     final archivedList = await createList(

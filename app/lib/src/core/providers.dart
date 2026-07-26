@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:taskveil/src/billing/billing_store.dart';
 import 'package:taskveil/src/core/bridge_service.dart';
+import 'package:taskveil/src/core/civil_time.dart';
 import 'package:taskveil/src/core/realtime_sync.dart';
 import 'package:taskveil/src/core/task_tree.dart';
 import 'package:taskveil/src/core/task_due.dart';
@@ -997,29 +998,26 @@ final taskSortModeProvider =
       TaskSortModeNotifier.new,
     );
 
-DateTime localDayStart(DateTime dateTime) {
-  final local = dateTime.toLocal();
-  return DateTime(local.year, local.month, local.day);
-}
-
 ({int startMs, int endMs}) todayLocalRangeMs({DateTime? now}) {
-  final start = localDayStart(now ?? DateTime.now());
+  final current = now ?? DateTime.now();
+  final start = localCivilDay(current);
+  final end = localCivilDay(current, dayOffset: 1);
   return (
     startMs: start.millisecondsSinceEpoch,
-    endMs: start.add(const Duration(days: 1)).millisecondsSinceEpoch,
+    endMs: end.millisecondsSinceEpoch,
   );
 }
 
 ({int todayStartMs, int tomorrowStartMs, int dayAfterTomorrowStartMs})
 homeLocalRangesMs({DateTime? now}) {
-  final todayStart = localDayStart(now ?? DateTime.now());
-  final tomorrowStart = todayStart.add(const Duration(days: 1));
+  final current = now ?? DateTime.now();
+  final todayStart = localCivilDay(current);
+  final tomorrowStart = localCivilDay(current, dayOffset: 1);
+  final dayAfterTomorrowStart = localCivilDay(current, dayOffset: 2);
   return (
     todayStartMs: todayStart.millisecondsSinceEpoch,
     tomorrowStartMs: tomorrowStart.millisecondsSinceEpoch,
-    dayAfterTomorrowStartMs: tomorrowStart
-        .add(const Duration(days: 1))
-        .millisecondsSinceEpoch,
+    dayAfterTomorrowStartMs: dayAfterTomorrowStart.millisecondsSinceEpoch,
   );
 }
 
@@ -1069,10 +1067,9 @@ class CalendarRange {
   }
 
   factory CalendarRange.day(DateTime day) {
-    final local = day.toLocal();
     return CalendarRange.local(
-      start: DateTime(local.year, local.month, local.day),
-      end: DateTime(local.year, local.month, local.day + 1),
+      start: localCivilDay(day),
+      end: localCivilDay(day, dayOffset: 1),
     );
   }
 
