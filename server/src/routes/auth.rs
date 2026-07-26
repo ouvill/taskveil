@@ -35,7 +35,7 @@ pub async fn authorization_server_metadata(
 async fn certify_device(
     State(state): State<SharedState>,
     headers: HeaderMap,
-    Json(request): Json<taskveil_sync::account::DeviceEnrollmentDto>,
+    Json(request): Json<taskveil_protocol::account::DeviceEnrollmentDto>,
 ) -> Result<Json<LogoutResponse>, AppError> {
     let token = bearer_token(&headers)?;
     auth::certify_device(&state.pool, token, request)
@@ -46,7 +46,7 @@ async fn certify_device(
 async fn update_key_wrappers(
     State(state): State<SharedState>,
     headers: HeaderMap,
-    Json(request): Json<taskveil_sync::account::UpdateKeyWrappersRequest>,
+    Json(request): Json<taskveil_protocol::account::UpdateKeyWrappersRequest>,
 ) -> Result<Json<LogoutResponse>, AppError> {
     let token = bearer_token(&headers)?;
     auth::update_key_wrappers(&state.pool, token, request)

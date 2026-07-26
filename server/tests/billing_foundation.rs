@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx_core::{query::query, raw_sql::raw_sql, row::Row};
 use sqlx_postgres::PgPool;
+use taskveil_protocol::sync::{SYNC_PROTOCOL_VERSION, SYNC_PROTOCOL_VERSION_HEADER};
 use taskveil_server::{
     billing::{
         BillingEnvironment, BillingProvider, BillingService, ProviderError, ProviderFuture,
@@ -18,7 +19,6 @@ use taskveil_server::{
     },
     build_router, db, AppState,
 };
-use taskveil_sync::protocol::{SYNC_PROTOCOL_VERSION, SYNC_PROTOCOL_VERSION_HEADER};
 use testcontainers_modules::{
     postgres,
     testcontainers::{runners::AsyncRunner, ContainerAsync},

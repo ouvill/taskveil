@@ -28,6 +28,10 @@ use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{KeyManifest, KeyManifestError, RotationStatus};
+pub use taskveil_protocol::account::{
+    AccountKeyBundleDto, ActiveKeyBundleDto, BillingEntitlementDto, BillingResponseDto,
+    DeviceEnrollmentDto, HistoricalKeyBundleDto, UpdateKeyWrappersRequest,
+};
 
 #[derive(Debug, Error)]
 pub enum AccountClientError {
@@ -228,79 +232,9 @@ pub struct RealtimeTicketResponse {
     pub expires_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BillingResponseDto {
-    pub provider: String,
-    pub provider_app_user_id: Uuid,
-    pub entitlement: BillingEntitlementDto,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BillingEntitlementDto {
-    pub lookup_key: String,
-    pub status: String,
-    pub sync_allowed: bool,
-    pub store_product_identifier: Option<String>,
-    pub expires_at: Option<i64>,
-    pub grace_expires_at: Option<i64>,
-    pub will_renew: Option<bool>,
-    pub environment: String,
-    pub updated_at: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AccountKeyBundleDto {
-    pub suite_id: u16,
-    pub generation: u64,
-    pub tenant_generation: u64,
-    pub wrapper_revision: u64,
-    pub wrapped_master_key_by_password: String,
-    pub wrapped_master_key_by_recovery: String,
-    pub account_root_public: String,
-    pub wrapped_account_root_private: String,
-    pub wrapped_tenant_root_dek: String,
-    pub tenant_key_manifest: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DeviceEnrollmentDto {
-    pub suite_id: u16,
-    pub account_root_public: String,
-    pub device_certificate: String,
-    pub certificate_fingerprint: String,
-    pub proof_signature: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ActiveKeyBundleDto {
-    pub suite_id: u16,
-    pub generation: u64,
-    pub wrapped_tenant_root_dek: String,
-    pub signed_manifest: String,
-    #[serde(default)]
-    pub migrating_generations: Vec<HistoricalKeyBundleDto>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HistoricalKeyBundleDto {
-    pub generation: u64,
-    pub wrapped_tenant_root_dek: String,
-    pub signed_manifest: String,
-}
-
 pub struct HistoricalKeyMaterial {
     pub generation: u64,
     pub tenant_root_dek: Zeroizing<[u8; KEY_LEN]>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct UpdateKeyWrappersRequest {
-    pub suite_id: u16,
-    pub generation: u64,
-    pub expected_wrapper_revision: u64,
-    pub wrapper_revision: u64,
-    pub wrapped_master_key_by_password: String,
-    pub wrapped_master_key_by_recovery: String,
 }
 
 pub fn password_wrapper_update(

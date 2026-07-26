@@ -20,8 +20,10 @@ flowchart TB
 
   Client --> Domain["taskveil-domain\nentities + invariants"]
   Client --> Crypto["taskveil-crypto\nkey hierarchy + E2EE"]
+  Client --> Protocol["taskveil-protocol\nwire DTO + versions"]
   Client --> Storage["taskveil-storage\nSQLCipher schema + repositories"]
-  Client --> Sync["taskveil-sync\nprotocol + state machines"]
+  Client --> Sync["taskveil-sync\nHTTP transport + state machines"]
+  Sync --> Protocol
   Client --> Secrets["OS secret store adapters"]
   Client --> DB[("SQLCipher profile DB")]
   Sync --> Server["E2EE sync server"]
@@ -39,11 +41,12 @@ flowchart TB
 | `taskveil-client` | local profile open、account/session、application service、transaction境界、sync coordinator、SQLite sync adapter | Flutter/Dart/FRB、clap、MCP transport |
 | `taskveil-domain` | entity、不変条件、純粋な状態遷移 | DB、network、frontend |
 | `taskveil-storage` | schema、migration、repository、transaction primitive | frontend、network同期順序 |
-| `taskveil-sync` | wire型、E2EE record、merge、同期state machine/trait | Flutter、具体SQLite repository、profile UI |
+| `taskveil-protocol` | sync/account/Organizationのserde DTO、wire enum、canonical wire value、version/constants | storage、HTTP、暗号演算、domain merge、client runtime |
+| `taskveil-sync` | HTTP transport、E2EE record、merge、同期state machine/trait | Flutter、具体SQLite repository、profile UI |
 
 ## Fuzzy-scanの配置
 
-- stable-key page、delta、high-water closure、mark/sweepに必要なprotocol/state machine/traitは`taskveil-sync`。
+- stable-key page、delta、high-water closureのwire contractは`taskveil-protocol`、mark/sweepを含むstate machine/traitは`taskveil-sync`。
 - resync generation、preflight、lease、crash recovery、実行順序は`taskveil-client`。
 - cursor/mark table/schema/transactionは`taskveil-storage`。
 - SQLite trait adapterは`taskveil-client`。

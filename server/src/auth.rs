@@ -17,7 +17,9 @@ use taskveil_crypto::{
     },
     TaskveilCipherSuite, CRYPTO_SUITE_ID,
 };
-use taskveil_sync::account::{AccountKeyBundleDto, DeviceEnrollmentDto, UpdateKeyWrappersRequest};
+use taskveil_protocol::account::{
+    AccountKeyBundleDto, DeviceEnrollmentDto, UpdateKeyWrappersRequest,
+};
 use uuid::Uuid;
 
 use crate::{db, AppError};

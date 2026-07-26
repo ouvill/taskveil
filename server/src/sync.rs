@@ -8,19 +8,18 @@ use chrono::{DateTime, Utc};
 use sqlx_postgres::{PgPool, PgTransaction};
 use taskveil_crypto::{
     organization::{AccountRootPublicKeys, DeviceCertificate},
-    CRYPTO_SUITE_ID,
+    KeyManifest, OrganizationKeyManifest, CRYPTO_SUITE_ID, MIN_AUTHENTICATED_MANIFEST_LEN,
 };
-use taskveil_sync::{
+use taskveil_protocol::{
     account::{ActiveKeyBundleDto, HistoricalKeyBundleDto},
-    organization::OrganizationKeyManifest,
     parse_envelope_header,
-    protocol::{
+    sync::{
         BaseScanResponse, ClosureProof, ContinuityAckRequest, ContinuityAckResponse,
         KeyManifestDescriptor, PullResponse, PushOp, PushRequest, PushResponse, PushResult,
         PushStatus, ResyncStartResponse, StableRecordCursor, SyncCapabilities, SyncCollection,
         SyncRecord, SyncRecordState,
     },
-    Hlc, KeyManifest, RotationStatus, MAX_ENCRYPTED_BLOB_LEN,
+    RotationStatus, WireHlc, ENVELOPE_VERSION, MAX_ENCRYPTED_BLOB_LEN,
 };
 use uuid::Uuid;
 
@@ -192,8 +191,8 @@ pub async fn preflight(
     }];
     tx.commit().await?;
     Ok(SyncCapabilities {
-        protocol_version: taskveil_sync::protocol::SYNC_PROTOCOL_VERSION,
-        envelope_version: taskveil_sync::ENVELOPE_VERSION,
+        protocol_version: taskveil_protocol::sync::SYNC_PROTOCOL_VERSION,
+        envelope_version: ENVELOPE_VERSION,
         gc_horizon_seq: row.gc_horizon_seq,
         continuity_seq: row.continuity_seq,
         continuity_generation: row.continuity_generation,
@@ -931,7 +930,7 @@ fn decode_rotation_bytes(value: &str, manifest: bool) -> Result<Vec<u8>, AppErro
     let bytes = STANDARD
         .decode(value)
         .map_err(|_| AppError::bad_request("invalid rotation payload"))?;
-    if manifest && bytes.len() < taskveil_sync::MIN_AUTHENTICATED_MANIFEST_LEN {
+    if manifest && bytes.len() < MIN_AUTHENTICATED_MANIFEST_LEN {
         return Err(AppError::bad_request("invalid rotation payload"));
     }
     Ok(bytes)
@@ -1485,6 +1484,9 @@ fn validate_push_op(op: PushOp) -> Result<ValidatedPushOp, AppError> {
             }
             let header = parse_envelope_header(&encrypted_blob)
                 .map_err(|_| AppError::bad_request("invalid live blob"))?;
+            if header.suite_id != CRYPTO_SUITE_ID {
+                return Err(AppError::bad_request("invalid live blob"));
+            }
             StoredState::Live {
                 mutation_hlc,
                 encrypted_blob,
@@ -1513,8 +1515,12 @@ fn validate_push_op(op: PushOp) -> Result<ValidatedPushOp, AppError> {
 }
 
 fn validate_hlc(value: &str) -> Result<(), AppError> {
-    let hlc = Hlc::decode(value).map_err(|_| AppError::bad_request("invalid hlc"))?;
-    if hlc.exceeds_future_skew(Utc::now().timestamp_millis(), ALLOWED_FUTURE_SKEW_MS) {
+    let hlc = WireHlc::decode(value).map_err(|_| AppError::bad_request("invalid hlc"))?;
+    if hlc.wall_ms
+        > Utc::now()
+            .timestamp_millis()
+            .saturating_add(ALLOWED_FUTURE_SKEW_MS)
+    {
         return Err(AppError::bad_request("hlc too far in future"));
     }
     Ok(())

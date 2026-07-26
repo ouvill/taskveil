@@ -1,0 +1,52 @@
+//! Encrypted record envelope framing contract.
+
+use thiserror::Error;
+
+pub const ENVELOPE_VERSION: u8 = 5;
+pub const ENVELOPE_MAGIC: &[u8; 4] = b"TDE5";
+pub const ENVELOPE_HEADER_LEN: usize = 4 + 2 + 8;
+pub const ENVELOPE_MIN_LEN: usize = ENVELOPE_HEADER_LEN + 24 + 16;
+pub const MAX_ENCRYPTED_BLOB_LEN: usize = 64 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnvelopeHeader {
+    pub suite_id: u16,
+    pub key_generation: u64,
+}
+
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum EnvelopeHeaderError {
+    #[error("encrypted blob is too short")]
+    BlobTooShort,
+    #[error("unsupported encrypted blob version")]
+    UnsupportedVersion,
+    #[error("key generation must be positive")]
+    InvalidGeneration,
+    #[error("encrypted blob exceeds 64KB limit")]
+    BlobTooLarge,
+}
+
+pub fn parse_envelope_header(blob: &[u8]) -> Result<EnvelopeHeader, EnvelopeHeaderError> {
+    if blob.len() > MAX_ENCRYPTED_BLOB_LEN {
+        return Err(EnvelopeHeaderError::BlobTooLarge);
+    }
+    if blob.len() < ENVELOPE_MIN_LEN {
+        return Err(EnvelopeHeaderError::BlobTooShort);
+    }
+    if &blob[..4] != ENVELOPE_MAGIC {
+        return Err(EnvelopeHeaderError::UnsupportedVersion);
+    }
+    let suite_id = u16::from_be_bytes([blob[4], blob[5]]);
+    let key_generation = u64::from_be_bytes(
+        blob[6..14]
+            .try_into()
+            .map_err(|_| EnvelopeHeaderError::BlobTooShort)?,
+    );
+    if key_generation == 0 {
+        return Err(EnvelopeHeaderError::InvalidGeneration);
+    }
+    Ok(EnvelopeHeader {
+        suite_id,
+        key_generation,
+    })
+}

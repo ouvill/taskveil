@@ -5,22 +5,15 @@ use taskveil_crypto::{
     key_hierarchy::{derive_record_key, KeyHierarchyError},
     CryptoError, CRYPTO_SUITE_ID,
 };
+use taskveil_protocol::{parse_envelope_header as parse_wire_envelope_header, EnvelopeHeaderError};
+pub use taskveil_protocol::{
+    EnvelopeHeader, ENVELOPE_HEADER_LEN, ENVELOPE_MAGIC, ENVELOPE_MIN_LEN, ENVELOPE_VERSION,
+    MAX_ENCRYPTED_BLOB_LEN,
+};
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::field_map::SyncPlaintext;
-
-pub const ENVELOPE_VERSION: u8 = 5;
-pub const ENVELOPE_MAGIC: &[u8; 4] = b"TDE5";
-pub const ENVELOPE_HEADER_LEN: usize = 4 + 2 + 8;
-pub const ENVELOPE_MIN_LEN: usize = ENVELOPE_HEADER_LEN + 24 + 16;
-pub const MAX_ENCRYPTED_BLOB_LEN: usize = 64 * 1024;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EnvelopeHeader {
-    pub suite_id: u16,
-    pub key_generation: u64,
-}
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum EnvelopeError {
@@ -55,31 +48,16 @@ impl From<KeyHierarchyError> for EnvelopeError {
 }
 
 pub fn parse_envelope_header(blob: &[u8]) -> Result<EnvelopeHeader, EnvelopeError> {
-    if blob.len() > MAX_ENCRYPTED_BLOB_LEN {
-        return Err(EnvelopeError::BlobTooLarge);
-    }
-    if blob.len() < ENVELOPE_MIN_LEN {
-        return Err(EnvelopeError::BlobTooShort);
-    }
-    if &blob[..4] != ENVELOPE_MAGIC {
-        return Err(EnvelopeError::UnsupportedVersion);
-    }
-    let suite_id = u16::from_be_bytes([blob[4], blob[5]]);
-    if suite_id != CRYPTO_SUITE_ID {
+    let header = parse_wire_envelope_header(blob).map_err(|error| match error {
+        EnvelopeHeaderError::BlobTooShort => EnvelopeError::BlobTooShort,
+        EnvelopeHeaderError::UnsupportedVersion => EnvelopeError::UnsupportedVersion,
+        EnvelopeHeaderError::InvalidGeneration => EnvelopeError::InvalidGeneration,
+        EnvelopeHeaderError::BlobTooLarge => EnvelopeError::BlobTooLarge,
+    })?;
+    if header.suite_id != CRYPTO_SUITE_ID {
         return Err(EnvelopeError::UnsupportedSuite);
     }
-    let key_generation = u64::from_be_bytes(
-        blob[6..14]
-            .try_into()
-            .map_err(|_| EnvelopeError::BlobTooShort)?,
-    );
-    if key_generation == 0 {
-        return Err(EnvelopeError::InvalidGeneration);
-    }
-    Ok(EnvelopeHeader {
-        suite_id,
-        key_generation,
-    })
+    Ok(header)
 }
 
 pub fn encrypt_plaintext(

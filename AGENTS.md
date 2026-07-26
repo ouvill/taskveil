@@ -36,9 +36,10 @@ correctness・security・設計の一貫性を優先し、必要ならbreaking c
 
 - `core/domain` ── 純粋ロジック・ユースケース（リスト/タスク操作、ステータス遷移、サブタスク制約検証等）
 - `core/crypto` ── OPAQUE PoC、AEAD、HKDF、Device Key
+- `core/protocol` ── sync/account/Organizationのserde wire DTO、wire enum、version/constants
 - `core/storage` ── SQLCipher + rusqlite。`TaskRepository` / `ListRepository`
 - `core/client` ── package `taskveil-client` / crate `taskveil_client`。Flutter / CLI / MCPが共有する唯一のprofile・application service入口
-- `core/sync` ── frontend非依存の同期protocol、state machine、暗号record処理
+- `core/sync` ── frontend非依存の同期HTTP transport、state machine、暗号record処理
 - `app/` ── Flutterアプリ本体
 - `app/rust` ── flutter_rust_bridge用のブリッジcrate（crate名 `taskveil_app_bridge`）
 - `app/rust_builder` ── cargokitによるFFIプラグイン（iOS/macOS向けpodspec同梱）
