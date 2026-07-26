@@ -200,6 +200,7 @@ impl Fixture {
             pool: self.application_pool.clone(),
             billing: BillingService::unavailable_for_tests(BillingEnvironment::Sandbox),
             auth_issuer: "http://localhost".to_string(),
+            resync_tokens: taskveil_server::resync_token::ResyncTokenKeyring::for_tests(),
         })
     }
 
@@ -209,6 +210,7 @@ impl Fixture {
                 pool: self.application_pool.clone(),
                 billing: BillingService::unavailable_for_tests(BillingEnvironment::Sandbox),
                 auth_issuer: "http://localhost".to_string(),
+                resync_tokens: taskveil_server::resync_token::ResyncTokenKeyring::for_tests(),
             },
             RealtimeGateway::from_settings(settings()).unwrap(),
         )
@@ -295,7 +297,7 @@ async fn accepted_push_survives_provider_failure_and_no_op_keeps_wire_shape() {
     let revision = Hlc {
         wall_ms: now,
         counter: 0,
-        device_id: "realtime-test".to_owned(),
+        device_id: fixture.device_id.to_string(),
     }
     .encode()
     .unwrap();

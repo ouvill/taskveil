@@ -1,6 +1,6 @@
 # Taskveil client / frontend adapter architecture
 
-この文書は、Flutter bridge、CLI、MCPからRust共通実装へ入る依存境界と命名規則を定める。local profile共有の設計判断はADR-011、同期protocolの正本は`docs/03_技術仕様書.md`とする。
+この文書は、Flutter bridge、CLI、MCPからRust共通実装へ入る依存境界と命名規則を定める。local profile共有の設計判断はADR-011、process間coordinationはADR-027、同期protocolの正本は`docs/03_技術仕様書.md`とする。
 
 ## 用語
 
@@ -43,6 +43,75 @@ flowchart TB
 | `taskveil-storage` | schema、migration、repository、transaction primitive | frontend、network同期順序 |
 | `taskveil-protocol` | sync/account/Organizationのserde DTO、wire enum、canonical wire value、version/constants | storage、HTTP、暗号演算、domain merge、client runtime |
 | `taskveil-sync` | HTTP transport、E2EE record、merge、同期state machine/trait | Flutter、具体SQLite repository、profile UI |
+
+## Local profile process coordination
+
+同じlocal profileを開く複数の`TaskveilClient`は、instanceごとのmutexや
+SQLite writer lockだけでなく、`taskveil-client`が所有する共通coordinatorへ収束させる。
+frontend adapterはlockfile path、owner ID、lease row、DB keyを受け取らない。
+
+lock hierarchyは次で固定する。
+
+1. canonical profile identityで共有するprocess-local registryのshared / exclusive guard
+2. OS profile advisory shared / exclusive guard
+3. session credential lockまたはDB-backed sync lease
+4. SQLite transaction
+
+SQLite transaction内から上位lockを取得せず、network await中にSQLite transactionを
+保持しない。通常read、local mutation、sync runはprofile shared guardを使う。
+capsule recovery、migration、account/device bindingを変更するauth / logout、
+Device Key rotationはprofile exclusive guardを使い、別processの通常operation開始を止める。
+
+profile identityは作成後のcanonical directoryから決め、DBはその配下の固定名とする。相対path、
+symlink / junction、Windowsのcase差を同じcoordinatorへ収束させる。OS advisory lockが
+排他の正本であり、PID、lockfileの存在、owner metadataは正本にしない。macOS / iOS、
+Windows、Linux / Androidのproductionで安全なlockまたはcanonical identityを利用できない
+場合は`ProfileLockUnsupported`としてfail closedにし、SQLite-onlyへ降格しない。
+同一processのcoordinatorはOS lock handleを1本だけ保持し、最初のreaderでshared lock、
+最後のreaderでunlockする。guardごとに別handleを開いてclose semanticsへ依存しない。
+`TaskveilClient`はopen時のcanonical directory identityとDB identityをprocess lifetime中
+pinし、各guard取得後にpathのidentity driftを検出する。Windowsはdelete sharingを許可しない
+root handleも同じlifetime中保持し、rootに加えて既存profile lock、session lock、DBの
+ownerとDACLも各handleから検証する。Unixのsame-euid processとmobileの同一app container /
+App Groupはtrusted boundaryであり、group / world writableなrootまたはDBはfail closedにする。
+権限を持つ悪意あるsame-UID processによるrename、unlink、ptrace等の攻撃は対象外だが、
+誤操作や通常の別processによるidentity driftはoperation開始前に拒否する。
+
+SQLCipherはprofile bindingと単調な`runtime_epoch`を保持する。各clientは
+`loaded_epoch`とactive capsuleの非秘密なgeneration markerを記憶し、operation開始時と
+commit前に再検証する。変更時はDB connection、DB key、account / crypto runtimeを
+再読込する。account/device bindingとTenant Root Key cacheの実質的変更は、それらを
+発行する`IMMEDIATE` transactionで`runtime_epoch`も更新する。device再束縛はepoch発行前に
+local HLC、quarantineを含む全outbox headとaccount device markerを原子的に更新する。secret storeとDBをまたぐ
+credential publication / Device Key rotationはpending / active markerを持つdurable sagaとし、
+exclusive guard内でrecoveryを完了するまで通常operationを再開しない。
+Tenant Root Key cacheはserverがactive / migration中として返すgeneration集合を正本に、
+generationごとのMK-wrapped rowを保持する。randomized AEADのciphertext差をkey変更と
+見なさず、既存rowをMaster Keyで認証付き復号したsemantic keyと比較する。同generation・
+同keyはno-op、同generation・異keyはfail closedとし、migration中のhistorical generationも
+再起動後の復号contextへ復元する。remote集合からretireされたgenerationは削除し、その削除も
+runtime epochを更新する実質的cache変更として扱う。
+
+sync runはowner ID、expiry、単調fencing token、取得時runtime epochを持つDB-backed
+leaseを使う。有効な別ownerがいれば`SyncLeaseBusy`、renew不能、expiry、takeover、
+runtime epoch変更は`LeaseLost`とする。network response後のACK、cursor、
+pull apply、full-resync stateはowner、fence、epoch一致時だけcommitする。
+epoch変更後に同じrunがleaseを取り直してはならず、profile runtimeとsync contextを
+再解決した新しいouter operationだけが次のleaseを取得する。
+local fenceは送信済みHTTP requestを取り消せないため、remote side effectは既存の
+`op_id`、base revision CAS、冪等ACKで再送安全にする。
+
+公開errorは`ProfileBusy`、`SyncLeaseBusy`、`LeaseLost`、
+`ProfileLockUnsupported`、`DatabaseBusy`を区別する。
+runtime epoch / capsule generation不一致は原則として内部reload条件にし、秘密、
+credential、復号済みcontent、生profile pathをerror、log、lock metadataへ含めない。
+
+同一processの2 instance testだけをprocess間coordinationの証拠にしない。barrierで同期する
+実child processを使い、stale runtime、同時mutation / sync、lease takeover、
+強制終了後の回復、path alias、異なるprofileの並行性をdesktop全対象OSで検証する。
+mobileで別process / App Extensionによる同一profile共有を有効にする場合は
+platform instrumentation testを追加する。CLI / MCPのshared profile実接続はこれらの
+release gate完了まで有効化しない。
 
 ## Fuzzy-scanの配置
 

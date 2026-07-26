@@ -93,10 +93,12 @@ impl TaskveilClient {
     }
 
     pub fn get_templates(&self) -> Result<Vec<TaskTemplate>, ClientError> {
+        let _guard = self.operation_guard()?;
         self.with_recurrence_repository(|repository| Ok(repository.list_templates()?))
     }
 
     pub fn get_task_series(&self) -> Result<Vec<TaskSeries>, ClientError> {
+        let _guard = self.operation_guard()?;
         self.with_recurrence_repository(|repository| Ok(repository.list_series()?))
     }
 
@@ -105,28 +107,32 @@ impl TaskveilClient {
         command: CreateTemplateCommand,
     ) -> Result<TaskTemplate, ClientError> {
         let _guard = self.operation_guard()?;
-        let state = self.local_mutation_state()?;
-        ensure_available(&state)?;
-        command.blueprint.validate()?;
-        let now = now_ms()?;
-        let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
-        let mut transaction = SqliteWriteTx::begin(&mut connection)?;
-        let template = TaskTemplate {
-            id: Uuid::now_v7(),
-            name: command.name,
-            default_list_id: command.default_list_id,
-            blueprint: command.blueprint,
-            blueprint_revision: reserve_revision(&mut transaction, &state, now)?,
-            created_at: now,
-            updated_at: now,
-        };
-        template.validate()?;
-        transaction.upsert_template(template.clone())?;
-        if let Some(sync) = sync_context(&state) {
-            enqueue_template_in_transaction(&mut transaction, sync, &template, false, now)?;
-        }
-        transaction.commit()?;
-        Ok(template)
+        self.retry_runtime_epoch_once(|| {
+            let command = command.clone();
+            let state = self.local_mutation_state()?;
+            ensure_available(&state)?;
+            command.blueprint.validate()?;
+            let now = now_ms()?;
+            let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
+            let mut transaction = SqliteWriteTx::begin(&mut connection)?;
+            transaction.assert_profile_runtime_epoch(self.loaded_runtime_epoch())?;
+            let template = TaskTemplate {
+                id: Uuid::now_v7(),
+                name: command.name,
+                default_list_id: command.default_list_id,
+                blueprint: command.blueprint,
+                blueprint_revision: reserve_revision(&mut transaction, &state, now)?,
+                created_at: now,
+                updated_at: now,
+            };
+            template.validate()?;
+            transaction.upsert_template(template.clone())?;
+            if let Some(sync) = sync_context(&state) {
+                enqueue_template_in_transaction(&mut transaction, sync, &template, false, now)?;
+            }
+            transaction.commit()?;
+            Ok(template)
+        })
     }
 
     pub fn save_task_as_template(
@@ -134,32 +140,36 @@ impl TaskveilClient {
         command: SaveTemplateCommand,
     ) -> Result<TaskTemplate, ClientError> {
         let _guard = self.operation_guard()?;
-        let state = self.local_mutation_state()?;
-        ensure_available(&state)?;
-        let now = now_ms()?;
-        let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
-        let mut transaction = SqliteWriteTx::begin(&mut connection)?;
-        let blueprint = blueprint_from_subtree(
-            &transaction.list_task_subtree(command.task_id)?,
-            command.task_id,
-        )?;
-        let revision = reserve_revision(&mut transaction, &state, now)?;
-        let template = TaskTemplate {
-            id: Uuid::now_v7(),
-            name: command.name,
-            default_list_id: command.default_list_id,
-            blueprint,
-            blueprint_revision: revision,
-            created_at: now,
-            updated_at: now,
-        };
-        template.validate()?;
-        transaction.upsert_template(template.clone())?;
-        if let Some(sync) = sync_context(&state) {
-            enqueue_template_in_transaction(&mut transaction, sync, &template, false, now)?;
-        }
-        transaction.commit()?;
-        Ok(template)
+        self.retry_runtime_epoch_once(|| {
+            let command = command.clone();
+            let state = self.local_mutation_state()?;
+            ensure_available(&state)?;
+            let now = now_ms()?;
+            let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
+            let mut transaction = SqliteWriteTx::begin(&mut connection)?;
+            transaction.assert_profile_runtime_epoch(self.loaded_runtime_epoch())?;
+            let blueprint = blueprint_from_subtree(
+                &transaction.list_task_subtree(command.task_id)?,
+                command.task_id,
+            )?;
+            let revision = reserve_revision(&mut transaction, &state, now)?;
+            let template = TaskTemplate {
+                id: Uuid::now_v7(),
+                name: command.name,
+                default_list_id: command.default_list_id,
+                blueprint,
+                blueprint_revision: revision,
+                created_at: now,
+                updated_at: now,
+            };
+            template.validate()?;
+            transaction.upsert_template(template.clone())?;
+            if let Some(sync) = sync_context(&state) {
+                enqueue_template_in_transaction(&mut transaction, sync, &template, false, now)?;
+            }
+            transaction.commit()?;
+            Ok(template)
+        })
     }
 
     pub fn update_template(
@@ -167,27 +177,31 @@ impl TaskveilClient {
         command: UpdateTemplateCommand,
     ) -> Result<TaskTemplate, ClientError> {
         let _guard = self.operation_guard()?;
-        let state = self.local_mutation_state()?;
-        ensure_available(&state)?;
-        let now = now_ms()?;
-        let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
-        let mut transaction = SqliteWriteTx::begin(&mut connection)?;
-        let mut template = transaction.get_template(command.template_id)?;
-        template.name = command.name;
-        template.default_list_id = command.default_list_id;
-        if let Some(blueprint) = command.blueprint {
-            blueprint.validate()?;
-            template.blueprint = blueprint;
-            template.blueprint_revision = reserve_revision(&mut transaction, &state, now)?;
-        }
-        template.updated_at = now;
-        template.validate()?;
-        transaction.upsert_template(template.clone())?;
-        if let Some(sync) = sync_context(&state) {
-            enqueue_template_in_transaction(&mut transaction, sync, &template, false, now)?;
-        }
-        transaction.commit()?;
-        Ok(template)
+        self.retry_runtime_epoch_once(|| {
+            let command = command.clone();
+            let state = self.local_mutation_state()?;
+            ensure_available(&state)?;
+            let now = now_ms()?;
+            let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
+            let mut transaction = SqliteWriteTx::begin(&mut connection)?;
+            transaction.assert_profile_runtime_epoch(self.loaded_runtime_epoch())?;
+            let mut template = transaction.get_template(command.template_id)?;
+            template.name = command.name;
+            template.default_list_id = command.default_list_id;
+            if let Some(blueprint) = command.blueprint {
+                blueprint.validate()?;
+                template.blueprint = blueprint;
+                template.blueprint_revision = reserve_revision(&mut transaction, &state, now)?;
+            }
+            template.updated_at = now;
+            template.validate()?;
+            transaction.upsert_template(template.clone())?;
+            if let Some(sync) = sync_context(&state) {
+                enqueue_template_in_transaction(&mut transaction, sync, &template, false, now)?;
+            }
+            transaction.commit()?;
+            Ok(template)
+        })
     }
 
     pub fn replace_template_blueprint(
@@ -195,46 +209,53 @@ impl TaskveilClient {
         command: ReplaceTaskBlueprintCommand,
     ) -> Result<TaskTemplate, ClientError> {
         let _guard = self.operation_guard()?;
-        let state = self.local_mutation_state()?;
-        ensure_available(&state)?;
-        let now = now_ms()?;
-        let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
-        let mut transaction = SqliteWriteTx::begin(&mut connection)?;
-        let blueprint = blueprint_from_subtree(
-            &transaction.list_task_subtree(command.task_id)?,
-            command.task_id,
-        )?;
-        let mut template = transaction.get_template(command.template_id)?;
-        template.blueprint = blueprint;
-        template.blueprint_revision = reserve_revision(&mut transaction, &state, now)?;
-        template.updated_at = now;
-        template.validate()?;
-        transaction.upsert_template(template.clone())?;
-        if let Some(sync) = sync_context(&state) {
-            enqueue_template_in_transaction(&mut transaction, sync, &template, false, now)?;
-        }
-        transaction.commit()?;
-        Ok(template)
+        self.retry_runtime_epoch_once(|| {
+            let command = command.clone();
+            let state = self.local_mutation_state()?;
+            ensure_available(&state)?;
+            let now = now_ms()?;
+            let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
+            let mut transaction = SqliteWriteTx::begin(&mut connection)?;
+            transaction.assert_profile_runtime_epoch(self.loaded_runtime_epoch())?;
+            let blueprint = blueprint_from_subtree(
+                &transaction.list_task_subtree(command.task_id)?,
+                command.task_id,
+            )?;
+            let mut template = transaction.get_template(command.template_id)?;
+            template.blueprint = blueprint;
+            template.blueprint_revision = reserve_revision(&mut transaction, &state, now)?;
+            template.updated_at = now;
+            template.validate()?;
+            transaction.upsert_template(template.clone())?;
+            if let Some(sync) = sync_context(&state) {
+                enqueue_template_in_transaction(&mut transaction, sync, &template, false, now)?;
+            }
+            transaction.commit()?;
+            Ok(template)
+        })
     }
 
     pub fn instantiate_template(&self, template_id: Uuid) -> Result<Vec<Task>, ClientError> {
         let _guard = self.operation_guard()?;
-        let state = self.local_mutation_state()?;
-        ensure_available(&state)?;
-        let now = now_ms()?;
-        let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
-        let mut transaction = SqliteWriteTx::begin(&mut connection)?;
-        let template = transaction.get_template(template_id)?;
-        let list_id = resolve_target_list(&transaction, template.default_list_id)?;
-        let tasks = instantiate_blueprint(&template.blueprint, None, list_id, now)?;
-        for task in &tasks {
-            transaction.insert_task(task.clone())?;
-            if let Some(sync) = sync_context(&state) {
-                enqueue_task_in_transaction(&mut transaction, sync, task, false, now)?;
+        self.retry_runtime_epoch_once(|| {
+            let state = self.local_mutation_state()?;
+            ensure_available(&state)?;
+            let now = now_ms()?;
+            let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
+            let mut transaction = SqliteWriteTx::begin(&mut connection)?;
+            transaction.assert_profile_runtime_epoch(self.loaded_runtime_epoch())?;
+            let template = transaction.get_template(template_id)?;
+            let list_id = resolve_target_list(&transaction, template.default_list_id)?;
+            let tasks = instantiate_blueprint(&template.blueprint, None, list_id, now)?;
+            for task in &tasks {
+                transaction.insert_task(task.clone())?;
+                if let Some(sync) = sync_context(&state) {
+                    enqueue_task_in_transaction(&mut transaction, sync, task, false, now)?;
+                }
             }
-        }
-        transaction.commit()?;
-        Ok(tasks)
+            transaction.commit()?;
+            Ok(tasks)
+        })
     }
 
     pub fn create_task_series_from_template(
@@ -242,46 +263,53 @@ impl TaskveilClient {
         command: CreateTaskSeriesFromTemplateCommand,
     ) -> Result<TaskSeries, ClientError> {
         let _guard = self.operation_guard()?;
-        let state = self.local_mutation_state()?;
-        ensure_available(&state)?;
-        let now = now_ms()?;
-        let normalized =
-            validate_and_normalize_rrule(&command.rrule, command.starts_at, &command.time_zone)?;
-        let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
-        let mut transaction = SqliteWriteTx::begin(&mut connection)?;
-        let revision = reserve_revision(&mut transaction, &state, now)?;
-        let cursor = first_cursor(
-            &normalized,
-            command.starts_at,
-            &command.time_zone,
-            command.starts_at.saturating_sub(1),
-        )?;
-        let template = transaction.get_template(command.template_id)?;
-        let series = TaskSeries {
-            id: Uuid::now_v7(),
-            config: TaskSeriesConfig {
-                blueprint: template.blueprint,
-                target_list_id: template.default_list_id,
-                rrule: normalized,
-                starts_at: command.starts_at,
-                time_zone: command.time_zone,
-                enabled: true,
-                config_revision: revision,
-                config_parent_revision: None,
-                config_effective_from: now,
-                lineage: Vec::new(),
-            },
-            cursor,
-            created_at: now,
-            updated_at: now,
-        };
-        series.validate()?;
-        transaction.upsert_series(series.clone())?;
-        if let Some(sync) = sync_context(&state) {
-            enqueue_task_series_in_transaction(&mut transaction, sync, &series, false, now)?;
-        }
-        transaction.commit()?;
-        Ok(series)
+        self.retry_runtime_epoch_once(|| {
+            let command = command.clone();
+            let state = self.local_mutation_state()?;
+            ensure_available(&state)?;
+            let now = now_ms()?;
+            let normalized = validate_and_normalize_rrule(
+                &command.rrule,
+                command.starts_at,
+                &command.time_zone,
+            )?;
+            let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
+            let mut transaction = SqliteWriteTx::begin(&mut connection)?;
+            transaction.assert_profile_runtime_epoch(self.loaded_runtime_epoch())?;
+            let revision = reserve_revision(&mut transaction, &state, now)?;
+            let cursor = first_cursor(
+                &normalized,
+                command.starts_at,
+                &command.time_zone,
+                command.starts_at.saturating_sub(1),
+            )?;
+            let template = transaction.get_template(command.template_id)?;
+            let series = TaskSeries {
+                id: Uuid::now_v7(),
+                config: TaskSeriesConfig {
+                    blueprint: template.blueprint,
+                    target_list_id: template.default_list_id,
+                    rrule: normalized,
+                    starts_at: command.starts_at,
+                    time_zone: command.time_zone,
+                    enabled: true,
+                    config_revision: revision,
+                    config_parent_revision: None,
+                    config_effective_from: now,
+                    lineage: Vec::new(),
+                },
+                cursor,
+                created_at: now,
+                updated_at: now,
+            };
+            series.validate()?;
+            transaction.upsert_series(series.clone())?;
+            if let Some(sync) = sync_context(&state) {
+                enqueue_task_series_in_transaction(&mut transaction, sync, &series, false, now)?;
+            }
+            transaction.commit()?;
+            Ok(series)
+        })
     }
 
     pub fn create_task_series_from_task(
@@ -289,52 +317,59 @@ impl TaskveilClient {
         command: CreateTaskSeriesFromTaskCommand,
     ) -> Result<TaskSeries, ClientError> {
         let _guard = self.operation_guard()?;
-        let state = self.local_mutation_state()?;
-        ensure_available(&state)?;
-        let now = now_ms()?;
-        let normalized =
-            validate_and_normalize_rrule(&command.rrule, command.starts_at, &command.time_zone)?;
-        let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
-        let mut transaction = SqliteWriteTx::begin(&mut connection)?;
-        let subtree = transaction.list_task_subtree(command.task_id)?;
-        let source_list_id = subtree
-            .iter()
-            .find(|task| task.id == command.task_id)
-            .map(|task| task.list_id)
-            .ok_or(StorageError::NotFound(command.task_id))?;
-        let blueprint = blueprint_from_subtree(&subtree, command.task_id)?;
-        let revision = reserve_revision(&mut transaction, &state, now)?;
-        let cursor = first_cursor(
-            &normalized,
-            command.starts_at,
-            &command.time_zone,
-            command.starts_at.saturating_sub(1),
-        )?;
-        let series = TaskSeries {
-            id: Uuid::now_v7(),
-            config: TaskSeriesConfig {
-                blueprint,
-                target_list_id: Some(command.target_list_id.unwrap_or(source_list_id)),
-                rrule: normalized,
-                starts_at: command.starts_at,
-                time_zone: command.time_zone,
-                enabled: true,
-                config_revision: revision,
-                config_parent_revision: None,
-                config_effective_from: now,
-                lineage: Vec::new(),
-            },
-            cursor,
-            created_at: now,
-            updated_at: now,
-        };
-        series.validate()?;
-        transaction.upsert_series(series.clone())?;
-        if let Some(sync) = sync_context(&state) {
-            enqueue_task_series_in_transaction(&mut transaction, sync, &series, false, now)?;
-        }
-        transaction.commit()?;
-        Ok(series)
+        self.retry_runtime_epoch_once(|| {
+            let command = command.clone();
+            let state = self.local_mutation_state()?;
+            ensure_available(&state)?;
+            let now = now_ms()?;
+            let normalized = validate_and_normalize_rrule(
+                &command.rrule,
+                command.starts_at,
+                &command.time_zone,
+            )?;
+            let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
+            let mut transaction = SqliteWriteTx::begin(&mut connection)?;
+            transaction.assert_profile_runtime_epoch(self.loaded_runtime_epoch())?;
+            let subtree = transaction.list_task_subtree(command.task_id)?;
+            let source_list_id = subtree
+                .iter()
+                .find(|task| task.id == command.task_id)
+                .map(|task| task.list_id)
+                .ok_or(StorageError::NotFound(command.task_id))?;
+            let blueprint = blueprint_from_subtree(&subtree, command.task_id)?;
+            let revision = reserve_revision(&mut transaction, &state, now)?;
+            let cursor = first_cursor(
+                &normalized,
+                command.starts_at,
+                &command.time_zone,
+                command.starts_at.saturating_sub(1),
+            )?;
+            let series = TaskSeries {
+                id: Uuid::now_v7(),
+                config: TaskSeriesConfig {
+                    blueprint,
+                    target_list_id: Some(command.target_list_id.unwrap_or(source_list_id)),
+                    rrule: normalized,
+                    starts_at: command.starts_at,
+                    time_zone: command.time_zone,
+                    enabled: true,
+                    config_revision: revision,
+                    config_parent_revision: None,
+                    config_effective_from: now,
+                    lineage: Vec::new(),
+                },
+                cursor,
+                created_at: now,
+                updated_at: now,
+            };
+            series.validate()?;
+            transaction.upsert_series(series.clone())?;
+            if let Some(sync) = sync_context(&state) {
+                enqueue_task_series_in_transaction(&mut transaction, sync, &series, false, now)?;
+            }
+            transaction.commit()?;
+            Ok(series)
+        })
     }
 
     pub fn update_task_series(
@@ -342,91 +377,114 @@ impl TaskveilClient {
         command: UpdateTaskSeriesCommand,
     ) -> Result<TaskSeries, ClientError> {
         let _guard = self.operation_guard()?;
-        let state = self.local_mutation_state()?;
-        ensure_available(&state)?;
         command.blueprint.validate()?;
-        let now = now_ms()?;
-        self.settle_all_before_edit(&state, now)?;
         let normalized =
             validate_and_normalize_rrule(&command.rrule, command.starts_at, &command.time_zone)?;
-        let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
-        let mut transaction = SqliteWriteTx::begin(&mut connection)?;
-        let mut series = transaction.get_series(command.series_id)?;
-        let previous_revision = series.config.config_revision.clone();
-        push_boundary(
-            &mut series.config.lineage,
-            &previous_revision,
-            series.config.config_parent_revision.clone(),
-            series.config.config_effective_from,
-        );
-        series.config.blueprint = command.blueprint;
-        series.config.target_list_id = command.target_list_id;
-        series.config.rrule = normalized;
-        series.config.starts_at = command.starts_at;
-        series.config.time_zone = command.time_zone;
-        series.config.enabled = command.enabled;
-        series.config.config_parent_revision = Some(previous_revision);
-        series.config.config_revision = reserve_revision(&mut transaction, &state, now)?;
-        series.config.config_effective_from = now;
-        let cursor_after = now.min(series.config.starts_at.saturating_sub(1));
-        series.cursor = first_cursor(
-            &series.config.rrule,
-            series.config.starts_at,
-            &series.config.time_zone,
-            cursor_after,
-        )?;
-        series.updated_at = now;
-        series.validate()?;
-        transaction.upsert_series(series.clone())?;
-        if let Some(sync) = sync_context(&state) {
-            enqueue_task_series_in_transaction(&mut transaction, sync, &series, false, now)?;
-        }
-        transaction.commit()?;
-        Ok(series)
+
+        // Settlement may span several bounded transactions. Keep it outside
+        // the automatically replayed edit phase: every batch asserts the
+        // loaded epoch before its first write, and an epoch change after a
+        // committed batch aborts the command instead of replaying already
+        // published settlement side effects.
+        let settlement_state = self.local_mutation_state()?;
+        ensure_available(&settlement_state)?;
+        self.settle_all_before_edit(&settlement_state, now_ms()?)?;
+
+        self.retry_runtime_epoch_once(|| {
+            let command = command.clone();
+            let state = self.local_mutation_state()?;
+            ensure_available(&state)?;
+            let now = now_ms()?;
+            let normalized = normalized.clone();
+            let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
+            let mut transaction = SqliteWriteTx::begin(&mut connection)?;
+            transaction.assert_profile_runtime_epoch(self.loaded_runtime_epoch())?;
+            let mut series = transaction.get_series(command.series_id)?;
+            let previous_revision = series.config.config_revision.clone();
+            push_boundary(
+                &mut series.config.lineage,
+                &previous_revision,
+                series.config.config_parent_revision.clone(),
+                series.config.config_effective_from,
+            );
+            series.config.blueprint = command.blueprint;
+            series.config.target_list_id = command.target_list_id;
+            series.config.rrule = normalized;
+            series.config.starts_at = command.starts_at;
+            series.config.time_zone = command.time_zone;
+            series.config.enabled = command.enabled;
+            series.config.config_parent_revision = Some(previous_revision);
+            series.config.config_revision = reserve_revision(&mut transaction, &state, now)?;
+            series.config.config_effective_from = now;
+            let cursor_after = now.min(series.config.starts_at.saturating_sub(1));
+            series.cursor = first_cursor(
+                &series.config.rrule,
+                series.config.starts_at,
+                &series.config.time_zone,
+                cursor_after,
+            )?;
+            series.updated_at = now;
+            series.validate()?;
+            transaction.upsert_series(series.clone())?;
+            if let Some(sync) = sync_context(&state) {
+                enqueue_task_series_in_transaction(&mut transaction, sync, &series, false, now)?;
+            }
+            transaction.commit()?;
+            Ok(series)
+        })
     }
 
     pub fn delete_series(&self, series_id: Uuid) -> Result<(), ClientError> {
         let _guard = self.operation_guard()?;
-        let state = self.local_mutation_state()?;
-        ensure_available(&state)?;
-        let now = now_ms()?;
-        let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
-        let mut transaction = SqliteWriteTx::begin(&mut connection)?;
-        let series = transaction.get_series(series_id)?;
-        if let Some(sync) = sync_context(&state) {
-            enqueue_task_series_in_transaction(&mut transaction, sync, &series, true, now)?;
-        }
-        transaction.delete_series(series_id)?;
-        transaction.commit()?;
-        Ok(())
+        self.retry_runtime_epoch_once(|| {
+            let state = self.local_mutation_state()?;
+            ensure_available(&state)?;
+            let now = now_ms()?;
+            let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
+            let mut transaction = SqliteWriteTx::begin(&mut connection)?;
+            transaction.assert_profile_runtime_epoch(self.loaded_runtime_epoch())?;
+            let series = transaction.get_series(series_id)?;
+            if let Some(sync) = sync_context(&state) {
+                enqueue_task_series_in_transaction(&mut transaction, sync, &series, true, now)?;
+            }
+            transaction.delete_series(series_id)?;
+            transaction.commit()?;
+            Ok(())
+        })
     }
 
     pub fn delete_template(&self, template_id: Uuid) -> Result<(), ClientError> {
         let _guard = self.operation_guard()?;
-        let state = self.local_mutation_state()?;
-        ensure_available(&state)?;
-        let now = now_ms()?;
-        let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
-        let mut transaction = SqliteWriteTx::begin(&mut connection)?;
-        let template = transaction.get_template(template_id)?;
-        if let Some(sync) = sync_context(&state) {
-            enqueue_template_in_transaction(&mut transaction, sync, &template, true, now)?;
-        }
-        transaction.delete_template(template_id)?;
-        transaction.commit()?;
-        Ok(())
+        self.retry_runtime_epoch_once(|| {
+            let state = self.local_mutation_state()?;
+            ensure_available(&state)?;
+            let now = now_ms()?;
+            let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
+            let mut transaction = SqliteWriteTx::begin(&mut connection)?;
+            transaction.assert_profile_runtime_epoch(self.loaded_runtime_epoch())?;
+            let template = transaction.get_template(template_id)?;
+            if let Some(sync) = sync_context(&state) {
+                enqueue_template_in_transaction(&mut transaction, sync, &template, true, now)?;
+            }
+            transaction.delete_template(template_id)?;
+            transaction.commit()?;
+            Ok(())
+        })
     }
 
     /// Settles at most 100 due occurrences. Frontends yield and call again
     /// while `has_more` is true.
     pub fn settle_due_series(&self, at_ms: i64) -> Result<SettlementSummary, ClientError> {
         let _guard = self.operation_guard()?;
-        let state = self.local_mutation_state()?;
-        ensure_available(&state)?;
-        self.settle_batch(&state, at_ms)
+        self.retry_runtime_epoch_once(|| {
+            let state = self.local_mutation_state()?;
+            ensure_available(&state)?;
+            self.settle_batch(&state, at_ms, None)
+        })
     }
 
     pub fn get_series_streak(&self, series_id: Uuid, at_ms: i64) -> Result<Streak, ClientError> {
+        let _guard = self.operation_guard()?;
         let series =
             self.with_recurrence_repository(|repository| Ok(repository.get_series(series_id)?))?;
         let mut roots = self.with_task_repository(|repository| {
@@ -481,11 +539,13 @@ impl TaskveilClient {
 
     pub(super) fn settle_after_sync_pull(
         &self,
+        store: &mut crate::SqliteSyncStore,
         at_ms: i64,
     ) -> Result<SettlementSummary, ClientError> {
         let state = self.local_mutation_state()?;
         ensure_available(&state)?;
-        self.settle_batch(&state, at_ms)
+        let lease = store.renew_sync_lease()?.ok_or(ClientError::LeaseLost)?;
+        self.settle_batch(&state, at_ms, Some(&lease))
     }
 
     fn settle_all_before_edit(
@@ -494,7 +554,7 @@ impl TaskveilClient {
         at_ms: i64,
     ) -> Result<(), ClientError> {
         loop {
-            let summary = self.settle_batch(state, at_ms)?;
+            let summary = self.settle_batch(state, at_ms, None)?;
             if !summary.has_more {
                 return Ok(());
             }
@@ -505,9 +565,14 @@ impl TaskveilClient {
         &self,
         state: &LocalMutationState,
         at_ms: i64,
+        lease: Option<&taskveil_storage::SyncLease>,
     ) -> Result<SettlementSummary, ClientError> {
         let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
         let mut transaction = SqliteWriteTx::begin(&mut connection)?;
+        transaction.assert_profile_runtime_epoch(self.loaded_runtime_epoch())?;
+        if let Some(lease) = lease {
+            transaction.assert_sync_lease(lease, now_ms()?)?;
+        }
         let reconciled = reconcile_superseded_tasks(&mut transaction, state, at_ms)?;
         let series = transaction.list_due_series(at_ms)?;
         let mut summary = SettlementSummary {
@@ -582,6 +647,9 @@ impl TaskveilClient {
                     .next_run_at()
                     .is_some_and(|next| next <= at_ms)
         });
+        if let Some(lease) = lease {
+            transaction.assert_sync_lease(lease, now_ms()?)?;
+        }
         transaction.commit()?;
         Ok(summary)
     }
@@ -867,7 +935,7 @@ fn revision_accepts_occurrence(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{atomic::AtomicBool, Mutex};
+    use std::sync::Mutex;
 
     use taskveil_domain::{new_list, new_task, TaskContent};
     use taskveil_storage::{
@@ -902,15 +970,18 @@ mod tests {
             .unwrap();
         let client = TaskveilClient {
             db_dir: temp.path().to_path_buf(),
+            profile_coordinator: TaskveilClient::pinned_test_coordinator(temp.path(), &db_path),
             db_path,
             db_key: Mutex::new(Zeroizing::new(DB_KEY)),
             account: Mutex::new(AccountRuntimeState {
                 session: None,
                 session_restored: true,
+                loaded_credential_generation: None,
                 crypto: CryptoRuntimeState::Anonymous,
             }),
             sync: Mutex::new(SyncRuntimeState::default()),
-            operation_busy: AtomicBool::new(false),
+            runtime_epoch: std::sync::atomic::AtomicI64::new(1),
+            capsule_generation: std::sync::atomic::AtomicU64::new(1),
         };
         (temp, client, inbox, task)
     }

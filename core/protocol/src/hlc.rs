@@ -9,6 +9,8 @@ const DEVICE_ID_MAX_BYTES: usize = 64;
 const DEVICE_HEX_WIDTH: usize = DEVICE_ID_MAX_BYTES * 2;
 const ENCODED_LEN: usize =
     ENCODED_PREFIX.len() + BIASED_WALL_WIDTH + COUNTER_WIDTH + DEVICE_HEX_WIDTH;
+const OBSERVATION_COUNTER_HEADROOM: u32 = 2;
+const NETWORK_COUNTER_MAX: u32 = u32::MAX - OBSERVATION_COUNTER_HEADROOM;
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum HlcWireError {
@@ -20,10 +22,12 @@ pub enum HlcWireError {
     UnsupportedVersion,
     #[error("encoded HLC contains invalid digits")]
     InvalidDigits,
+    #[error("HLC does not reserve observation counter headroom")]
+    InsufficientCounterHeadroom,
 }
 
 /// Validated fields from the canonical fixed-width HLC wire representation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct WireHlc {
     pub wall_ms: i64,
     pub counter: u32,
@@ -70,6 +74,24 @@ impl WireHlc {
             counter,
             device_id,
         })
+    }
+
+    /// Decodes an HLC that can safely be observed and followed by a local tick.
+    pub fn decode_observable(encoded: &str) -> Result<Self, HlcWireError> {
+        let hlc = Self::decode(encoded)?;
+        if hlc.counter > NETWORK_COUNTER_MAX {
+            return Err(HlcWireError::InsufficientCounterHeadroom);
+        }
+        Ok(hlc)
+    }
+
+    /// Returns whether this value has reached the retryable future-skew boundary.
+    pub fn reaches_future_skew_boundary(
+        &self,
+        server_now_ms: i64,
+        allowed_future_skew_ms: i64,
+    ) -> bool {
+        self.wall_ms >= server_now_ms.saturating_add(allowed_future_skew_ms)
     }
 }
 
@@ -130,5 +152,39 @@ mod tests {
             WireHlc::decode(&encoded),
             Err(HlcWireError::InvalidDeviceId)
         );
+    }
+
+    #[test]
+    fn observable_hlc_reserves_two_counter_values() {
+        let device_hex = format!("{:0<128}", "6465766963652d61");
+        let accepted = format!(
+            "01{:020}{:010}{}",
+            (42_i128 - i64::MIN as i128) as u64,
+            u32::MAX - 2,
+            device_hex,
+        );
+        assert!(WireHlc::decode_observable(&accepted).is_ok());
+
+        let rejected = format!(
+            "01{:020}{:010}{}",
+            (42_i128 - i64::MIN as i128) as u64,
+            u32::MAX - 1,
+            device_hex,
+        );
+        assert_eq!(
+            WireHlc::decode_observable(&rejected),
+            Err(HlcWireError::InsufficientCounterHeadroom)
+        );
+    }
+
+    #[test]
+    fn future_skew_boundary_is_inclusive() {
+        let value = WireHlc {
+            wall_ms: 1_300,
+            counter: 0,
+            device_id: "device-a".to_owned(),
+        };
+        assert!(value.reaches_future_skew_boundary(1_000, 300));
+        assert!(!value.reaches_future_skew_boundary(1_001, 300));
     }
 }

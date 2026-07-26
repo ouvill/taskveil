@@ -1681,9 +1681,9 @@ fn uuid(value: u128) -> Uuid {
 
 #[test]
 fn durable_upgrade_block_reopens_when_supported_versions_catch_up() {
-    assert!(upgrade_block_is_active("9:5"));
-    assert!(upgrade_block_is_active("8:6"));
-    assert!(!upgrade_block_is_active("8:5"));
+    assert!(upgrade_block_is_active("10:5"));
+    assert!(upgrade_block_is_active("9:6"));
+    assert!(!upgrade_block_is_active("9:5"));
     assert!(!upgrade_block_is_active("6:5"));
     assert!(!upgrade_block_is_active("7:3"));
     assert!(!upgrade_block_is_active("0:0"));

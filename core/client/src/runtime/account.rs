@@ -1,11 +1,7 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
-#[cfg(target_os = "android")]
-use std::os::fd::AsRawFd;
-use std::{
-    fs::{File, OpenOptions, TryLockError as FileTryLockError},
-    ops::Deref,
-};
+use sha2::{Digest, Sha256};
+use std::ops::Deref;
 use taskveil_crypto::{
     delete_account_secret,
     key_hierarchy::{
@@ -23,8 +19,9 @@ use taskveil_crypto::{
 use taskveil_domain::Uuid;
 use taskveil_storage::{
     open_encrypted, ListRepository, LocalCryptoRepository, SqliteLocalCryptoRepository,
-    TaskRepository, TemplateSeriesRepository, TimerSessionRepository,
 };
+#[cfg(test)]
+use taskveil_sync::SYNC_LOCAL_HLC_SETTING_KEY;
 use taskveil_sync::{
     account::{
         unwrap_active_key_bundle, unwrap_historical_key_bundles, AccountClient, AccountClientError,
@@ -33,7 +30,8 @@ use taskveil_sync::{
     },
     canonical_server_origin,
     organization::verify_organization_active_bundle,
-    LocalMutationSyncStore, LocalSyncAtomicStore, LocalSyncKeys, LocalSyncWriteTransaction,
+    rebind_local_device, LocalMutationSyncStore, LocalSyncAtomicStore, LocalSyncKeys,
+    LocalSyncWriteTransaction,
 };
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -43,10 +41,11 @@ use super::{
     ACCOUNT_SESSION_EXPIRES_AT_SETTING_KEY, ACCOUNT_TENANT_ID_SETTING_KEY,
     ACCOUNT_USER_ID_SETTING_KEY,
 };
+#[cfg(test)]
+use crate::persist_local_crypto_context;
 use crate::{
-    load_local_crypto_context, persist_account_crypto_context, persist_local_crypto_context,
-    AccountAuthResult, AccountSessionState, BillingState, ClientError, LocalCryptoAvailability,
-    LocalCryptoIdentity, LocalCryptoUnavailable, OrganizationSafetyState,
+    load_local_crypto_context, AccountAuthResult, AccountSessionState, BillingState, ClientError,
+    LocalCryptoAvailability, LocalCryptoIdentity, LocalCryptoUnavailable, OrganizationSafetyState,
 };
 
 #[derive(Clone, Copy)]
@@ -58,7 +57,7 @@ enum AccountAuthMode {
 const BILLING_ENTITLEMENT_CACHE_SETTING_KEY: &str = "billing_entitlement_cache";
 const SESSION_TOKEN_SET_VERSION: u8 = 2;
 const ACCESS_TOKEN_REFRESH_SKEW_MS: i64 = 60_000;
-const SESSION_TOKEN_SET_LOCK_FILE_NAME: &str = ".taskveil-session-token-set.lock";
+const ABSENT_CREDENTIAL_GENERATION: &str = "absent";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PendingLoginNetworkStep {
@@ -79,6 +78,8 @@ fn pending_login_network_step(now_ms: i64, access_expires_at_ms: i64) -> Pending
 #[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub(super) struct StoredSessionTokens {
     version: u8,
+    #[serde(default)]
+    credential_generation: Option<String>,
     pub(super) issuer: String,
     access_token: String,
     access_expires_at_ms: i64,
@@ -89,6 +90,8 @@ pub(super) struct StoredSessionTokens {
 #[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 struct StoredPendingLogin {
     version: u8,
+    #[serde(default)]
+    credential_generation: Option<String>,
     issuer: String,
     email: String,
     user_id: String,
@@ -125,6 +128,7 @@ impl StoredSessionTokens {
     fn from_account_tokens(issuer: &str, tokens: &AccountTokenSet) -> Self {
         Self {
             version: SESSION_TOKEN_SET_VERSION,
+            credential_generation: Some(Uuid::now_v7().to_string()),
             issuer: issuer.to_string(),
             access_token: tokens.access_token.to_string(),
             access_expires_at_ms: tokens.access_expires_at_ms,
@@ -135,6 +139,10 @@ impl StoredSessionTokens {
 
     fn validate(&self) -> Result<(), ClientError> {
         if self.version != SESSION_TOKEN_SET_VERSION
+            || self
+                .credential_generation
+                .as_deref()
+                .is_some_and(|generation| generation.parse::<Uuid>().is_err())
             || canonical_server_origin(&self.issuer).as_deref() != Ok(self.issuer.as_str())
             || self.access_token.is_empty()
             || self.refresh_token.is_empty()
@@ -154,6 +162,7 @@ impl StoredPendingLogin {
     ) -> Result<Self, ClientError> {
         Ok(Self {
             version: SESSION_TOKEN_SET_VERSION,
+            credential_generation: Some(Uuid::now_v7().to_string()),
             issuer: issuer.to_string(),
             email: provisional.session.email.clone(),
             user_id: provisional.session.user_id.clone(),
@@ -193,6 +202,10 @@ impl StoredPendingLogin {
 
     fn validate(&self) -> Result<(), ClientError> {
         if self.version != SESSION_TOKEN_SET_VERSION
+            || self
+                .credential_generation
+                .as_deref()
+                .is_some_and(|generation| generation.parse::<Uuid>().is_err())
             || canonical_server_origin(&self.issuer).as_deref() != Ok(self.issuer.as_str())
             || self.email.is_empty()
             || self.access_token.is_empty()
@@ -778,6 +791,7 @@ impl TaskveilClient {
     }
 
     pub fn account_session_state(&self) -> Result<AccountSessionState, ClientError> {
+        let _operation = self.begin_operation()?;
         self.ensure_account_runtime_restored()?;
         Ok(self
             .account_state()?
@@ -821,7 +835,7 @@ impl TaskveilClient {
     }
 
     pub async fn account_logout(&self) -> Result<(), ClientError> {
-        let _operation = self.begin_operation()?;
+        let _operation = self.begin_exclusive_operation()?;
         let _session_lock = acquire_session_token_set_lock(&self.db_dir)?;
         let credential = load_session_credential(&self.db_dir)?;
         if let Some((issuer, refresh_token)) =
@@ -858,6 +872,7 @@ impl TaskveilClient {
     }
 
     pub fn cached_billing(&self) -> Result<Option<BillingState>, ClientError> {
+        let _operation = self.begin_operation()?;
         self.setting(BILLING_ENTITLEMENT_CACHE_SETTING_KEY)?
             .map(|value| serde_json::from_str(&value).map_err(|_| ClientError::AccountRequest))
             .transpose()
@@ -901,11 +916,11 @@ impl TaskveilClient {
         device_name: Option<String>,
         mode: AccountAuthMode,
     ) -> Result<AccountAuthResult, ClientError> {
-        let _operation = self.begin_operation()?;
+        let _operation = self.begin_exclusive_operation()?;
         let _session_lock = acquire_session_token_set_lock(&self.db_dir)?;
         let requested_server_url = match server_url {
             Some(server_url) => server_url,
-            None => self.sync_server_url()?,
+            None => self.sync_server_url_unlocked()?,
         };
         let server_url = canonical_server_origin(&requested_server_url)
             .map_err(|_| ClientError::AccountRequest)?;
@@ -1127,18 +1142,29 @@ impl TaskveilClient {
             self.account_state()?.crypto = crypto;
         }
 
-        if self.account_state()?.session_restored {
-            return Ok(());
-        }
         let _session_lock = acquire_session_token_set_lock(&self.db_dir)?;
-        let session_tokens = load_session_tokens(&self.db_dir)?;
-        self.account_state()?.session_restored = true;
-        let Some(session_tokens) = session_tokens else {
+        let credential = load_session_credential(&self.db_dir)?;
+        let credential_generation = stored_credential_generation(credential.as_ref())?;
+        {
+            let mut account = self.account_state()?;
+            if account.session_restored
+                && account.loaded_credential_generation.as_deref()
+                    == Some(credential_generation.as_str())
+            {
+                return Ok(());
+            }
+            account.session = None;
+            account.session_restored = true;
+            account.loaded_credential_generation = Some(credential_generation);
+        }
+        let Some(StoredSessionCredential::Active(session_tokens)) = credential else {
             return Ok(());
         };
         if session_tokens.refresh_expires_at_ms <= now_ms()? {
             delete_account_secret(&self.db_dir, AccountSecretKind::SessionTokens)
                 .map_err(ClientError::KeyStore)?;
+            self.account_state()?.loaded_credential_generation =
+                Some(ABSENT_CREDENTIAL_GENERATION.to_string());
             return Ok(());
         }
         let Some(email) = self.non_empty_setting(ACCOUNT_EMAIL_SETTING_KEY)? else {
@@ -1162,6 +1188,23 @@ impl TaskveilClient {
         &self,
         force_refresh: bool,
     ) -> Result<OriginBoundAccessToken, ClientError> {
+        self.access_token_with_sync_gate(force_refresh, None).await
+    }
+
+    pub(super) async fn access_token_for_sync(
+        &self,
+        force_refresh: bool,
+        network_gate: &mut crate::SqliteSyncStore,
+    ) -> Result<OriginBoundAccessToken, ClientError> {
+        self.access_token_with_sync_gate(force_refresh, Some(network_gate))
+            .await
+    }
+
+    async fn access_token_with_sync_gate(
+        &self,
+        force_refresh: bool,
+        mut network_gate: Option<&mut crate::SqliteSyncStore>,
+    ) -> Result<OriginBoundAccessToken, ClientError> {
         self.ensure_account_runtime_restored()?;
         let _session_lock = acquire_session_token_set_lock(&self.db_dir)?;
         let mut tokens = load_session_tokens(&self.db_dir)?.ok_or(ClientError::AccountRequest)?;
@@ -1175,6 +1218,10 @@ impl TaskveilClient {
         {
             let client =
                 AccountClient::new(&tokens.issuer).map_err(|_| ClientError::AccountRequest)?;
+            if let Some(gate) = network_gate.as_mut() {
+                gate.preflight_network_request()
+                    .map_err(super::sync::map_sync_run_error)?;
+            }
             let refreshed = match client.refresh(&tokens.refresh_token).await {
                 Ok(refreshed) => refreshed,
                 Err(AccountClientError::InvalidGrant) => {
@@ -1192,12 +1239,17 @@ impl TaskveilClient {
         })
     }
 
-    pub(super) fn current_access_token(&self) -> Option<OriginBoundAccessToken> {
-        let tokens = load_session_tokens(&self.db_dir).ok()??;
-        Some(OriginBoundAccessToken {
+    pub(super) fn current_access_token(
+        &self,
+    ) -> Result<Option<OriginBoundAccessToken>, ClientError> {
+        let _session_lock = acquire_session_token_set_lock(&self.db_dir)?;
+        let Some(tokens) = load_session_tokens(&self.db_dir)? else {
+            return Ok(None);
+        };
+        Ok(Some(OriginBoundAccessToken {
             issuer: tokens.issuer.clone(),
             token: Zeroizing::new(tokens.access_token.clone()),
-        })
+        }))
     }
 
     fn invalidate_remote_session_locked(&self) -> Result<(), ClientError> {
@@ -1206,12 +1258,21 @@ impl TaskveilClient {
         let mut account = self.account_state()?;
         account.session = None;
         account.session_restored = true;
+        account.loaded_credential_generation = Some(ABSENT_CREDENTIAL_GENERATION.to_string());
         Ok(())
     }
 
-    pub(super) async fn refresh_tenant_keys_for_sync(&self) -> Result<LocalSyncKeys, ClientError> {
+    pub(super) async fn refresh_tenant_keys_for_sync(
+        &self,
+        lease: taskveil_storage::SyncLease,
+    ) -> Result<LocalSyncKeys, ClientError> {
         self.ensure_account_runtime_restored()?;
-        let session_token = self.access_token(false).await?;
+        let mut network_gate = crate::SqliteSyncStore::new_secret_with_lease(
+            self.db_path.clone(),
+            self.db_key(),
+            lease.clone(),
+        );
+        let session_token = self.access_token_for_sync(false, &mut network_gate).await?;
         let (tenant_id, user_id, device_id, master_key) = {
             let account = self.account_state()?;
             let Some(_session) = account.session.as_ref().filter(|session| session.logged_in)
@@ -1231,6 +1292,9 @@ impl TaskveilClient {
 
         let client =
             AccountClient::new(&session_token.issuer).map_err(|_| ClientError::AccountRequest)?;
+        network_gate
+            .preflight_network_request()
+            .map_err(super::sync::map_sync_run_error)?;
         let bundle = client
             .active_key_bundle(tenant_id, &session_token)
             .await
@@ -1258,58 +1322,57 @@ impl TaskveilClient {
         };
         let previous_generation = local_keys.tenant_generation;
         let sync_keys = remote_keys;
+        let mut cutover_store = crate::SqliteSyncStore::new_secret_with_lease(
+            self.db_path.clone(),
+            self.db_key(),
+            lease,
+        );
+        let mut transaction = cutover_store
+            .begin_write_transaction()
+            .map_err(super::sync::map_sync_run_error)?;
         if sync_keys.tenant_generation > previous_generation {
-            let lists = self.local_lists_including_archived()?;
-            let templates =
-                self.with_recurrence_repository(|repository| Ok(repository.list_templates()?))?;
-            let schedules =
-                self.with_recurrence_repository(|repository| Ok(repository.list_series()?))?;
-            let tasks =
-                self.with_task_repository(|repository| Ok(repository.list_all_for_sync()?))?;
-            let timer_sessions =
-                self.with_timer_repository(|repository| Ok(repository.list_completed()?))?;
-            let mut store = crate::SqliteSyncStore::new_secret(self.db_path.clone(), self.db_key());
-            let mut transaction = store
-                .begin_write_transaction()
-                .map_err(|_| ClientError::SyncRun)?;
+            let snapshot = transaction
+                .rotation_backfill_snapshot()
+                .map_err(super::sync::map_sync_run_error)?;
             let mut clock = || now_ms().map_err(|error| error.to_string());
             taskveil_sync::enqueue_rotation_backfill(
                 &mut transaction,
                 &sync_keys,
                 &device_id.to_string(),
                 taskveil_sync::BackfillRecords {
-                    lists: &lists,
-                    templates: &templates,
-                    task_series: &schedules,
-                    tasks: &tasks,
-                    timer_sessions: &timer_sessions,
+                    lists: &snapshot.lists,
+                    templates: &snapshot.templates,
+                    task_series: &snapshot.schedules,
+                    tasks: &snapshot.tasks,
+                    timer_sessions: &snapshot.timer_sessions,
                 },
                 &mut clock,
             )
-            .map_err(|_| ClientError::SyncRun)?;
-            transaction.commit().map_err(|_| ClientError::SyncRun)?;
+            .map_err(super::sync::map_sync_run_error)?;
         }
-        let crypto = persist_local_crypto_context(
-            &self.db_path,
-            &self.db_key(),
-            LocalCryptoIdentity {
-                tenant_id,
-                user_id,
-                device_id,
-            },
-            &master_key,
-            sync_keys.clone(),
-            now_ms()?,
-        )?;
-        let mut marker_store =
-            crate::SqliteSyncStore::new_secret(self.db_path.clone(), self.db_key());
-        marker_store
+        let cutover_now = now_ms()?;
+        let crypto = transaction
+            .persist_local_crypto_context(
+                LocalCryptoIdentity {
+                    tenant_id,
+                    user_id,
+                    device_id,
+                },
+                &master_key,
+                sync_keys.clone(),
+                cutover_now,
+            )
+            .map_err(super::sync::map_sync_run_error)?;
+        transaction
             .set_setting(
                 taskveil_sync::KEY_ROTATION_PENDING_SETTING_KEY,
                 "0",
-                now_ms()?,
+                cutover_now,
             )
-            .map_err(|_| ClientError::SyncRun)?;
+            .map_err(super::sync::map_sync_run_error)?;
+        transaction
+            .commit()
+            .map_err(super::sync::map_sync_run_error)?;
         self.account_state()?.crypto = CryptoRuntimeState::Ready(Box::new(crypto));
         Ok(sync_keys)
     }
@@ -1504,13 +1567,34 @@ impl TaskveilClient {
             user_id: parse_session_id(session.user_id.as_deref())?,
             device_id: parse_session_id(session.device_id.as_deref())?,
         };
-        let crypto = persist_account_crypto_context(
-            &self.db_path,
-            &self.db_key(),
-            identity,
-            keys,
-            now_ms()?,
-        )?;
+        let persistence_now = now_ms()?;
+        let db_key = self.db_key();
+        let mut transaction =
+            crate::SqliteSyncStore::begin_profile_cutover_transaction(&self.db_path, &db_key)
+                .map_err(|_| ClientError::Sync)?;
+        let mut fixed_now = || Ok(persistence_now);
+        rebind_local_device(
+            &mut transaction,
+            &identity.device_id.to_string(),
+            &mut fixed_now,
+        )
+        .map_err(|_| ClientError::Sync)?;
+        transaction
+            .set_setting(
+                ACCOUNT_DEVICE_ID_SETTING_KEY,
+                &identity.device_id.to_string(),
+                persistence_now,
+            )
+            .map_err(|_| ClientError::Sync)?;
+        let crypto = transaction
+            .persist_local_crypto_context(
+                identity,
+                &keys.master_key,
+                LocalSyncKeys::from_account_keys(identity.tenant_id, keys),
+                persistence_now,
+            )
+            .map_err(|_| ClientError::Sync)?;
+        transaction.commit().map_err(|_| ClientError::Sync)?;
         self.store_active_wrapped_master_key(local_wrapped_master_key.to_vec())?;
         self.set_setting_value(
             ACCOUNT_EMAIL_SETTING_KEY,
@@ -1564,6 +1648,43 @@ impl TaskveilClient {
         Ok(crypto)
     }
 
+    #[cfg(test)]
+    fn rebind_sync_device_locked(
+        &self,
+        device_id: Uuid,
+        persistence_now: i64,
+    ) -> Result<(), ClientError> {
+        let db_key = self.db_key();
+        let mut transaction =
+            crate::SqliteSyncStore::begin_profile_cutover_transaction(&self.db_path, &db_key)
+                .map_err(|_| ClientError::Sync)?;
+        let old_clock = transaction
+            .get_setting(SYNC_LOCAL_HLC_SETTING_KEY)
+            .map_err(|_| ClientError::Sync)?;
+        let old_device = transaction
+            .get_setting(ACCOUNT_DEVICE_ID_SETTING_KEY)
+            .map_err(|_| ClientError::Sync)?;
+        let mut fixed_now = || Ok(persistence_now);
+        rebind_local_device(&mut transaction, &device_id.to_string(), &mut fixed_now)
+            .map_err(|_| ClientError::Sync)?;
+        let new_clock = transaction
+            .get_setting(SYNC_LOCAL_HLC_SETTING_KEY)
+            .map_err(|_| ClientError::Sync)?;
+        transaction
+            .set_setting(
+                ACCOUNT_DEVICE_ID_SETTING_KEY,
+                &device_id.to_string(),
+                persistence_now,
+            )
+            .map_err(|_| ClientError::Sync)?;
+        if old_clock != new_clock || old_device.as_deref() != Some(device_id.to_string().as_str()) {
+            transaction
+                .bump_runtime_epoch(persistence_now)
+                .map_err(|_| ClientError::Sync)?;
+        }
+        transaction.commit().map_err(|_| ClientError::Sync)
+    }
+
     fn replace_account_runtime(
         &self,
         session: Option<AccountSessionState>,
@@ -1572,6 +1693,10 @@ impl TaskveilClient {
         let mut state = self.account_state()?;
         state.session = session;
         state.session_restored = true;
+        // The protected credential was published immediately before this
+        // runtime update. Force the next session-dependent operation to
+        // observe the exact generation committed by the platform store.
+        state.loaded_credential_generation = None;
         state.crypto = CryptoRuntimeState::Ready(Box::new(crypto));
         Ok(())
     }
@@ -1660,6 +1785,30 @@ fn load_session_credential(
     Ok(Some(credential))
 }
 
+fn stored_credential_generation(
+    credential: Option<&StoredSessionCredential>,
+) -> Result<String, ClientError> {
+    match credential {
+        Some(StoredSessionCredential::Active(tokens)) => {
+            if let Some(generation) = &tokens.credential_generation {
+                return Ok(generation.clone());
+            }
+        }
+        Some(StoredSessionCredential::PendingDeviceCertification(pending)) => {
+            if let Some(generation) = &pending.credential_generation {
+                return Ok(generation.clone());
+            }
+        }
+        None => return Ok(ABSENT_CREDENTIAL_GENERATION.to_string()),
+    }
+    let encoded = Zeroizing::new(
+        serde_json::to_vec(credential.ok_or(ClientError::IncompleteAccountState)?)
+            .map_err(|_| ClientError::IncompleteAccountState)?,
+    );
+    let digest = Sha256::digest(&*encoded);
+    Ok(format!("legacy:{}", STANDARD.encode(digest)))
+}
+
 pub(super) fn load_session_tokens(
     db_dir: &std::path::Path,
 ) -> Result<Option<StoredSessionTokens>, ClientError> {
@@ -1728,42 +1877,8 @@ fn store_pending_login(
 
 pub(super) fn acquire_session_token_set_lock(
     db_dir: &std::path::Path,
-) -> Result<File, ClientError> {
-    let lock_file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(db_dir.join(SESSION_TOKEN_SET_LOCK_FILE_NAME))
-        .map_err(ClientError::Io)?;
-    match try_lock_session_file(&lock_file) {
-        Ok(()) => Ok(lock_file),
-        Err(FileTryLockError::WouldBlock) => Err(ClientError::Busy),
-        Err(FileTryLockError::Error(error)) => Err(ClientError::Io(error)),
-    }
-}
-
-#[cfg(not(target_os = "android"))]
-fn try_lock_session_file(lock_file: &File) -> Result<(), FileTryLockError> {
-    lock_file.try_lock()
-}
-
-#[cfg(target_os = "android")]
-fn try_lock_session_file(lock_file: &File) -> Result<(), FileTryLockError> {
-    // Android's libc provides process-wide advisory flock even though
-    // std::fs::File::try_lock currently reports Unsupported on this target.
-    // The lock is released by the kernel when the returned File is dropped.
-    let result = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if result == 0 {
-        return Ok(());
-    }
-    let error = std::io::Error::last_os_error();
-    match error.raw_os_error() {
-        Some(code) if code == libc::EAGAIN || code == libc::EWOULDBLOCK => {
-            Err(FileTryLockError::WouldBlock)
-        }
-        _ => Err(FileTryLockError::Error(error)),
-    }
+) -> Result<crate::profile_coordination::SessionCredentialGuard, ClientError> {
+    crate::profile_coordination::ProfileCoordinator::for_profile(db_dir)?.try_session()
 }
 
 fn account_session_state(
@@ -1794,31 +1909,141 @@ fn parse_uuid(value: &str) -> Result<Uuid, ClientError> {
 #[cfg(test)]
 mod tests {
     use std::{
-        io::{Read, Write},
+        io::{BufRead, BufReader, Read, Write},
         net::TcpListener,
+        process::{Command, Stdio},
         sync::Mutex,
     };
 
-    use taskveil_sync::LocalSyncStore;
+    use taskveil_domain::new_list;
+    use taskveil_storage::{
+        ListRepository, SqliteListRepository, SqliteProfileCoordinationRepository,
+        SqliteTaskRepository, StorageError, TaskRepository,
+    };
+    use taskveil_sync::{
+        EncryptedSyncState, Hlc, LocalSyncKeys, LocalSyncStore, NewLocalSyncOutboxEntry,
+        SyncCollection, SYNC_LOCAL_HLC_SETTING_KEY,
+    };
     use tempfile::TempDir;
 
     use super::*;
-    use crate::SqliteSyncStore;
+    use crate::{profile_coordination::ProfileCoordinator, SqliteSyncStore};
 
     fn open_test_client(db_dir: &std::path::Path, db_key: [u8; 32]) -> TaskveilClient {
         let db_path = db_dir.join("taskveil.db");
         drop(open_encrypted(&db_path, &db_key).expect("open encrypted test database"));
         TaskveilClient {
             db_dir: db_dir.to_path_buf(),
+            profile_coordinator: TaskveilClient::pinned_test_coordinator(db_dir, &db_path),
             db_path,
             db_key: Mutex::new(Zeroizing::new(db_key)),
             account: Mutex::new(super::super::AccountRuntimeState {
                 session: None,
                 session_restored: false,
+                loaded_credential_generation: None,
                 crypto: CryptoRuntimeState::Anonymous,
             }),
             sync: Mutex::new(super::super::SyncRuntimeState::default()),
-            operation_busy: std::sync::atomic::AtomicBool::new(false),
+            runtime_epoch: std::sync::atomic::AtomicI64::new(1),
+            capsule_generation: std::sync::atomic::AtomicU64::new(1),
+        }
+    }
+
+    fn spawn_stale_runtime_child(
+        profile: &std::path::Path,
+        mode: &str,
+        list_id: Uuid,
+    ) -> (std::process::Child, BufReader<std::process::ChildStdout>) {
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runtime::account::tests::child_stale_runtime_actor",
+                "--nocapture",
+            ])
+            .env("TASKVEIL_STALE_RUNTIME_CHILD", mode)
+            .env("TASKVEIL_STALE_RUNTIME_PROFILE", profile)
+            .env("TASKVEIL_STALE_RUNTIME_LIST", list_id.to_string())
+            // The child is a standalone test process, so Apple does not see
+            // Rust's `cfg(test)` when selecting the capsule backend.
+            .env("FLUTTER_TEST", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut output = BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        loop {
+            line.clear();
+            assert_ne!(output.read_line(&mut line).unwrap(), 0);
+            if line.contains("TASKVEIL_STALE_RUNTIME_READY") {
+                break;
+            }
+        }
+        (child, output)
+    }
+
+    #[test]
+    fn child_stale_runtime_actor() {
+        let Ok(mode) = std::env::var("TASKVEIL_STALE_RUNTIME_CHILD") else {
+            return;
+        };
+        let profile =
+            std::path::PathBuf::from(std::env::var_os("TASKVEIL_STALE_RUNTIME_PROFILE").unwrap());
+        let list_id = std::env::var("TASKVEIL_STALE_RUNTIME_LIST")
+            .unwrap()
+            .parse::<Uuid>()
+            .unwrap();
+        const DB_KEY: [u8; 32] = [0xb6; 32];
+        const MASTER_KEY: [u8; KEY_LEN] = [0x71; KEY_LEN];
+        let client = open_test_client(&profile, DB_KEY);
+        if mode == "ready" {
+            let LocalCryptoAvailability::Ready(crypto) =
+                load_local_crypto_context(client.db_path(), &DB_KEY, Some(MASTER_KEY)).unwrap()
+            else {
+                panic!("ready child could not restore local crypto");
+            };
+            let runtime = SqliteProfileCoordinationRepository::new(
+                open_encrypted(client.db_path(), &DB_KEY).unwrap(),
+            )
+            .load_runtime()
+            .unwrap();
+            client
+                .runtime_epoch
+                .store(runtime.runtime_epoch, std::sync::atomic::Ordering::Release);
+            client.account_state().unwrap().crypto = CryptoRuntimeState::Ready(crypto);
+        } else {
+            assert!(matches!(
+                mode.as_str(),
+                "anonymous" | "root-swap" | "windows-root-handle"
+            ));
+        }
+        println!("TASKVEIL_STALE_RUNTIME_READY");
+        std::io::stdout().flush().unwrap();
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).unwrap();
+
+        let result = client.create_task(super::super::CreateTaskCommand {
+            list_id,
+            title: format!("must not commit from stale {mode}"),
+            parent_task_id: None,
+            due: None,
+            note: None,
+            priority: 0,
+            scheduled_at: None,
+            estimated_minutes: None,
+        });
+        match mode.as_str() {
+            "root-swap" => assert!(matches!(result, Err(ClientError::ProfileLockUnsupported))),
+            "windows-root-handle" => {
+                result.expect("the pinned Windows profile remains usable while rename is denied");
+            }
+            _ => assert!(
+                matches!(
+                    result,
+                    Err(ClientError::LocalKeyState | ClientError::AccountBoundUnavailable)
+                ),
+                "stale runtime mutation returned an unexpected result: {result:?}"
+            ),
         }
     }
 
@@ -1826,6 +2051,7 @@ mod tests {
     fn versioned_session_token_set_round_trips_as_one_payload() {
         let expected = StoredSessionTokens {
             version: SESSION_TOKEN_SET_VERSION,
+            credential_generation: Some(Uuid::now_v7().to_string()),
             issuer: "https://sync.example.com".to_string(),
             access_token: "access-secret".to_string(),
             access_expires_at_ms: 1_800_000_000_000,
@@ -1868,6 +2094,7 @@ mod tests {
         let client = open_test_client(temp.path(), [0x31; 32]);
         let tokens = StoredSessionTokens {
             version: SESSION_TOKEN_SET_VERSION,
+            credential_generation: Some(Uuid::now_v7().to_string()),
             issuer: "https://sync.example.com".to_string(),
             access_token: "access-secret".to_string(),
             access_expires_at_ms: 1_900_000_000_000,
@@ -1912,6 +2139,7 @@ mod tests {
             temp.path(),
             &StoredSessionTokens {
                 version: SESSION_TOKEN_SET_VERSION,
+                credential_generation: Some(Uuid::now_v7().to_string()),
                 issuer,
                 access_token: "access-secret".to_string(),
                 access_expires_at_ms: 1_900_000_000_000,
@@ -1956,6 +2184,7 @@ mod tests {
             temp.path(),
             &StoredSessionTokens {
                 version: SESSION_TOKEN_SET_VERSION,
+                credential_generation: Some(Uuid::now_v7().to_string()),
                 issuer: "https://sync.example.com".to_string(),
                 access_token: "access-secret".to_string(),
                 access_expires_at_ms: 1_900_000_000_000,
@@ -1978,6 +2207,78 @@ mod tests {
     }
 
     #[test]
+    fn live_profile_observes_authoritative_credential_replacement_and_deletion() {
+        let temp = TempDir::new().expect("temp profile");
+        let client = open_test_client(temp.path(), [0x35; 32]);
+        for (key, value) in [
+            (ACCOUNT_EMAIL_SETTING_KEY, "converge@example.com"),
+            (
+                ACCOUNT_USER_ID_SETTING_KEY,
+                "00000000-0000-4000-8000-000000000011",
+            ),
+            (
+                ACCOUNT_TENANT_ID_SETTING_KEY,
+                "00000000-0000-4000-8000-000000000012",
+            ),
+            (
+                ACCOUNT_DEVICE_ID_SETTING_KEY,
+                "00000000-0000-4000-8000-000000000013",
+            ),
+        ] {
+            client.set_setting_value(key, value).unwrap();
+        }
+        let token_set = |access_token: &str| StoredSessionTokens {
+            version: SESSION_TOKEN_SET_VERSION,
+            credential_generation: Some(Uuid::now_v7().to_string()),
+            issuer: "https://sync.example.com".to_string(),
+            access_token: access_token.to_string(),
+            access_expires_at_ms: 1_900_000_000_000,
+            refresh_token: format!("{access_token}-refresh"),
+            refresh_expires_at_ms: 1_901_000_000_000,
+        };
+
+        store_session_tokens(temp.path(), &token_set("first")).unwrap();
+        assert!(client.account_session_state().unwrap().logged_in);
+        assert_eq!(
+            client
+                .current_access_token()
+                .unwrap()
+                .unwrap()
+                .token
+                .as_str(),
+            "first"
+        );
+        let first_generation = client
+            .account_state()
+            .unwrap()
+            .loaded_credential_generation
+            .clone();
+
+        // This direct replacement models a refresh committed by another
+        // process. The next operation must reread the protected store while
+        // holding the session lock instead of using its cached token family.
+        store_session_tokens(temp.path(), &token_set("second")).unwrap();
+        assert_eq!(
+            client
+                .current_access_token()
+                .unwrap()
+                .unwrap()
+                .token
+                .as_str(),
+            "second"
+        );
+        assert!(client.account_session_state().unwrap().logged_in);
+        assert_ne!(
+            client.account_state().unwrap().loaded_credential_generation,
+            first_generation
+        );
+
+        delete_account_secret(temp.path(), AccountSecretKind::SessionTokens).unwrap();
+        assert!(!client.account_session_state().unwrap().logged_in);
+        assert!(client.current_access_token().unwrap().is_none());
+    }
+
+    #[test]
     fn session_token_set_lock_excludes_another_profile_instance() {
         let temp = TempDir::new().expect("temp profile");
         let first = acquire_session_token_set_lock(temp.path()).expect("first session lock");
@@ -1987,6 +2288,50 @@ mod tests {
         ));
         drop(first);
         acquire_session_token_set_lock(temp.path()).expect("session lock after release");
+    }
+
+    #[test]
+    fn runtime_epoch_retry_replays_once_and_only_after_pre_write_mismatch() {
+        let temp = TempDir::new().expect("temp profile");
+        let client = open_test_client(temp.path(), [0x36; 32]);
+        let mut attempts = 0;
+        let mut committed_effects = 0;
+
+        let result = client.retry_runtime_epoch_once(|| {
+            attempts += 1;
+            if attempts == 1 {
+                return Err(ClientError::Storage(
+                    StorageError::ProfileRuntimeEpochChanged {
+                        expected: 1,
+                        actual: 2,
+                    },
+                ));
+            }
+            committed_effects += 1;
+            Ok("committed")
+        });
+
+        assert_eq!(result.unwrap(), "committed");
+        assert_eq!(attempts, 2);
+        assert_eq!(committed_effects, 1);
+
+        let mut repeated_attempts = 0;
+        let repeated = client.retry_runtime_epoch_once::<()>(|| {
+            repeated_attempts += 1;
+            Err(ClientError::Storage(
+                StorageError::ProfileRuntimeEpochChanged {
+                    expected: 1,
+                    actual: 2,
+                },
+            ))
+        });
+        assert!(matches!(
+            repeated,
+            Err(ClientError::Storage(
+                StorageError::ProfileRuntimeEpochChanged { .. }
+            ))
+        ));
+        assert_eq!(repeated_attempts, 2);
     }
 
     #[tokio::test]
@@ -2007,6 +2352,44 @@ mod tests {
         ));
         drop(first_mutation);
         acquire_session_token_set_lock(&second.db_dir).expect("second client can continue");
+    }
+
+    #[tokio::test]
+    async fn sync_token_refresh_checks_lease_immediately_before_http() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("reserve issuer address");
+        let issuer = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let temp = TempDir::new().expect("temp profile");
+        let client = open_test_client(temp.path(), [0x3a; 32]);
+        store_session_tokens(
+            temp.path(),
+            &StoredSessionTokens {
+                version: SESSION_TOKEN_SET_VERSION,
+                credential_generation: Some(Uuid::now_v7().to_string()),
+                issuer,
+                access_token: "expired-access".to_string(),
+                access_expires_at_ms: 1,
+                refresh_token: "refresh-secret".to_string(),
+                refresh_expires_at_ms: i64::MAX,
+            },
+        )
+        .unwrap();
+        let mut gate = SqliteSyncStore::new_secret(client.db_path().to_path_buf(), client.db_key());
+        gate.acquire_sync_lease("sync-token-refresh", 1, 60_000)
+            .unwrap();
+        open_encrypted(client.db_path(), &client.db_key())
+            .unwrap()
+            .execute(
+                "UPDATE sync_run_lease SET expires_at_ms = 0 WHERE singleton = 1",
+                [],
+            )
+            .unwrap();
+
+        assert!(matches!(
+            client.access_token_for_sync(true, &mut gate).await,
+            Err(ClientError::LeaseLost)
+        ));
+        delete_account_secret(temp.path(), AccountSecretKind::SessionTokens).unwrap();
     }
 
     #[test]
@@ -2120,15 +2503,18 @@ mod tests {
 
         let client = TaskveilClient {
             db_dir: temp.path().to_path_buf(),
+            profile_coordinator: TaskveilClient::pinned_test_coordinator(temp.path(), &db_path),
             db_path,
             db_key: Mutex::new(Zeroizing::new(DB_KEY)),
             account: std::sync::Mutex::new(super::super::AccountRuntimeState {
                 session: None,
                 session_restored: false,
+                loaded_credential_generation: None,
                 crypto: CryptoRuntimeState::Unloaded,
             }),
             sync: std::sync::Mutex::new(super::super::SyncRuntimeState::default()),
-            operation_busy: std::sync::atomic::AtomicBool::new(false),
+            runtime_epoch: std::sync::atomic::AtomicI64::new(1),
+            capsule_generation: std::sync::atomic::AtomicU64::new(1),
         };
         client
             .replace_account_runtime(
@@ -2150,5 +2536,600 @@ mod tests {
                 .unwrap(),
             Some(1)
         );
+    }
+
+    #[test]
+    fn same_profile_authentication_rebinds_clock_and_pending_outbox_to_fresh_device() {
+        const DB_KEY: [u8; 32] = [0x74; 32];
+        let temp = TempDir::new().unwrap();
+        let client = open_test_client(temp.path(), DB_KEY);
+        let list = new_list("Inbox".into(), "a0".into(), 1).unwrap();
+        SqliteListRepository::new(open_encrypted(client.db_path(), &DB_KEY).unwrap())
+            .insert(list.clone())
+            .unwrap();
+
+        let old_device = Uuid::now_v7();
+        let new_device = Uuid::now_v7();
+        let old_clock = Hlc {
+            wall_ms: 100,
+            counter: 5,
+            device_id: old_device.to_string(),
+        };
+        let old_revision = old_clock.encode().unwrap();
+        let old_op_id = Uuid::now_v7();
+        let mut store = SqliteSyncStore::new(client.db_path().to_path_buf(), DB_KEY);
+        store
+            .set_setting(SYNC_LOCAL_HLC_SETTING_KEY, &old_revision, 100)
+            .unwrap();
+        store
+            .set_setting(ACCOUNT_DEVICE_ID_SETTING_KEY, &old_device.to_string(), 100)
+            .unwrap();
+        store
+            .put_outbox_head(NewLocalSyncOutboxEntry {
+                op_id: old_op_id,
+                record_id: list.id,
+                collection: SyncCollection::Lists,
+                base_revision_hlc: None,
+                revision_hlc: old_revision.clone(),
+                state: EncryptedSyncState::Live {
+                    mutation_hlc: old_revision.clone(),
+                    blob: vec![1, 2, 3],
+                },
+                created_at: 100,
+            })
+            .unwrap();
+
+        client.rebind_sync_device_locked(new_device, 200).unwrap();
+
+        let rebound_clock = Hlc::decode(
+            &store
+                .get_setting(SYNC_LOCAL_HLC_SETTING_KEY)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        let rebound = store.list_all_outbox_heads(10).unwrap();
+        assert_eq!(rebound.len(), 1);
+        let rebound_revision = Hlc::decode(&rebound[0].revision_hlc).unwrap();
+        assert_eq!(rebound_clock.device_id, new_device.to_string());
+        assert_eq!(rebound_revision.device_id, new_device.to_string());
+        assert!(rebound_revision.encode().unwrap() > old_revision);
+        assert_ne!(rebound[0].op_id, old_op_id);
+        assert_eq!(
+            rebound[0].state,
+            EncryptedSyncState::Live {
+                mutation_hlc: old_clock.encode().unwrap(),
+                blob: vec![1, 2, 3],
+            }
+        );
+        assert_eq!(
+            store
+                .get_setting(ACCOUNT_DEVICE_ID_SETTING_KEY)
+                .unwrap()
+                .as_deref(),
+            Some(new_device.to_string().as_str())
+        );
+    }
+
+    #[test]
+    fn device_rebind_failure_rolls_back_clock_outbox_and_account_device() {
+        const DB_KEY: [u8; 32] = [0x75; 32];
+        let temp = TempDir::new().unwrap();
+        let client = open_test_client(temp.path(), DB_KEY);
+        let list = new_list("Inbox".into(), "a0".into(), 1).unwrap();
+        SqliteListRepository::new(open_encrypted(client.db_path(), &DB_KEY).unwrap())
+            .insert(list.clone())
+            .unwrap();
+
+        let old_device = Uuid::now_v7();
+        let old_clock = Hlc {
+            wall_ms: 100,
+            counter: 5,
+            device_id: old_device.to_string(),
+        }
+        .encode()
+        .unwrap();
+        let old_op_id = Uuid::now_v7();
+        let mut store = SqliteSyncStore::new(client.db_path().to_path_buf(), DB_KEY);
+        store
+            .set_setting(SYNC_LOCAL_HLC_SETTING_KEY, &old_clock, 100)
+            .unwrap();
+        store
+            .set_setting(ACCOUNT_DEVICE_ID_SETTING_KEY, &old_device.to_string(), 100)
+            .unwrap();
+        store
+            .put_outbox_head(NewLocalSyncOutboxEntry {
+                op_id: old_op_id,
+                record_id: list.id,
+                collection: SyncCollection::Lists,
+                base_revision_hlc: None,
+                revision_hlc: old_clock.clone(),
+                state: EncryptedSyncState::Tombstone {
+                    delete_hlc: old_clock.clone(),
+                },
+                created_at: 100,
+            })
+            .unwrap();
+        open_encrypted(client.db_path(), &DB_KEY)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_device_rebind BEFORE UPDATE ON sync_outbox
+                 BEGIN SELECT RAISE(ABORT, 'fail device rebind'); END;",
+            )
+            .unwrap();
+
+        assert!(client
+            .rebind_sync_device_locked(Uuid::now_v7(), 200)
+            .is_err());
+
+        assert_eq!(
+            store.get_setting(SYNC_LOCAL_HLC_SETTING_KEY).unwrap(),
+            Some(old_clock.clone())
+        );
+        assert_eq!(
+            store
+                .get_setting(ACCOUNT_DEVICE_ID_SETTING_KEY)
+                .unwrap()
+                .as_deref(),
+            Some(old_device.to_string().as_str())
+        );
+        let pending = store.list_all_outbox_heads(10).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].op_id, old_op_id);
+        assert_eq!(pending[0].revision_hlc, old_clock);
+    }
+
+    #[test]
+    fn account_persistence_failure_retries_same_device_without_reclocking_outbox_again() {
+        // Apple unit-test binaries are not signed with the production
+        // Keychain entitlement. Select the same file-backed secret path used
+        // by the Flutter test runner.
+        std::env::set_var("FLUTTER_TEST", "1");
+        let temp = TempDir::new().unwrap();
+        let client =
+            TaskveilClient::open(super::super::LocalProfileConfig::new(temp.path(), "Inbox"))
+                .unwrap();
+        let old_device = Uuid::now_v7();
+        let new_device = Uuid::now_v7();
+        let tenant_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+        let list = new_list("Pending".into(), "a1".into(), 1).unwrap();
+        SqliteListRepository::new(open_encrypted(client.db_path(), &client.db_key()).unwrap())
+            .insert(list.clone())
+            .unwrap();
+        let old_revision = Hlc {
+            wall_ms: 100,
+            counter: 5,
+            device_id: old_device.to_string(),
+        }
+        .encode()
+        .unwrap();
+        let mut store = SqliteSyncStore::new(client.db_path().to_path_buf(), *client.db_key());
+        store
+            .set_setting(SYNC_LOCAL_HLC_SETTING_KEY, &old_revision, 100)
+            .unwrap();
+        store
+            .put_outbox_head(NewLocalSyncOutboxEntry {
+                op_id: Uuid::now_v7(),
+                record_id: list.id,
+                collection: SyncCollection::Lists,
+                base_revision_hlc: None,
+                revision_hlc: old_revision.clone(),
+                state: EncryptedSyncState::Tombstone {
+                    delete_hlc: old_revision,
+                },
+                created_at: 100,
+            })
+            .unwrap();
+
+        let root = taskveil_crypto::organization::generate_account_root(user_id).unwrap();
+        let keys = AccountKeyMaterial {
+            generation: 1,
+            tenant_generation: 1,
+            master_key: Zeroizing::new([0x31; KEY_LEN]),
+            account_root_private: root.private,
+            account_root_public: root.public,
+            tenant_root_dek: Zeroizing::new([0x32; KEY_LEN]),
+        };
+        let session = account_session_state(
+            "retry@example.com".into(),
+            user_id.to_string(),
+            tenant_id.to_string(),
+            new_device.to_string(),
+        );
+        let tokens = AccountTokenSet {
+            access_token: Zeroizing::new("new-access".to_string()),
+            access_expires_at_ms: 2_000_000_000_000,
+            refresh_token: Zeroizing::new("new-refresh".to_string()),
+            refresh_expires_at_ms: 2_100_000_000_000,
+        };
+        open_encrypted(client.db_path(), &client.db_key())
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_account_persistence
+                 BEFORE INSERT ON settings
+                 WHEN NEW.key = 'account_email'
+                 BEGIN SELECT RAISE(ABORT, 'fail account persistence'); END;",
+            )
+            .unwrap();
+
+        assert!(client
+            .persist_account_state_locked(
+                "https://sync.example.com",
+                &session,
+                &tokens,
+                &[0x44; 48],
+                &keys,
+            )
+            .is_err());
+        assert!(load_session_tokens(temp.path()).unwrap().is_none());
+        let after_failure = store.list_all_outbox_heads(10).unwrap();
+        assert_eq!(after_failure.len(), 1);
+        let rebound_op_id = after_failure[0].op_id;
+        assert_eq!(
+            Hlc::decode(&after_failure[0].revision_hlc)
+                .unwrap()
+                .device_id,
+            new_device.to_string()
+        );
+
+        open_encrypted(client.db_path(), &client.db_key())
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_account_persistence;")
+            .unwrap();
+        client
+            .persist_account_state_locked(
+                "https://sync.example.com",
+                &session,
+                &tokens,
+                &[0x44; 48],
+                &keys,
+            )
+            .unwrap();
+
+        assert!(load_session_tokens(temp.path()).unwrap().is_some());
+        let after_retry = store.list_all_outbox_heads(10).unwrap();
+        assert_eq!(after_retry.len(), 1);
+        assert_eq!(after_retry[0].op_id, rebound_op_id);
+        assert_eq!(
+            Hlc::decode(&after_retry[0].revision_hlc).unwrap().device_id,
+            new_device.to_string()
+        );
+    }
+
+    #[test]
+    fn stale_anonymous_instance_fails_closed_after_another_instance_binds_profile() {
+        const DB_KEY: [u8; 32] = [0x76; 32];
+        let temp = TempDir::new().unwrap();
+        let first = open_test_client(temp.path(), DB_KEY);
+        let second = open_test_client(temp.path(), DB_KEY);
+        assert!(matches!(
+            first.local_mutation_state().unwrap(),
+            super::super::LocalMutationState::Anonymous
+        ));
+        let list = new_list("Inbox".into(), "a0".into(), 100).unwrap();
+        SqliteListRepository::new(open_encrypted(second.db_path(), &DB_KEY).unwrap())
+            .insert(list.clone())
+            .unwrap();
+        let tenant_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+        let device_id = Uuid::now_v7();
+        let master_key = [0x51; KEY_LEN];
+        persist_local_crypto_context(
+            second.db_path(),
+            &DB_KEY,
+            LocalCryptoIdentity {
+                tenant_id,
+                user_id,
+                device_id,
+            },
+            &master_key,
+            LocalSyncKeys {
+                tenant_id,
+                tenant_root_dek: Some(Zeroizing::new([0x52; KEY_LEN])),
+                tenant_generation: 1,
+                historical_tenant_root_deks: Vec::new(),
+            },
+            101,
+        )
+        .unwrap();
+
+        let result = first.create_task(super::super::CreateTaskCommand {
+            list_id: list.id,
+            title: "must not commit anonymously".into(),
+            parent_task_id: None,
+            due: None,
+            note: None,
+            priority: 0,
+            scheduled_at: None,
+            estimated_minutes: None,
+        });
+        assert!(matches!(
+            result,
+            Err(ClientError::LocalKeyState | ClientError::AccountBoundUnavailable)
+        ));
+        assert!(
+            SqliteTaskRepository::new(open_encrypted(second.db_path(), &DB_KEY).unwrap())
+                .list_all_for_sync()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(SqliteSyncStore::new(second.db_path().to_path_buf(), DB_KEY)
+            .list_outbox_heads(1)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn real_child_stale_anonymous_fails_closed_after_profile_binding() {
+        const DB_KEY: [u8; 32] = [0xb6; 32];
+        const MASTER_KEY: [u8; KEY_LEN] = [0x71; KEY_LEN];
+        let temp = TempDir::new().unwrap();
+        let client = open_test_client(temp.path(), DB_KEY);
+        let list = new_list("Inbox".into(), "a0".into(), 100).unwrap();
+        SqliteListRepository::new(open_encrypted(client.db_path(), &DB_KEY).unwrap())
+            .insert(list.clone())
+            .unwrap();
+        let (mut child, _output) = spawn_stale_runtime_child(temp.path(), "anonymous", list.id);
+
+        let tenant_id = Uuid::now_v7();
+        let _exclusive = ProfileCoordinator::for_profile(temp.path())
+            .unwrap()
+            .try_exclusive()
+            .unwrap();
+        persist_local_crypto_context(
+            client.db_path(),
+            &DB_KEY,
+            LocalCryptoIdentity {
+                tenant_id,
+                user_id: Uuid::now_v7(),
+                device_id: Uuid::now_v7(),
+            },
+            &MASTER_KEY,
+            LocalSyncKeys {
+                tenant_id,
+                tenant_root_dek: Some(Zeroizing::new([0x72; KEY_LEN])),
+                tenant_generation: 1,
+                historical_tenant_root_deks: Vec::new(),
+            },
+            101,
+        )
+        .unwrap();
+        drop(_exclusive);
+
+        child.stdin.take().unwrap().write_all(b"mutate\n").unwrap();
+        assert!(child.wait().unwrap().success());
+        assert!(
+            SqliteTaskRepository::new(open_encrypted(client.db_path(), &DB_KEY).unwrap())
+                .list_all_for_sync()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(SqliteSyncStore::new(client.db_path().to_path_buf(), DB_KEY)
+            .list_outbox_heads(1)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn stale_ready_instance_fails_closed_after_device_identity_rotation() {
+        const DB_KEY: [u8; 32] = [0x77; 32];
+        let temp = TempDir::new().unwrap();
+        let first = open_test_client(temp.path(), DB_KEY);
+        let second = open_test_client(temp.path(), DB_KEY);
+        let list = new_list("Inbox".into(), "a0".into(), 100).unwrap();
+        SqliteListRepository::new(open_encrypted(first.db_path(), &DB_KEY).unwrap())
+            .insert(list.clone())
+            .unwrap();
+        let tenant_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+        let master_key = [0x61; KEY_LEN];
+        let sync_keys = LocalSyncKeys {
+            tenant_id,
+            tenant_root_dek: Some(Zeroizing::new([0x62; KEY_LEN])),
+            tenant_generation: 1,
+            historical_tenant_root_deks: Vec::new(),
+        };
+        let ready = persist_local_crypto_context(
+            first.db_path(),
+            &DB_KEY,
+            LocalCryptoIdentity {
+                tenant_id,
+                user_id,
+                device_id: Uuid::now_v7(),
+            },
+            &master_key,
+            sync_keys.clone(),
+            101,
+        )
+        .unwrap();
+        first
+            .runtime_epoch
+            .store(2, std::sync::atomic::Ordering::Release);
+        first.account_state().unwrap().crypto = CryptoRuntimeState::Ready(Box::new(ready));
+        assert!(matches!(
+            first.local_mutation_state().unwrap(),
+            super::super::LocalMutationState::Ready(_)
+        ));
+
+        persist_local_crypto_context(
+            second.db_path(),
+            &DB_KEY,
+            LocalCryptoIdentity {
+                tenant_id,
+                user_id,
+                device_id: Uuid::now_v7(),
+            },
+            &master_key,
+            sync_keys,
+            102,
+        )
+        .unwrap();
+
+        let result = first.create_task(super::super::CreateTaskCommand {
+            list_id: list.id,
+            title: "must not use stale device identity".into(),
+            parent_task_id: None,
+            due: None,
+            note: None,
+            priority: 0,
+            scheduled_at: None,
+            estimated_minutes: None,
+        });
+        assert!(matches!(
+            result,
+            Err(ClientError::LocalKeyState | ClientError::AccountBoundUnavailable)
+        ));
+        assert!(
+            SqliteTaskRepository::new(open_encrypted(second.db_path(), &DB_KEY).unwrap())
+                .list_all_for_sync()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn real_child_stale_ready_fails_closed_after_device_identity_rotation() {
+        const DB_KEY: [u8; 32] = [0xb6; 32];
+        const MASTER_KEY: [u8; KEY_LEN] = [0x71; KEY_LEN];
+        let temp = TempDir::new().unwrap();
+        let client = open_test_client(temp.path(), DB_KEY);
+        let list = new_list("Inbox".into(), "a0".into(), 100).unwrap();
+        SqliteListRepository::new(open_encrypted(client.db_path(), &DB_KEY).unwrap())
+            .insert(list.clone())
+            .unwrap();
+        let tenant_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+        let sync_keys = LocalSyncKeys {
+            tenant_id,
+            tenant_root_dek: Some(Zeroizing::new([0x72; KEY_LEN])),
+            tenant_generation: 1,
+            historical_tenant_root_deks: Vec::new(),
+        };
+        persist_local_crypto_context(
+            client.db_path(),
+            &DB_KEY,
+            LocalCryptoIdentity {
+                tenant_id,
+                user_id,
+                device_id: Uuid::now_v7(),
+            },
+            &MASTER_KEY,
+            sync_keys.clone(),
+            101,
+        )
+        .unwrap();
+        let (mut child, _output) = spawn_stale_runtime_child(temp.path(), "ready", list.id);
+
+        let _exclusive = ProfileCoordinator::for_profile(temp.path())
+            .unwrap()
+            .try_exclusive()
+            .unwrap();
+        persist_local_crypto_context(
+            client.db_path(),
+            &DB_KEY,
+            LocalCryptoIdentity {
+                tenant_id,
+                user_id,
+                device_id: Uuid::now_v7(),
+            },
+            &MASTER_KEY,
+            sync_keys,
+            102,
+        )
+        .unwrap();
+        drop(_exclusive);
+
+        child.stdin.take().unwrap().write_all(b"mutate\n").unwrap();
+        assert!(child.wait().unwrap().success());
+        assert!(
+            SqliteTaskRepository::new(open_encrypted(client.db_path(), &DB_KEY).unwrap())
+                .list_all_for_sync()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(SqliteSyncStore::new(client.db_path().to_path_buf(), DB_KEY)
+            .list_outbox_heads(1)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_open_profile_root_swap_is_rejected_by_the_pinned_child() {
+        const DB_KEY: [u8; 32] = [0xb6; 32];
+        let workspace = TempDir::new().unwrap();
+        let profile = workspace.path().join("profile");
+        let original = workspace.path().join("original-profile");
+        std::fs::create_dir(&profile).unwrap();
+        let db_path = profile.join("taskveil.db");
+        let list = new_list("Inbox".into(), "a0".into(), 100).unwrap();
+        SqliteListRepository::new(open_encrypted(&db_path, &DB_KEY).unwrap())
+            .insert(list.clone())
+            .unwrap();
+        let (mut child, _output) = spawn_stale_runtime_child(&profile, "root-swap", list.id);
+
+        std::fs::rename(&profile, &original).unwrap();
+        std::fs::create_dir(&profile).unwrap();
+        let replacement_db_path = profile.join("taskveil.db");
+        SqliteListRepository::new(open_encrypted(&replacement_db_path, &DB_KEY).unwrap())
+            .insert(list)
+            .unwrap();
+
+        child.stdin.take().unwrap().write_all(b"mutate\n").unwrap();
+        assert!(child.wait().unwrap().success());
+        assert!(
+            SqliteTaskRepository::new(open_encrypted(&replacement_db_path, &DB_KEY).unwrap())
+                .list_all_for_sync()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(SqliteSyncStore::new(replacement_db_path, DB_KEY)
+            .list_outbox_heads(1)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn post_open_profile_root_handle_denies_rename_until_child_exit() {
+        const DB_KEY: [u8; 32] = [0xb6; 32];
+        let workspace = TempDir::new().unwrap();
+        let profile = workspace.path().join("profile");
+        let moved = workspace.path().join("moved-profile");
+        std::fs::create_dir(&profile).unwrap();
+        let db_path = profile.join("taskveil.db");
+        let list = new_list("Inbox".into(), "a0".into(), 100).unwrap();
+        SqliteListRepository::new(open_encrypted(&db_path, &DB_KEY).unwrap())
+            .insert(list.clone())
+            .unwrap();
+        let (mut child, _output) =
+            spawn_stale_runtime_child(&profile, "windows-root-handle", list.id);
+
+        assert!(
+            std::fs::rename(&profile, &moved).is_err(),
+            "the retained root handle must deny delete/rename sharing"
+        );
+        child.stdin.take().unwrap().write_all(b"mutate\n").unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_eq!(
+            SqliteTaskRepository::new(open_encrypted(&db_path, &DB_KEY).unwrap())
+                .list_all_for_sync()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match std::fs::rename(&profile, &moved) {
+                Ok(()) => break,
+                Err(error) if std::time::Instant::now() < deadline => {
+                    let _ = error;
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("profile rename did not recover after child exit: {error}"),
+            }
+        }
     }
 }

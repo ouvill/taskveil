@@ -27,6 +27,7 @@ async fn run() -> Result<(), ()> {
             pool,
             billing: config.billing,
             auth_issuer: config.auth_issuer,
+            resync_tokens: config.resync_tokens,
         },
         config.realtime,
     );

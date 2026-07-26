@@ -23,7 +23,7 @@ use zeroize::Zeroizing;
 #[derive(Debug, Error)]
 pub enum ClientError {
     #[error("storage operation failed: {0}")]
-    Storage(#[from] StorageError),
+    Storage(StorageError),
     #[error("domain operation failed: {0}")]
     Domain(#[from] taskveil_domain::DomainError),
     #[error("recurrence operation failed: {0}")]
@@ -54,6 +54,16 @@ pub enum ClientError {
     RuntimeState,
     #[error("another account or sync operation is already running")]
     Busy,
+    #[error("another operation is using the local profile with an incompatible lock")]
+    ProfileBusy,
+    #[error("operating-system profile locks are unsupported")]
+    ProfileLockUnsupported,
+    #[error("another process owns the local profile sync lease")]
+    SyncLeaseBusy,
+    #[error("the local profile sync lease was lost")]
+    LeaseLost,
+    #[error("the local profile database is busy")]
+    DatabaseBusy,
     #[error("task priority must be between 0 and 3")]
     InvalidPriority,
     #[error("estimated minutes must be a positive multiple of 5")]
@@ -71,6 +81,16 @@ pub enum ClientError {
     ActiveTimerConflict(Uuid),
     #[error("calendar range must contain increasing civil-date and instant bounds")]
     InvalidCalendarRange,
+}
+
+impl From<StorageError> for ClientError {
+    fn from(error: StorageError) -> Self {
+        if error.is_database_busy() {
+            Self::DatabaseBusy
+        } else {
+            Self::Storage(error)
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +118,7 @@ pub struct UpdateTaskInput {
 pub struct SqliteMutationService {
     pub(crate) db_path: PathBuf,
     pub(crate) db_key: Zeroizing<[u8; 32]>,
+    pub(crate) expected_runtime_epoch: Option<i64>,
 }
 
 impl SqliteMutationService {
@@ -106,10 +127,24 @@ impl SqliteMutationService {
         Self::new_secret(db_path, Zeroizing::new(db_key))
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn new_secret(db_path: impl Into<PathBuf>, db_key: Zeroizing<[u8; 32]>) -> Self {
         Self {
             db_path: db_path.into(),
             db_key,
+            expected_runtime_epoch: None,
+        }
+    }
+
+    pub(crate) fn new_secret_with_epoch(
+        db_path: impl Into<PathBuf>,
+        db_key: Zeroizing<[u8; 32]>,
+        expected_runtime_epoch: i64,
+    ) -> Self {
+        Self {
+            db_path: db_path.into(),
+            db_key,
+            expected_runtime_epoch: Some(expected_runtime_epoch),
         }
     }
 
@@ -125,6 +160,7 @@ impl SqliteMutationService {
     ) -> Result<Task, ClientError> {
         let mut connection = open_encrypted(&self.db_path, &self.db_key)?;
         let mut transaction = SqliteWriteTx::begin(&mut connection)?;
+        self.assert_runtime_epoch(&transaction)?;
         let before = transaction.get_task(input.task_id)?;
         if sync.keys.tenant_root_dek.is_none()
             || sync.keys.tenant_id.is_nil()
@@ -149,6 +185,16 @@ impl SqliteMutationService {
         transaction.commit()?;
         Ok(updated)
     }
+
+    pub(crate) fn assert_runtime_epoch(
+        &self,
+        transaction: &SqliteWriteTx<'_>,
+    ) -> Result<(), ClientError> {
+        if let Some(expected) = self.expected_runtime_epoch {
+            transaction.assert_profile_runtime_epoch(expected)?;
+        }
+        Ok(())
+    }
 }
 
 pub(crate) fn enqueue_task_in_transaction(
@@ -168,7 +214,7 @@ pub(crate) fn enqueue_task_in_transaction(
         deleted,
         &mut now,
     )
-    .map_err(|_| ClientError::Sync)
+    .map_err(map_mutation_sync_error)
 }
 
 pub(crate) fn enqueue_list_in_transaction(
@@ -188,7 +234,7 @@ pub(crate) fn enqueue_list_in_transaction(
         deleted,
         &mut now,
     )
-    .map_err(|_| ClientError::Sync)
+    .map_err(map_mutation_sync_error)
 }
 
 pub(crate) fn enqueue_timer_session_in_transaction(
@@ -208,7 +254,7 @@ pub(crate) fn enqueue_timer_session_in_transaction(
         deleted,
         &mut now,
     )
-    .map_err(|_| ClientError::Sync)
+    .map_err(map_mutation_sync_error)
 }
 
 pub(crate) fn next_revision_in_transaction(
@@ -218,7 +264,7 @@ pub(crate) fn next_revision_in_transaction(
 ) -> Result<String, ClientError> {
     let mut store = TransactionalMutationStore { transaction };
     let mut now = || Ok(now_ms);
-    next_local_revision(&mut store, device_id, &mut now).map_err(|_| ClientError::Sync)
+    next_local_revision(&mut store, device_id, &mut now).map_err(map_mutation_sync_error)
 }
 
 pub(crate) fn enqueue_template_in_transaction(
@@ -238,7 +284,7 @@ pub(crate) fn enqueue_template_in_transaction(
         deleted,
         &mut now,
     )
-    .map_err(|_| ClientError::Sync)
+    .map_err(map_mutation_sync_error)
 }
 
 pub(crate) fn enqueue_task_series_in_transaction(
@@ -258,7 +304,23 @@ pub(crate) fn enqueue_task_series_in_transaction(
         deleted,
         &mut now,
     )
-    .map_err(|_| ClientError::Sync)
+    .map_err(map_mutation_sync_error)
+}
+
+fn mutation_storage_error(error: StorageError) -> String {
+    if error.is_database_busy() {
+        "database busy".to_string()
+    } else {
+        error.to_string()
+    }
+}
+
+fn map_mutation_sync_error(error: String) -> ClientError {
+    if error == "database busy" {
+        ClientError::DatabaseBusy
+    } else {
+        ClientError::Sync
+    }
 }
 
 struct TransactionalMutationStore<'transaction, 'connection> {
@@ -273,19 +335,19 @@ impl LocalMutationSyncStore for TransactionalMutationStore<'_, '_> {
     ) -> Result<bool, String> {
         self.transaction
             .has_outbox_head(collection.as_str(), record_id)
-            .map_err(|error| error.to_string())
+            .map_err(mutation_storage_error)
     }
 
     fn get_setting(&mut self, key: &str) -> Result<Option<String>, String> {
         self.transaction
             .get_setting(key)
-            .map_err(|error| error.to_string())
+            .map_err(mutation_storage_error)
     }
 
     fn set_setting(&mut self, key: &str, value: &str, updated_at: i64) -> Result<(), String> {
         self.transaction
             .set_setting(key, value, updated_at)
-            .map_err(|error| error.to_string())
+            .map_err(mutation_storage_error)
     }
 
     fn put_outbox_head(&mut self, entry: NewLocalSyncOutboxEntry) -> Result<(), String> {
@@ -307,7 +369,7 @@ impl LocalMutationSyncStore for TransactionalMutationStore<'_, '_> {
                 created_at: entry.created_at,
             })
             .map(|_| ())
-            .map_err(|error| error.to_string())
+            .map_err(mutation_storage_error)
     }
 
     fn get_record_state(
@@ -318,7 +380,7 @@ impl LocalMutationSyncStore for TransactionalMutationStore<'_, '_> {
         self.transaction
             .get_record_state(collection.as_str(), record_id)
             .map(|state| state.map(storage_record_to_local))
-            .map_err(|error| error.to_string())
+            .map_err(mutation_storage_error)
     }
 
     fn put_record_state(
@@ -332,7 +394,7 @@ impl LocalMutationSyncStore for TransactionalMutationStore<'_, '_> {
             .put_record_state(local_record_to_storage(
                 collection, record_id, state, updated_at,
             ))
-            .map_err(|error| error.to_string())
+            .map_err(mutation_storage_error)
     }
 }
 
@@ -397,6 +459,18 @@ mod tests {
 
     const DB_KEY: [u8; 32] = [0x83; 32];
     const BASE_MS: i64 = 1_799_000_000_000;
+
+    #[test]
+    fn mutation_sync_boundary_preserves_database_busy() {
+        assert!(matches!(
+            map_mutation_sync_error("database busy".to_string()),
+            ClientError::DatabaseBusy
+        ));
+        assert!(matches!(
+            map_mutation_sync_error("sync failed".to_string()),
+            ClientError::Sync
+        ));
+    }
 
     struct Fixture {
         _temp_dir: TempDir,

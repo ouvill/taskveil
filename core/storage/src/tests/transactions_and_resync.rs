@@ -394,9 +394,9 @@ fn full_resync_preserves_valid_never_synced_list_and_task_in_dependency_order() 
     task.list_id = list.id;
     task.parent_task_id = None;
     let mut local_crypto =
-        SqliteLocalCryptoRepository::new(open_encrypted(file.path(), &KEY).unwrap());
+        OwnedSqliteWriteTx::begin(open_encrypted(file.path(), &KEY).unwrap()).unwrap();
     local_crypto
-        .bind_tenant_root(
+        .bind_tenant_roots(
             LocalProfileBinding {
                 tenant_id,
                 user_id: Uuid::now_v7(),
@@ -404,9 +404,10 @@ fn full_resync_preserves_valid_never_synced_list_and_task_in_dependency_order() 
                 bound_at: 1,
                 updated_at: 1,
             },
-            &local_tenant_root_bundle(tenant_id, 1),
+            &[local_tenant_root_bundle(tenant_id, 1)],
         )
         .unwrap();
+    local_crypto.commit().unwrap();
     let mut connection = open_encrypted(file.path(), &KEY).unwrap();
     let mut transaction = SqliteWriteTx::begin(&mut connection).unwrap();
     transaction.insert_list(list.clone()).unwrap();
@@ -472,9 +473,9 @@ fn full_resync_preserves_never_synced_task_under_remote_current_list() {
     let mut task = sample_task();
     task.list_id = list.id;
     task.parent_task_id = None;
-    let mut crypto = SqliteLocalCryptoRepository::new(open_encrypted(file.path(), &KEY).unwrap());
+    let mut crypto = OwnedSqliteWriteTx::begin(open_encrypted(file.path(), &KEY).unwrap()).unwrap();
     crypto
-        .bind_tenant_root(
+        .bind_tenant_roots(
             LocalProfileBinding {
                 tenant_id,
                 user_id: Uuid::now_v7(),
@@ -482,9 +483,10 @@ fn full_resync_preserves_never_synced_task_under_remote_current_list() {
                 bound_at: 1,
                 updated_at: 1,
             },
-            &local_tenant_root_bundle(tenant_id, 1),
+            &[local_tenant_root_bundle(tenant_id, 1)],
         )
         .unwrap();
+    crypto.commit().unwrap();
     let mut connection = open_encrypted(file.path(), &KEY).unwrap();
     let mut transaction = SqliteWriteTx::begin(&mut connection).unwrap();
     transaction.insert_list(list.clone()).unwrap();

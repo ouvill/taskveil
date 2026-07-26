@@ -51,6 +51,7 @@ impl SqliteMutationService {
     ) -> Result<List, ClientError> {
         let mut connection = open_encrypted(&self.db_path, &self.db_key)?;
         let mut transaction = SqliteWriteTx::begin(&mut connection)?;
+        self.assert_runtime_epoch(&transaction)?;
         let mut lists = transaction.list_lists_including_archived()?;
         lists.sort_by(|a, b| (a.sort_order.as_str(), a.id).cmp(&(b.sort_order.as_str(), b.id)));
         let rank = match fractional_index_after(lists.last().map(|list| list.sort_order.as_str())) {
@@ -92,6 +93,7 @@ impl SqliteMutationService {
         }
         let mut connection = open_encrypted(&self.db_path, &self.db_key)?;
         let mut transaction = SqliteWriteTx::begin(&mut connection)?;
+        self.assert_runtime_epoch(&transaction)?;
         let target = transaction.get_task(input.task_id)?;
         require_tenant_key(sync)?;
         let mut scope = transaction
@@ -151,6 +153,7 @@ impl SqliteMutationService {
     ) -> Result<Task, ClientError> {
         let mut connection = open_encrypted(&self.db_path, &self.db_key)?;
         let mut transaction = SqliteWriteTx::begin(&mut connection)?;
+        self.assert_runtime_epoch(&transaction)?;
         let list_id = transaction.get_list(input.list_id)?.id;
         require_tenant_key(sync)?;
         let mut tasks = transaction.list_active_tasks_by_list(list_id)?;
@@ -238,6 +241,7 @@ impl SqliteMutationService {
     ) -> Result<Task, ClientError> {
         let mut connection = open_encrypted(&self.db_path, &self.db_key)?;
         let mut transaction = SqliteWriteTx::begin(&mut connection)?;
+        self.assert_runtime_epoch(&transaction)?;
         let before = transaction.get_task(input.task_id)?;
         require_tenant_key(sync)?;
         let updated = transition_task(
@@ -269,6 +273,7 @@ impl SqliteMutationService {
     ) -> Result<Task, ClientError> {
         let mut connection = open_encrypted(&self.db_path, &self.db_key)?;
         let mut transaction = SqliteWriteTx::begin(&mut connection)?;
+        self.assert_runtime_epoch(&transaction)?;
         let task = transaction.undo_task_operation(undo_id, now_ms)?;
         require_tenant_key(sync)?;
         enqueue_task_in_transaction(&mut transaction, sync, &task, false, now_ms)?;
@@ -326,6 +331,7 @@ impl SqliteMutationService {
     ) -> Result<List, ClientError> {
         let mut connection = open_encrypted(&self.db_path, &self.db_key)?;
         let mut transaction = SqliteWriteTx::begin(&mut connection)?;
+        self.assert_runtime_epoch(&transaction)?;
         let before = transaction.get_list(list_id)?;
         require_tenant_key(sync)?;
         let updated = mutation(before.clone())?;

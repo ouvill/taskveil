@@ -11,12 +11,16 @@ use taskveil_sync::{
     StableCursor, SyncCollection,
 };
 
-pub(super) fn storage_resync_to_local(progress: FullResyncProgress) -> LocalFullResyncProgress {
+pub(super) fn storage_resync_to_local(
+    progress: FullResyncProgress,
+    awaiting_base_ack: bool,
+) -> LocalFullResyncProgress {
     LocalFullResyncProgress {
         generation_id: progress.generation_id,
         continuity_generation: progress.continuity_generation,
         phase: match progress.phase {
             FullResyncPhase::Base => LocalFullResyncPhase::Base,
+            FullResyncPhase::Delta if awaiting_base_ack => LocalFullResyncPhase::BaseAwaitingAck,
             FullResyncPhase::Delta => LocalFullResyncPhase::Delta,
             FullResyncPhase::Sweep => LocalFullResyncPhase::Sweep,
         },

@@ -32,9 +32,10 @@ pub use engine::{
 pub use enqueue::{
     enqueue_backfill, enqueue_list_sync, enqueue_rotation_backfill, enqueue_task_series_sync,
     enqueue_task_sync, enqueue_template_sync, enqueue_timer_session_sync, next_local_revision,
-    BackfillRecords, BackfillSummary, LocalListAlias, LocalMutationSyncStore, LocalSyncAtomicStore,
-    LocalSyncOutboxEntry, LocalSyncQuarantineEntry, LocalSyncRecordState, LocalSyncSemanticState,
-    LocalSyncStore, LocalSyncWriteTransaction, NewLocalSyncOutboxEntry, PullFailureReason,
+    rebind_local_device, BackfillRecords, BackfillSummary, DeviceRebindSummary, LocalListAlias,
+    LocalMutationSyncStore, LocalSyncAtomicStore, LocalSyncOutboxEntry, LocalSyncQuarantineEntry,
+    LocalSyncRecordState, LocalSyncSemanticState, LocalSyncStore, LocalSyncWriteTransaction,
+    NewLocalSyncOutboxEntry, PullFailureReason,
 };
 pub use envelope::{
     decrypt_plaintext, encrypt_plaintext, parse_envelope_header, EnvelopeError, EnvelopeHeader,
@@ -54,6 +55,7 @@ pub use key_manifest::{
 pub use keys::{
     tenant_root_dek, tenant_root_dek_for_generation, LocalSyncKeys,
     KEY_ROTATION_PENDING_SETTING_KEY, LISTS_COLLECTION, SYNC_CURSOR_NAME,
+    SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY, SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY,
     SYNC_LOCAL_HLC_SETTING_KEY, SYNC_UPGRADE_REQUIRED_SETTING_KEY, TASKS_COLLECTION,
     TASK_SERIES_COLLECTION, TEMPLATES_COLLECTION, TIMER_SESSIONS_COLLECTION,
 };

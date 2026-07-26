@@ -4,13 +4,15 @@ use std::collections::{HashMap, HashSet};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use reqwest::StatusCode;
+use serde::Deserialize;
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
     protocol::{
-        self, BaseScanResponse, ClosureProof, ContinuityAckRequest, ContinuityAckResponse,
-        PullResponse, PushRequest, SyncCollection, SyncRecordState as WireRecordState,
+        self, BaseScanRequest, BaseScanResponse, ClosureProof, CompleteBaseRequest,
+        CompleteBaseResponse, ContinuityAckRequest, ContinuityAckResponse, PullResponse,
+        PushRequest, SyncCollection, SyncRecordState as WireRecordState,
         SYNC_PROTOCOL_VERSION_HEADER,
     },
     Hlc, SecretString,
@@ -28,6 +30,10 @@ pub enum SyncEngineError {
     Http(#[from] reqwest::Error),
     #[error("server rejected sync request: {0}")]
     Server(StatusCode),
+    #[error("HLC is temporarily ahead of the server clock")]
+    ClockSkewRetryable,
+    #[error("durable full resync chain must be restarted")]
+    ResyncRestartRequired,
     #[error("a Pro entitlement is required")]
     EntitlementRequired,
     #[error("invalid sync request")]
@@ -102,6 +108,7 @@ pub struct PreflightResult {
 pub struct FullResyncStart {
     pub base_seq: i64,
     pub generation: i64,
+    pub page_token: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +122,8 @@ pub struct BasePage {
     pub records: Vec<PullRecord>,
     pub next_cursor: Option<StableCursor>,
     pub has_more: bool,
+    pub next_page_token: Option<String>,
+    pub completion_token: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -286,7 +295,7 @@ impl SyncEngine {
             .send()
             .await?;
         if !response.status().is_success() {
-            return Err(sync_response_error(response.status()));
+            return Err(push_response_error(response).await);
         }
         let response = response.json::<protocol::PushResponse>().await?;
         validate_push_response(&ops, response)
@@ -310,24 +319,41 @@ impl SyncEngine {
             return Err(sync_response_error(response.status()));
         }
         let response = response.json::<protocol::ResyncStartResponse>().await?;
-        if response.base_seq < 0 || response.generation <= 0 {
+        if response.base_seq < 0 || response.generation <= 0 || response.page_token.is_empty() {
             return Err(SyncEngineError::InvalidPullResponse);
         }
         Ok(FullResyncStart {
             base_seq: response.base_seq,
             generation: response.generation,
+            page_token: response.page_token,
         })
     }
 
     pub async fn scan_base_page(
         &self,
-        generation: i64,
+        page_token: &str,
         cursor: Option<&StableCursor>,
         limit: i64,
     ) -> Result<BasePage, SyncEngineError> {
-        let mut request = self
-            .http
-            .get(format!(
+        if page_token.is_empty() {
+            return Err(SyncEngineError::InvalidRequest);
+        }
+        let request = self.build_base_scan_request(page_token, limit)?;
+        let response = self.http.execute(request).await?;
+        if !response.status().is_success() {
+            return Err(resync_response_error(response.status()));
+        }
+        let response = response.json::<BaseScanResponse>().await?;
+        validate_base_response(cursor, response)
+    }
+
+    fn build_base_scan_request(
+        &self,
+        page_token: &str,
+        limit: i64,
+    ) -> Result<reqwest::Request, SyncEngineError> {
+        self.http
+            .post(format!(
                 "{}/v2/tenants/{}/resync/base",
                 self.base_url, self.tenant_id
             ))
@@ -336,19 +362,45 @@ impl SyncEngine {
                 SYNC_PROTOCOL_VERSION_HEADER,
                 protocol::SYNC_PROTOCOL_VERSION.to_string(),
             )
-            .query(&[("generation", generation), ("limit", limit)]);
-        if let Some(cursor) = cursor {
-            request = request.query(&[
-                ("after_collection", cursor.collection.as_str().to_string()),
-                ("after_record_id", cursor.record_id.to_string()),
-            ]);
+            .json(&BaseScanRequest {
+                page_token: page_token.to_string(),
+                limit: Some(limit),
+            })
+            .build()
+            .map_err(SyncEngineError::from)
+    }
+
+    pub async fn complete_resync_base(
+        &self,
+        completion_token: &str,
+    ) -> Result<(), SyncEngineError> {
+        if completion_token.is_empty() {
+            return Err(SyncEngineError::InvalidRequest);
         }
-        let response = request.send().await?;
+        let response = self
+            .http
+            .post(format!(
+                "{}/v2/tenants/{}/resync/base/complete",
+                self.base_url, self.tenant_id
+            ))
+            .bearer_auth(self.session_token.expose())
+            .header(
+                SYNC_PROTOCOL_VERSION_HEADER,
+                protocol::SYNC_PROTOCOL_VERSION.to_string(),
+            )
+            .json(&CompleteBaseRequest {
+                completion_token: completion_token.to_string(),
+            })
+            .send()
+            .await?;
         if !response.status().is_success() {
-            return Err(sync_response_error(response.status()));
+            return Err(resync_response_error(response.status()));
         }
-        let response = response.json::<BaseScanResponse>().await?;
-        validate_base_response(cursor, response)
+        let response = response.json::<CompleteBaseResponse>().await?;
+        if !response.base_complete {
+            return Err(SyncEngineError::InvalidPullResponse);
+        }
+        Ok(())
     }
 
     pub async fn pull_page(&self, since: i64, limit: i64) -> Result<DeltaPage, SyncEngineError> {
@@ -417,6 +469,37 @@ fn sync_response_error(status: StatusCode) -> SyncEngineError {
     }
 }
 
+#[derive(Deserialize)]
+struct SyncProblem {
+    code: Option<String>,
+}
+
+async fn push_response_error(response: reqwest::Response) -> SyncEngineError {
+    let status = response.status();
+    let code = response
+        .json::<SyncProblem>()
+        .await
+        .ok()
+        .and_then(|problem| problem.code);
+    classify_push_response_error(status, code.as_deref())
+}
+
+fn classify_push_response_error(status: StatusCode, code: Option<&str>) -> SyncEngineError {
+    if status == StatusCode::CONFLICT && code == Some(protocol::SYNC_CLOCK_SKEW_RETRYABLE_CODE) {
+        SyncEngineError::ClockSkewRetryable
+    } else {
+        sync_response_error(status)
+    }
+}
+
+fn resync_response_error(status: StatusCode) -> SyncEngineError {
+    if status == StatusCode::CONFLICT {
+        SyncEngineError::ResyncRestartRequired
+    } else {
+        sync_response_error(status)
+    }
+}
+
 fn normalize_base_url(mut value: String) -> Result<String, SyncEngineError> {
     value = value.trim().to_string();
     if value.is_empty() {
@@ -429,11 +512,11 @@ fn validate_push_ops(ops: &[PushOp]) -> Result<(), SyncEngineError> {
     let mut op_ids = HashSet::with_capacity(ops.len());
     for op in ops {
         if !op_ids.insert(op.op_id)
-            || Hlc::decode(&op.revision_hlc).is_err()
+            || Hlc::decode_observable(&op.revision_hlc).is_err()
             || op
                 .base_revision_hlc
                 .as_deref()
-                .is_some_and(|base| Hlc::decode(base).is_err())
+                .is_some_and(|base| Hlc::decode_observable(base).is_err())
             || !valid_state_for_revision(&op.revision_hlc, &op.state)
         {
             return Err(SyncEngineError::InvalidRequest);
@@ -443,14 +526,15 @@ fn validate_push_ops(ops: &[PushOp]) -> Result<(), SyncEngineError> {
 }
 
 fn valid_state_for_revision(revision_hlc: &str, state: &EncryptedSyncState) -> bool {
-    let Ok(revision) = Hlc::decode(revision_hlc) else {
+    let Ok(revision) = Hlc::decode_observable(revision_hlc) else {
         return false;
     };
     let (semantic_hlc, shape_is_valid) = match state {
         EncryptedSyncState::Live { mutation_hlc, blob } => (mutation_hlc, !blob.is_empty()),
         EncryptedSyncState::Tombstone { delete_hlc } => (delete_hlc, true),
     };
-    shape_is_valid && Hlc::decode(semantic_hlc).is_ok_and(|semantic| revision >= semantic)
+    shape_is_valid
+        && Hlc::decode_observable(semantic_hlc).is_ok_and(|semantic| revision >= semantic)
 }
 
 fn to_wire_push_op(op: &PushOp) -> protocol::PushOp {
@@ -613,6 +697,18 @@ fn validate_base_response(
             .as_ref()
             .map(|cursor| (cursor.collection, cursor.record_id))
         || (response.has_more && records.is_empty())
+        || (response.has_more
+            && (response
+                .next_page_token
+                .as_deref()
+                .is_none_or(str::is_empty)
+                || response.completion_token.is_some()))
+        || (!response.has_more
+            && (response.next_page_token.is_some()
+                || response
+                    .completion_token
+                    .as_deref()
+                    .is_none_or(str::is_empty)))
     {
         return Err(SyncEngineError::InvalidPullResponse);
     }
@@ -620,6 +716,8 @@ fn validate_base_response(
         records,
         next_cursor,
         has_more: response.has_more,
+        next_page_token: response.next_page_token,
+        completion_token: response.completion_token,
     })
 }
 
@@ -628,7 +726,7 @@ fn stable_key(cursor: &StableCursor) -> (&'static str, Uuid) {
 }
 
 fn decode_record(record: protocol::SyncRecord) -> Result<PullRecord, SyncEngineError> {
-    if record.seq <= 0 || Hlc::decode(&record.revision_hlc).is_err() {
+    if record.seq <= 0 || Hlc::decode_observable(&record.revision_hlc).is_err() {
         return Err(SyncEngineError::InvalidPullResponse);
     }
     let state = match record.state {
@@ -671,6 +769,47 @@ mod tests {
         }
         .encode()
         .unwrap()
+    }
+
+    #[test]
+    fn invalid_base_page_does_not_prevent_retrying_the_same_page_token_position() {
+        let record_id = Uuid::now_v7();
+        let poisoned = BaseScanResponse {
+            records: vec![protocol::SyncRecord {
+                record_id,
+                collection: SyncCollection::Tasks,
+                seq: 1,
+                revision_hlc: "poisoned-hlc".to_string(),
+                state: WireRecordState::Tombstone {
+                    delete_hlc: "poisoned-hlc".to_string(),
+                },
+            }],
+            next_cursor: Some(protocol::StableRecordCursor {
+                collection: SyncCollection::Tasks,
+                record_id,
+            }),
+            has_more: false,
+            next_page_token: None,
+            completion_token: Some("completion".to_string()),
+        };
+        assert!(matches!(
+            validate_base_response(None, poisoned),
+            Err(SyncEngineError::InvalidPullResponse)
+        ));
+
+        let retried = validate_base_response(
+            None,
+            BaseScanResponse {
+                records: Vec::new(),
+                next_cursor: None,
+                has_more: false,
+                next_page_token: None,
+                completion_token: Some("completion".to_string()),
+            },
+        )
+        .unwrap();
+        assert!(retried.records.is_empty());
+        assert_eq!(retried.completion_token.as_deref(), Some("completion"));
     }
 
     fn push_op(op_id: Uuid, record_id: Uuid) -> PushOp {
@@ -719,6 +858,60 @@ mod tests {
         assert!(matches!(
             sync_response_error(StatusCode::PAYMENT_REQUIRED),
             SyncEngineError::EntitlementRequired
+        ));
+    }
+
+    #[test]
+    fn base_scan_uses_post_body_and_never_places_page_token_in_url() {
+        let tenant_id = Uuid::now_v7();
+        let embedded_device_id = Uuid::now_v7();
+        let page_token = format!("opaque.{tenant_id}.{embedded_device_id}");
+        let engine =
+            SyncEngine::new("https://sync.example.com", tenant_id, "bearer-secret").unwrap();
+
+        let request = engine.build_base_scan_request(&page_token, 100).unwrap();
+
+        assert_eq!(request.method(), reqwest::Method::POST);
+        assert!(request.url().query().is_none());
+        assert!(!request.url().as_str().contains(&page_token));
+        assert!(!request
+            .url()
+            .as_str()
+            .contains(&embedded_device_id.to_string()));
+        let body: BaseScanRequest =
+            serde_json::from_slice(request.body().unwrap().as_bytes().unwrap()).unwrap();
+        assert_eq!(body.page_token, page_token);
+        assert_eq!(body.limit, Some(100));
+    }
+
+    #[test]
+    fn maps_only_stable_clock_skew_problem_code_to_typed_retryable_error() {
+        assert!(matches!(
+            classify_push_response_error(StatusCode::CONFLICT, Some("sync_clock_skew_retryable")),
+            SyncEngineError::ClockSkewRetryable
+        ));
+        assert!(matches!(
+            classify_push_response_error(StatusCode::CONFLICT, Some("other_conflict")),
+            SyncEngineError::Server(StatusCode::CONFLICT)
+        ));
+        assert!(matches!(
+            classify_push_response_error(
+                StatusCode::BAD_REQUEST,
+                Some("sync_clock_skew_retryable")
+            ),
+            SyncEngineError::Server(StatusCode::BAD_REQUEST)
+        ));
+    }
+
+    #[test]
+    fn resync_conflict_requires_a_bounded_local_restart() {
+        assert!(matches!(
+            resync_response_error(StatusCode::CONFLICT),
+            SyncEngineError::ResyncRestartRequired
+        ));
+        assert!(matches!(
+            resync_response_error(StatusCode::UNAUTHORIZED),
+            SyncEngineError::Server(StatusCode::UNAUTHORIZED)
         ));
     }
 
@@ -878,6 +1071,74 @@ mod tests {
             validate_pull_response(0, response),
             Err(SyncEngineError::InvalidPullResponse)
         ));
+    }
+
+    #[test]
+    fn pull_rejects_counter_without_observation_headroom_before_returning_page() {
+        for counter in [u32::MAX - 1, u32::MAX] {
+            let response = PullResponse {
+                records: vec![
+                    protocol::SyncRecord {
+                        record_id: Uuid::now_v7(),
+                        collection: SyncCollection::Tasks,
+                        seq: 1,
+                        revision_hlc: clock("honest", 1),
+                        state: WireRecordState::Tombstone {
+                            delete_hlc: clock("honest", 1),
+                        },
+                    },
+                    protocol::SyncRecord {
+                        record_id: Uuid::now_v7(),
+                        collection: SyncCollection::Tasks,
+                        seq: 2,
+                        revision_hlc: clock("attacker", counter),
+                        state: WireRecordState::Tombstone {
+                            delete_hlc: clock("attacker", counter),
+                        },
+                    },
+                ],
+                next_since: 2,
+                has_more: false,
+                high_water: 2,
+                closure_proof: None,
+            };
+
+            assert!(matches!(
+                validate_pull_response(0, response.clone()),
+                Err(SyncEngineError::InvalidPullResponse)
+            ));
+            // The same poisoned page stays fail-closed on retry. Since validation never
+            // returns a DeltaPage, callers cannot advance the cursor or apply the honest
+            // record that preceded the poison record.
+            assert!(matches!(
+                validate_pull_response(0, response),
+                Err(SyncEngineError::InvalidPullResponse)
+            ));
+        }
+    }
+
+    #[test]
+    fn pull_accepts_last_counter_with_observation_and_local_tick_headroom() {
+        let counter = u32::MAX - 2;
+        let response = PullResponse {
+            records: vec![protocol::SyncRecord {
+                record_id: Uuid::now_v7(),
+                collection: SyncCollection::Tasks,
+                seq: 1,
+                revision_hlc: clock("remote", counter),
+                state: WireRecordState::Tombstone {
+                    delete_hlc: clock("remote", counter),
+                },
+            }],
+            next_since: 1,
+            has_more: false,
+            high_water: 1,
+            closure_proof: None,
+        };
+
+        let page = validate_pull_response(0, response).unwrap();
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.records[0].revision_hlc, clock("remote", counter));
     }
 
     #[test]

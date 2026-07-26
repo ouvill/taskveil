@@ -98,6 +98,10 @@ impl SyncStateRepository for SqliteSyncStateRepository {
         list_outbox_heads_on(&self.connection, limit)
     }
 
+    fn list_all_outbox_heads(&self, limit: usize) -> Result<Vec<SyncOutboxEntry>, StorageError> {
+        list_all_outbox_heads_on(&self.connection, limit)
+    }
+
     fn has_outbox_head(&self, collection: &str, record_id: Uuid) -> Result<bool, StorageError> {
         has_outbox_head_on(&self.connection, collection, record_id)
     }
@@ -518,6 +522,26 @@ pub(super) fn list_outbox_heads_on(
              SELECT 1 FROM sync_quarantine AS quarantine
              WHERE quarantine.record_id = outbox.record_id
          )
+         ORDER BY CASE collection WHEN 'lists' THEN 0 ELSE 1 END ASC,
+                  created_at ASC, record_id ASC
+         LIMIT ?1",
+    )?;
+    let entries = statement
+        .query_map([limit], row_to_sync_outbox_entry)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    entries.into_iter().collect()
+}
+
+pub(super) fn list_all_outbox_heads_on(
+    connection: &Connection,
+    limit: usize,
+) -> Result<Vec<SyncOutboxEntry>, StorageError> {
+    let limit = i64::try_from(limit)
+        .map_err(|_| StorageError::IncompatibleSchema("outbox limit exceeded i64".to_string()))?;
+    let mut statement = connection.prepare(
+        "SELECT op_id, record_id, collection, base_revision_hlc,
+                revision_hlc, state_kind, semantic_hlc, blob, created_at
+         FROM sync_outbox
          ORDER BY CASE collection WHEN 'lists' THEN 0 ELSE 1 END ASC,
                   created_at ASC, record_id ASC
          LIMIT ?1",

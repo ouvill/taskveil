@@ -8,6 +8,8 @@ use crate::account::AccountKeyMaterial;
 
 pub const SYNC_CURSOR_NAME: &str = "main";
 pub const SYNC_LOCAL_HLC_SETTING_KEY: &str = "sync_local_hlc";
+pub const SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY: &str = "sync_full_resync_page_token";
+pub const SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY: &str = "sync_full_resync_completion_token";
 pub const SYNC_UPGRADE_REQUIRED_SETTING_KEY: &str = "sync_upgrade_required_v2";
 pub const KEY_ROTATION_PENDING_SETTING_KEY: &str = "key_rotation_pending_generation";
 pub const TASKS_COLLECTION: &str = "tasks";

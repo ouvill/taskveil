@@ -152,6 +152,96 @@ jobs:
             target
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
 
+  rust-profile-coordination:
+    name: Profile coordination (${{ matrix.platform }})
+    needs: changes
+    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Linux
+            os: ubuntu-24.04
+          - platform: macOS
+            os: macos-26
+          - platform: Windows
+            os: windows-2025
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: 1.97.0
+
+      - name: Restore profile coordination build cache
+        id: profile-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-profile-rust-1.97.0-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-profile-rust-1.97.0-
+
+      - name: Prepare owner-only Windows test profiles
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $secureTemp = Join-Path $env:RUNNER_TEMP "taskveil-secure-temp"
+          New-Item -ItemType Directory -Path $secureTemp -Force | Out-Null
+          $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+          & icacls.exe $secureTemp /setowner $currentUser
+          if ($LASTEXITCODE -ne 0) { throw "failed to set secure temp owner" }
+          & icacls.exe $secureTemp /inheritance:r
+          if ($LASTEXITCODE -ne 0) { throw "failed to remove inherited temp ACLs" }
+          & icacls.exe $secureTemp /remove:g "*S-1-5-32-545"
+          if ($LASTEXITCODE -ne 0) { throw "failed to remove built-in Users grants" }
+          & icacls.exe $secureTemp /grant:r "${currentUser}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F"
+          if ($LASTEXITCODE -ne 0) { throw "failed to grant secure temp ACLs" }
+          $aclProbe = Join-Path $secureTemp "taskveil-acl-probe"
+          New-Item -ItemType Directory -Path $aclProbe -Force | Out-Null
+          Write-Host "Profile fixture owner: $((Get-Acl $aclProbe).Owner)"
+          & icacls.exe $aclProbe
+          if ($LASTEXITCODE -ne 0) { throw "failed to inspect inherited profile ACLs" }
+          Remove-Item -LiteralPath $aclProbe
+          "TMP=$secureTemp" >> $env:GITHUB_ENV
+          "TEMP=$secureTemp" >> $env:GITHUB_ENV
+
+      - name: Full client test suite
+        run: cargo test -p taskveil-client -- --nocapture
+
+      - name: Explicit real-process coordination acceptance tests
+        run: |
+          cargo test -p taskveil-client canonical_path_aliases_share_the_same_process_lock -- --nocapture
+          cargo test -p taskveil-client different_profiles_do_not_contend_across_real_processes -- --nocapture
+          cargo test -p taskveil-client real_process_sync_lease_allows_concurrent_local_mutation -- --nocapture
+          cargo test -p taskveil-client real_child_expiry_takeover_fences_requests_and_commits_without_sleep -- --nocapture
+          cargo test -p taskveil-client real_child_stale -- --nocapture
+          cargo test -p taskveil-client post_open_profile_root -- --nocapture
+
+      - name: Explicit inherited DACL acceptance test
+        if: runner.os == 'Windows'
+        run: |
+          cargo test -p taskveil-client windows_profile_acl_rejects_inherit_only_untrusted_write_access -- --nocapture
+          cargo test -p taskveil-client windows_existing_lockfiles_reject_explicit_untrusted_write_access -- --nocapture
+          cargo test -p taskveil-client windows_existing_database_rejects_explicit_untrusted_write_access -- --nocapture
+          cargo test -p taskveil-client windows_junction_alias_shares_the_same_real_process_lock -- --nocapture
+
+      - name: Save profile coordination build cache
+        if: always() && steps.profile-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.profile-cache.outputs.cache-primary-key }}
+
   sqlx-metadata:
     name: SQLx metadata freshness
     needs: changes

@@ -7,6 +7,7 @@ use thiserror::Error;
 use crate::{
     billing::{BillingConfigurationError, BillingEnvironment, BillingService},
     realtime::{RealtimeConfigError, RealtimeGateway},
+    resync_token::{ResyncTokenConfigError, ResyncTokenKeyring},
 };
 
 const DATABASE_URL: &str = "DATABASE_URL";
@@ -21,6 +22,7 @@ pub struct RuntimeConfig {
     pub billing: BillingService,
     pub realtime: RealtimeGateway,
     pub auth_issuer: String,
+    pub resync_tokens: ResyncTokenKeyring,
 }
 
 #[derive(Debug, Error)]
@@ -31,6 +33,8 @@ pub enum RuntimeConfigError {
     Billing(#[from] BillingConfigurationError),
     #[error("invalid realtime configuration: {0}")]
     Realtime(#[from] RealtimeConfigError),
+    #[error("invalid resync token configuration: {0}")]
+    ResyncToken(#[from] ResyncTokenConfigError),
     #[error("authorization server issuer is invalid")]
     InvalidAuthIssuer,
     #[error("runtime secret extension request failed")]
@@ -101,11 +105,13 @@ impl RuntimeConfig {
         validate_auth_issuer(&auth_issuer)?;
         let billing = BillingService::from_values(environment, lookup)?;
         let realtime = RealtimeGateway::from_string_values(lookup)?;
+        let resync_tokens = ResyncTokenKeyring::from_string_values(lookup)?;
         Ok(Self {
             database_url,
             billing,
             realtime,
             auth_issuer,
+            resync_tokens,
         })
     }
 }
@@ -164,6 +170,8 @@ mod tests {
         r#"{
             "DATABASE_URL":"postgres://runtime:redacted@example.invalid/taskveil",
             "TASKVEIL_AUTH_ISSUER":"https://api.staging.taskveil.example",
+            "TASKVEIL_RESYNC_TOKEN_KEY_CURRENT_ID":"resync-2026-07",
+            "TASKVEIL_RESYNC_TOKEN_KEY_CURRENT":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
             "REVENUECAT_SANDBOX_PROJECT_ID":"sandbox-project",
             "REVENUECAT_SANDBOX_APP_ID":"sandbox-app",
             "REVENUECAT_SANDBOX_SECRET_KEY":"sandbox-secret",
@@ -176,6 +184,8 @@ mod tests {
         r#"{
             "DATABASE_URL":"postgres://runtime:redacted@example.invalid/taskveil",
             "TASKVEIL_AUTH_ISSUER":"https://api.taskveil.example",
+            "TASKVEIL_RESYNC_TOKEN_KEY_CURRENT_ID":"resync-2026-07",
+            "TASKVEIL_RESYNC_TOKEN_KEY_CURRENT":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
             "REVENUECAT_PRODUCTION_PROJECT_ID":"production-project",
             "REVENUECAT_PRODUCTION_APP_ID":"production-app",
             "REVENUECAT_PRODUCTION_SECRET_KEY":"production-secret",

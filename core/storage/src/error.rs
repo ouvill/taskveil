@@ -73,6 +73,16 @@ pub enum StorageError {
     },
     #[error("local crypto cache contains entries for a different tenant")]
     LocalCryptoCacheTenantMismatch,
+    #[error("local profile runtime epoch changed: expected {expected}, found {actual}")]
+    ProfileRuntimeEpochChanged { expected: i64, actual: i64 },
+    #[error("local profile runtime epoch or fencing token overflowed")]
+    ProfileCoordinationOverflow,
+    #[error("local profile coordination clock moved backwards")]
+    ProfileCoordinationClockRollback,
+    #[error("another sync run owns the local profile lease")]
+    SyncLeaseBusy,
+    #[error("the local profile sync lease was lost")]
+    SyncLeaseLost,
     #[error(
         "failed to migrate database schema to version {target_version} ({migration}): {source}"
     )]
@@ -84,4 +94,41 @@ pub enum StorageError {
     },
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+}
+
+impl StorageError {
+    pub fn is_database_busy(&self) -> bool {
+        let error = match self {
+            Self::Sqlite(error) => error,
+            Self::MigrationFailed { source, .. } => source,
+            _ => return false,
+        };
+        matches!(
+            error,
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error {
+                    code: rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked,
+                    ..
+                },
+                _
+            )
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sqlite_busy_and_locked_errors_are_classified_for_client_mapping() {
+        for code in [rusqlite::ffi::SQLITE_BUSY, rusqlite::ffi::SQLITE_LOCKED] {
+            let error = StorageError::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                None,
+            ));
+            assert!(error.is_database_busy());
+        }
+        assert!(!StorageError::NotFound(Uuid::now_v7()).is_database_busy());
+    }
 }

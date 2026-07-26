@@ -67,7 +67,7 @@ TaskveilのサーバーはE2EEデータの中身を解釈せず、暗号blobと�
 5. OPAQUE登録APIを2往復で実装する。中間状態は `expires_at` 付きephemeral tableへ保存し、finish/consume時に同一トランザクション内で削除する。期限切れ・再利用は失敗させる。
 6. OPAQUEログインAPIを2往復で実装する。`opaque-ke 3.0.0` とtask-01のCipherSuite/bytes往復の知見を使い、誤パスワード、期限切れ、state再利用をテストする。`exportKey` はクライアントだけが得る秘密値であり、サーバーへ保存・ログ出力しない。
 7. OPAQUE完了時にセッショントークンを発行する。平文トークンはレスポンスで一度だけ返し、DBにはハッシュ、有効期限、user/device帰属を保存する。push/pullでは `Authorization: Bearer ...` を必須にし、リクエストごとにsession/device revoked/tenant所属を検証する。
-8. push APIを実装する。bodyは§6.4のops配列 `{record_id, collection, hlc, deleted, blob}` とし、blobは64KB上限、ops件数は明示的な上限を持つ。`core/sync::Hlc::decode` と未来5分判定を利用する。
+8. push APIを実装する。bodyは§6.4のops配列 `{record_id, collection, hlc, deleted, blob}` とし、blobは64KB上限、ops件数は明示的な上限を持つ。`core/sync::Hlc::decode` とstrictな未来5分未満判定を利用する。
 9. push採用時は1トランザクション内で `tenant_seq` 行を `UPDATE ... RETURNING` してseq採番し、既存行がある場合は旧行を `sync_records_history` へ退避してからupsertする。`incoming.hlc > stored.hlc` のみ採用し、低いHLCはsuperseded、同一HLCかつ同一blobは冪等no-op、同一HLCかつ異なるblobはプロトコル違反として拒否する。
 10. pull APIを実装する。`GET /v1/tenants/{tenant_id}/pull?since={seq}&limit={n}` は `{records, next_since, has_more}` を返し、初回 `since=0`、limit上限、seq昇順、エコー除外なしを守る。pull成功時はdeviceの `last_pull_at` を更新する。
 11. `docs/03_技術仕様書.md` §6.4へ、再push時はクライアントが必ずHLCをtickして新しい `op.hlc` で送る、という規約を1文だけ追記する。本タスクは共通規約の「docs/03不変更」の明示例外である。
@@ -114,7 +114,7 @@ TaskveilのサーバーはE2EEデータの中身を解釈せず、暗号blobと�
 - [ ] push APIがaccepted/superseded/no-op/same-HLC-different-blob rejectを返し、採用時のseq採番は `tenant_seq` の `UPDATE ... RETURNING` を同一トランザクション内で使っている。
 - [ ] push採用による上書き時、旧 `sync_records` 行が `sync_records_history` へ退避され、author_user_idが記録される。
 - [ ] pull APIが `since`、`limit`、`next_since`、`has_more`、初回 `since=0`、seq昇順、エコー除外なしを満たす。
-- [ ] §6.6不変条件として、blob 64KB上限、push batch上限、pull limit上限、HLC未来5分超拒否、物理DELETE APIなしをテストで確認している。
+- [ ] §6.6不変条件として、blob 64KB上限、push batch上限、pull limit上限、HLC未来5分境界以上の拒否、物理DELETE APIなしをテストで確認している。
 - [ ] tenant分離、他tenantアクセス拒否、revoked deviceのpush/pull拒否を統合テストで確認している。
 - [ ] 秘密情報（パスワード、exportKey、セッショントークン平文、OPAQUE state bytes）をログ・`dbg!`・`println!` に出していないことをコードレビュー項目として完了報告に記録している。
 - [ ] `docs/03_技術仕様書.md` §6.4に再push HLC tick規約の1文が追加され、`docs/01_企画書.md` / `docs/02_機能仕様書.md` / `docs/05_設計判断記録.md` は変更されていない。
@@ -209,7 +209,7 @@ OPAQUE実装:
 
 push実装:
 
-- 上限: push batch 100 ops、blob 64KB、HLC未来許容5分。
+- 上限: push batch 100 ops、blob 64KB、HLCはserver時刻+5分未満だけを許容。
 - `core/sync::Hlc::decode` と `exceeds_future_skew` を使用する。
 - 採用条件: 既存行なし、または `incoming.hlc > stored.hlc`。
 - 採用時は同一トランザクション内で `UPDATE tenant_seq SET last_seq = last_seq + 1 ... RETURNING last_seq` を実行してseq採番する。

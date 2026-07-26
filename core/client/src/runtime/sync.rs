@@ -12,15 +12,19 @@ use super::{
 };
 use crate::{ClientError, RealtimeTicket, SqliteSyncStore, SyncStatus};
 
+const SYNC_LEASE_TTL_MS: i64 = 5 * 60 * 1_000;
+
 impl TaskveilClient {
     pub fn sync_status(&self) -> Result<SyncStatus, ClientError> {
-        let logged_in = self.has_active_sync_context();
+        let _operation = self.begin_operation()?;
+        let logged_in = self.has_active_sync_context()?;
         let state = self.sync_state()?;
         Ok(sync_status(logged_in, &state))
     }
 
     pub async fn sync_now(&self) -> Result<SyncStatus, ClientError> {
-        if !self.has_active_sync_context() {
+        let operation = self.begin_operation()?;
+        if !self.has_active_sync_context()? {
             let state = self.sync_state()?;
             return Ok(sync_status(false, &state));
         }
@@ -33,24 +37,17 @@ impl TaskveilClient {
             state.last_error = None;
         }
         let running = SyncRunningGuard { client: self };
-
-        let operation = match self.begin_operation() {
-            Ok(operation) => operation,
-            Err(error) => return Err(error),
-        };
         let result = self.run_sync_now().await;
-        drop(operation);
         let timestamp = now_ms()?;
-        let logged_in = self.has_active_sync_context();
+        let logged_in = self.has_active_sync_context()?;
         let mut state = self.sync_state()?;
-        let (status, entitlement_required) =
-            finish_sync_run(logged_in, &mut state, result, timestamp);
+        let (status, surfaced_error) = finish_sync_run(logged_in, &mut state, result, timestamp);
         drop(state);
         drop(running);
-        if entitlement_required {
-            Err(ClientError::EntitlementRequired)
-        } else {
-            Ok(status)
+        drop(operation);
+        match surfaced_error {
+            Some(error) => Err(error),
+            None => Ok(status),
         }
     }
 
@@ -60,7 +57,7 @@ impl TaskveilClient {
         let _operation = self.begin_operation()?;
         self.access_token(false).await?;
         let context = self
-            .active_sync_context()
+            .active_sync_context()?
             .ok_or(ClientError::AccountRequest)?;
         let client =
             AccountClient::new(&context.server_url).map_err(|_| ClientError::AccountRequest)?;
@@ -87,67 +84,94 @@ impl TaskveilClient {
 
     async fn run_sync_now(&self) -> Result<SyncRunSummary, ClientError> {
         self.ensure_account_runtime_restored()?;
-        self.access_token(false).await?;
-        match self.run_sync_attempt().await {
-            Err(error) if error == "unauthorized" => {
-                self.access_token(true).await?;
-                self.run_sync_attempt().await.map_err(map_sync_run_error)
+        let mut store = SqliteSyncStore::new_secret(self.db_path.clone(), self.db_key());
+        let lease_owner = taskveil_domain::Uuid::now_v7().to_string();
+        store
+            .acquire_sync_lease(&lease_owner, self.loaded_runtime_epoch(), SYNC_LEASE_TTL_MS)
+            .map_err(|error| map_sync_run_error(map_sync_lease_error(error)))?;
+        let result = async {
+            self.access_token_for_sync(false, &mut store).await?;
+            match self.run_sync_attempt(&mut store).await {
+                Err(error) if error == "unauthorized" => {
+                    self.access_token_for_sync(true, &mut store).await?;
+                    self.run_sync_attempt(&mut store)
+                        .await
+                        .map_err(map_sync_run_error)
+                }
+                result => result.map_err(map_sync_run_error),
             }
-            result => result.map_err(map_sync_run_error),
+        }
+        .await;
+        let release = store
+            .release_sync_lease()
+            .map_err(|error| map_sync_run_error(map_sync_lease_error(error)));
+        match (result, release) {
+            (Ok(summary), Ok(())) => Ok(summary),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
         }
     }
 
-    async fn run_sync_attempt(&self) -> Result<SyncRunSummary, String> {
+    async fn run_sync_attempt(
+        &self,
+        store: &mut SqliteSyncStore,
+    ) -> Result<SyncRunSummary, String> {
         let context = self
             .active_sync_context()
+            .map_err(|error| map_sync_lease_error_from_client(&error))?
             .ok_or_else(|| "sync failed".to_string())?;
-        let mut store = SqliteSyncStore::new_secret(self.db_path.clone(), self.db_key());
         let mut clock = || now_ms().map_err(|error| error.to_string());
-        let mut key_refresher = ProductionKeyRefresher { client: self };
+        let mut key_refresher = ProductionKeyRefresher {
+            client: self,
+            lease: store.active_lease().map_err(map_sync_lease_error)?,
+        };
         let mut pre_push = |store: &mut SqliteSyncStore| {
             self.run_initial_backfill_if_needed(store)
-                .map_err(|error| error.to_string())
+                .map_err(|error| map_sync_lease_error_from_client(&error))
         };
-        let mut summary = taskveil_sync::run_sync_now_with_key_refresh_and_pre_push(
-            context.clone(),
-            &mut store,
-            &mut clock,
-            &mut key_refresher,
-            &mut pre_push,
-        )
-        .await?;
-        loop {
-            let timestamp = now_ms().map_err(|_| "sync failed".to_string())?;
-            let settlement = self
-                .settle_after_sync_pull(timestamp)
-                .map_err(|_| "sync failed".to_string())?;
-            if !settlement.outbox_changed {
-                break;
-            }
-            let follow_up = taskveil_sync::run_sync_now_with_key_refresh_and_pre_push(
+        async {
+            let mut summary = taskveil_sync::run_sync_now_with_key_refresh_and_pre_push(
                 context.clone(),
-                &mut store,
+                &mut *store,
                 &mut clock,
                 &mut key_refresher,
                 &mut pre_push,
             )
             .await?;
-            add_sync_summary(&mut summary, &follow_up);
-            if !settlement.has_more {
-                break;
+            loop {
+                let timestamp = now_ms().map_err(|_| "sync failed".to_string())?;
+                let settlement = self
+                    .settle_after_sync_pull(store, timestamp)
+                    .map_err(|error| map_sync_lease_error_from_client(&error))?;
+                if !settlement.outbox_changed {
+                    break;
+                }
+                let follow_up = taskveil_sync::run_sync_now_with_key_refresh_and_pre_push(
+                    context.clone(),
+                    &mut *store,
+                    &mut clock,
+                    &mut key_refresher,
+                    &mut pre_push,
+                )
+                .await?;
+                add_sync_summary(&mut summary, &follow_up);
+                if !settlement.has_more {
+                    break;
+                }
             }
+            Ok::<_, String>(summary)
         }
-        Ok(summary)
+        .await
     }
 
     fn run_initial_backfill_if_needed(
         &self,
         store: &mut SqliteSyncStore,
     ) -> Result<(), ClientError> {
-        if self.active_sync_context().is_none()
+        if self.active_sync_context()?.is_none()
             || store
                 .get_cursor_seq(INITIAL_BACKFILL_CURSOR_NAME)
-                .map_err(|_| ClientError::SyncRun)?
+                .map_err(map_sync_run_error)?
                 .is_some()
         {
             return Ok(());
@@ -162,12 +186,12 @@ impl TaskveilClient {
         let timer_sessions =
             self.with_timer_repository(|repository| Ok(repository.list_completed()?))?;
         let context = self
-            .active_sync_context()
+            .active_sync_context()?
             .ok_or(ClientError::AccountRequest)?;
         let mut clock = || now_ms().map_err(|error| error.to_string());
         let mut transaction = store
             .begin_write_transaction()
-            .map_err(|_| ClientError::SyncRun)?;
+            .map_err(map_sync_run_error)?;
         taskveil_sync::enqueue_backfill(
             &mut transaction,
             &context.keys,
@@ -181,46 +205,61 @@ impl TaskveilClient {
             },
             &mut clock,
         )
-        .map_err(|_| ClientError::SyncRun)?;
+        .map_err(map_sync_run_error)?;
         transaction
             .set_cursor(INITIAL_BACKFILL_CURSOR_NAME, 1, now_ms()?)
-            .map_err(|_| ClientError::SyncRun)?;
-        transaction.commit().map_err(|_| ClientError::SyncRun)
+            .map_err(map_sync_run_error)?;
+        transaction.commit().map_err(map_sync_run_error)
     }
 
-    fn active_sync_context(&self) -> Option<ActiveSyncContext> {
-        self.ensure_account_runtime_restored().ok()?;
-        let account = self.account_state().ok()?;
-        let session = account
-            .session
-            .clone()?
-            .logged_in
-            .then_some(account.session.clone()?)?;
+    fn active_sync_context(&self) -> Result<Option<ActiveSyncContext>, ClientError> {
+        self.ensure_account_runtime_restored()?;
+        let account = self.account_state()?;
+        let Some(session) = account.session.clone().filter(|session| session.logged_in) else {
+            return Ok(None);
+        };
         let CryptoRuntimeState::Ready(crypto) = &account.crypto else {
-            return None;
+            return Ok(None);
         };
         let tenant_id = crypto.tenant_id();
         let device_id = crypto.device_id().to_string();
         let keys = crypto.sync_keys().clone();
         let manifest_auth_key =
-            taskveil_sync::derive_personal_manifest_auth_key(crypto.master_key()).ok()?;
+            taskveil_sync::derive_personal_manifest_auth_key(crypto.master_key())
+                .map_err(|_| ClientError::AccountBoundUnavailable)?;
         drop(account);
-        let token = self.current_access_token()?;
+        let Some(token) = self.current_access_token()? else {
+            return Ok(None);
+        };
         if token.is_empty() || !session.logged_in {
-            return None;
+            return Ok(None);
         }
-        Some(ActiveSyncContext {
+        Ok(Some(ActiveSyncContext {
             server_url: token.issuer.clone(),
             tenant_id,
             device_id,
             session_token: taskveil_sync::SecretString::new(token.to_string()),
             keys,
             manifest_auth_key,
-        })
+        }))
     }
 
-    fn has_active_sync_context(&self) -> bool {
-        self.active_sync_context().is_some()
+    fn has_active_sync_context(&self) -> Result<bool, ClientError> {
+        Ok(self.active_sync_context()?.is_some())
+    }
+}
+
+fn map_sync_lease_error(error: taskveil_storage::StorageError) -> String {
+    if error.is_database_busy() {
+        return "database busy".to_string();
+    }
+    match error {
+        taskveil_storage::StorageError::SyncLeaseBusy => "sync lease busy".to_string(),
+        taskveil_storage::StorageError::SyncLeaseLost
+        | taskveil_storage::StorageError::ProfileRuntimeEpochChanged { .. } => {
+            "sync lease lost".to_string()
+        }
+        _ => "sync failed".to_string(),
     }
 }
 
@@ -239,11 +278,28 @@ fn add_sync_summary(target: &mut SyncRunSummary, value: &SyncRunSummary) {
     target.resolved_quarantine_count += value.resolved_quarantine_count;
 }
 
-fn map_sync_run_error(error: String) -> ClientError {
+pub(super) fn map_sync_run_error(error: String) -> ClientError {
     match error.as_str() {
         "upgrade required" => ClientError::UpgradeRequired,
         "entitlement required" => ClientError::EntitlementRequired,
+        "sync lease busy" => ClientError::SyncLeaseBusy,
+        "sync lease lost" => ClientError::LeaseLost,
+        "database busy" => ClientError::DatabaseBusy,
         _ => ClientError::SyncRun,
+    }
+}
+
+fn map_sync_lease_error_from_client(error: &ClientError) -> String {
+    match error {
+        ClientError::SyncLeaseBusy => "sync lease busy".to_string(),
+        ClientError::LeaseLost
+        | ClientError::Storage(taskveil_storage::StorageError::SyncLeaseLost)
+        | ClientError::Storage(taskveil_storage::StorageError::ProfileRuntimeEpochChanged {
+            ..
+        }) => "sync lease lost".to_string(),
+        ClientError::DatabaseBusy => "database busy".to_string(),
+        ClientError::Storage(error) if error.is_database_busy() => "database busy".to_string(),
+        _ => "sync failed".to_string(),
     }
 }
 
@@ -261,6 +317,7 @@ impl Drop for SyncRunningGuard<'_> {
 
 struct ProductionKeyRefresher<'a> {
     client: &'a TaskveilClient,
+    lease: taskveil_storage::SyncLease,
 }
 
 impl SyncKeyRefresher for ProductionKeyRefresher<'_> {
@@ -268,10 +325,23 @@ impl SyncKeyRefresher for ProductionKeyRefresher<'_> {
         &'a mut self,
     ) -> Pin<Box<dyn Future<Output = Result<LocalSyncKeys, String>> + Send + 'a>> {
         Box::pin(async move {
-            self.client
-                .refresh_tenant_keys_for_sync()
+            let loaded_epoch = self.client.loaded_runtime_epoch();
+            let keys = self
+                .client
+                .refresh_tenant_keys_for_sync(self.lease.clone())
                 .await
-                .map_err(|error| error.to_string())
+                .map_err(|error| map_sync_lease_error_from_client(&error))?;
+            let durable_epoch = taskveil_storage::SqliteProfileCoordinationRepository::new(
+                taskveil_storage::open_encrypted(&self.client.db_path, &self.client.db_key())
+                    .map_err(map_sync_lease_error)?,
+            )
+            .load_runtime()
+            .map_err(map_sync_lease_error)?
+            .runtime_epoch;
+            if durable_epoch != loaded_epoch {
+                return Err("sync lease lost".to_string());
+            }
+            Ok(keys)
         })
     }
 }
@@ -303,9 +373,9 @@ fn finish_sync_run(
     state: &mut SyncRuntimeState,
     result: Result<SyncRunSummary, ClientError>,
     timestamp: i64,
-) -> (SyncStatus, bool) {
+) -> (SyncStatus, Option<ClientError>) {
     state.running = false;
-    let mut entitlement_required = false;
+    let mut surfaced_error = None;
     match result {
         Ok(summary) => {
             state.last_success_at = Some(timestamp);
@@ -319,14 +389,29 @@ fn finish_sync_run(
         Err(ClientError::EntitlementRequired) => {
             state.last_failure_at = Some(timestamp);
             state.last_error = Some("entitlement required".to_string());
-            entitlement_required = true;
+            surfaced_error = Some(ClientError::EntitlementRequired);
+        }
+        Err(ClientError::SyncLeaseBusy) => {
+            state.last_failure_at = Some(timestamp);
+            state.last_error = Some("sync lease busy".to_string());
+            surfaced_error = Some(ClientError::SyncLeaseBusy);
+        }
+        Err(ClientError::LeaseLost) => {
+            state.last_failure_at = Some(timestamp);
+            state.last_error = Some("sync lease lost".to_string());
+            surfaced_error = Some(ClientError::LeaseLost);
+        }
+        Err(ClientError::DatabaseBusy) => {
+            state.last_failure_at = Some(timestamp);
+            state.last_error = Some("database busy".to_string());
+            surfaced_error = Some(ClientError::DatabaseBusy);
         }
         Err(_) => {
             state.last_failure_at = Some(timestamp);
             state.last_error = Some("sync failed".to_string());
         }
     }
-    (sync_status(logged_in, state), entitlement_required)
+    (sync_status(logged_in, state), surfaced_error)
 }
 
 #[cfg(test)]
@@ -340,13 +425,46 @@ mod tests {
             ..SyncRuntimeState::default()
         };
 
-        let (status, entitlement_required) =
+        let (status, surfaced_error) =
             finish_sync_run(false, &mut state, Err(ClientError::AccountRequest), 42);
 
         assert!(!status.logged_in);
         assert!(!status.running);
         assert_eq!(status.last_failure_at, Some(42));
         assert_eq!(status.last_error.as_deref(), Some("sync failed"));
-        assert!(!entitlement_required);
+        assert!(surfaced_error.is_none());
+    }
+
+    #[test]
+    fn coordination_failures_remain_typed_at_the_sync_api_boundary() {
+        assert_eq!(
+            map_sync_lease_error_from_client(&ClientError::LeaseLost),
+            "sync lease lost"
+        );
+        assert_eq!(
+            map_sync_lease_error_from_client(&ClientError::DatabaseBusy),
+            "database busy"
+        );
+        assert_eq!(
+            map_sync_lease_error_from_client(&ClientError::SyncLeaseBusy),
+            "sync lease busy"
+        );
+        for expected in [
+            ClientError::SyncLeaseBusy,
+            ClientError::LeaseLost,
+            ClientError::DatabaseBusy,
+        ] {
+            let mut state = SyncRuntimeState {
+                running: true,
+                ..SyncRuntimeState::default()
+            };
+            let (_, surfaced_error) = finish_sync_run(true, &mut state, Err(expected), 42);
+            assert!(matches!(
+                surfaced_error,
+                Some(
+                    ClientError::SyncLeaseBusy | ClientError::LeaseLost | ClientError::DatabaseBusy
+                )
+            ));
+        }
     }
 }

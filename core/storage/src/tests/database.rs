@@ -261,9 +261,8 @@ fn fts5_search_supports_english_and_japanese_prefix_queries() {
 }
 
 #[test]
-fn local_crypto_cache_roundtrips_tenant_root_and_rejects_rebinding() {
+fn local_crypto_cache_roundtrips_all_generations_and_rejects_rebinding() {
     let file = NamedTempFile::new().unwrap();
-    let connection = open_encrypted(file.path(), &KEY).unwrap();
     let tenant_id = Uuid::now_v7();
     let other_tenant_id = Uuid::now_v7();
     let binding = LocalProfileBinding {
@@ -273,20 +272,73 @@ fn local_crypto_cache_roundtrips_tenant_root_and_rejects_rebinding() {
         bound_at: 10,
         updated_at: 10,
     };
-    let mut repository = SqliteLocalCryptoRepository::new(connection);
-    repository
-        .bind_tenant_root(binding.clone(), &local_tenant_root_bundle(tenant_id, 10))
-        .unwrap();
+    let first_root = local_tenant_root_bundle(tenant_id, 10);
+    let bind_all = |binding: LocalProfileBinding, roots: &[LocalTenantRootKeyBundle]| {
+        let mut transaction =
+            OwnedSqliteWriteTx::begin(open_encrypted(file.path(), &KEY).unwrap()).unwrap();
+        transaction.bind_tenant_roots(binding, roots).unwrap();
+        transaction.commit().unwrap();
+    };
+    bind_all(binding.clone(), std::slice::from_ref(&first_root));
+    assert_eq!(
+        SqliteProfileCoordinationRepository::new(open_encrypted(file.path(), &KEY).unwrap())
+            .load_runtime()
+            .unwrap()
+            .runtime_epoch,
+        2
+    );
+    bind_all(binding.clone(), std::slice::from_ref(&first_root));
+    assert_eq!(
+        SqliteProfileCoordinationRepository::new(open_encrypted(file.path(), &KEY).unwrap())
+            .load_runtime()
+            .unwrap()
+            .runtime_epoch,
+        2
+    );
 
-    assert_eq!(repository.load_binding().unwrap(), Some(binding));
+    let repository = SqliteLocalCryptoRepository::new(open_encrypted(file.path(), &KEY).unwrap());
+    assert_eq!(repository.load_binding().unwrap(), Some(binding.clone()));
     assert_eq!(
         repository.load_tenant_root(tenant_id).unwrap(),
-        Some(local_tenant_root_bundle(tenant_id, 10))
+        Some(first_root.clone())
     );
     assert!(matches!(
         repository.load_tenant_root(other_tenant_id),
         Err(StorageError::LocalProfileTenantMismatch { .. })
     ));
+
+    let mut rotated_binding = binding;
+    rotated_binding.device_id = Uuid::now_v7();
+    rotated_binding.updated_at = 11;
+    bind_all(rotated_binding.clone(), std::slice::from_ref(&first_root));
+    assert_eq!(
+        SqliteProfileCoordinationRepository::new(open_encrypted(file.path(), &KEY).unwrap())
+            .load_runtime()
+            .unwrap()
+            .runtime_epoch,
+        3
+    );
+
+    let mut rotated_root = local_tenant_root_bundle(tenant_id, 12);
+    rotated_root.generation = 2;
+    rotated_root.wrapped_tenant_root_dek[0] ^= 0xff;
+    bind_all(rotated_binding, &[first_root.clone(), rotated_root.clone()]);
+    assert_eq!(
+        SqliteProfileCoordinationRepository::new(open_encrypted(file.path(), &KEY).unwrap())
+            .load_runtime()
+            .unwrap()
+            .runtime_epoch,
+        4
+    );
+    let repository = SqliteLocalCryptoRepository::new(open_encrypted(file.path(), &KEY).unwrap());
+    assert_eq!(
+        repository.load_tenant_roots(tenant_id).unwrap(),
+        vec![first_root, rotated_root.clone()]
+    );
+    assert_eq!(
+        repository.load_tenant_root(tenant_id).unwrap(),
+        Some(rotated_root)
+    );
 }
 
 #[test]

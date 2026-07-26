@@ -75,7 +75,7 @@ resource "aws_ecr_lifecycle_policy" "server" {
 
 resource "aws_secretsmanager_secret" "runtime" {
   name                    = "${local.name}/runtime"
-  description             = "Taskveil non-owner runtime configuration; value is inserted out of band"
+  description             = "Taskveil non-owner runtime, realtime, and resync-token configuration; value is inserted out of band"
   recovery_window_in_days = 30
   tags                    = local.tags
   lifecycle {

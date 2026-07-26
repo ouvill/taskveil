@@ -164,6 +164,7 @@ fn durable_quarantine_is_idempotent_and_blocks_only_its_record_outbox() {
     let pushable = repository.list_outbox_heads(10).unwrap();
     assert_eq!(pushable.len(), 1);
     assert_eq!(pushable[0].record_id, unrelated_id);
+    assert_eq!(repository.list_all_outbox_heads(10).unwrap().len(), 2);
     assert!(repository.has_outbox_head("tasks", blocked_id).unwrap());
     assert!(repository.delete_quarantine(blocked_id).unwrap());
     assert_eq!(repository.list_outbox_heads(10).unwrap().len(), 2);
