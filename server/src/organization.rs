@@ -4,11 +4,11 @@ use taskveil_crypto::organization::{
     derive_safety_number, AccountRootPublicKeys, DeviceCertificate, HybridDekPackage,
     HybridScopeKind, SignedDeviceRevocation,
 };
-use taskveil_sync::organization::{
+use taskveil_crypto::OrganizationKeyManifest;
+use taskveil_protocol::organization::{
     OrganizationDeviceDto, OrganizationDeviceRevocationRequest, OrganizationDeviceRosterDto,
-    OrganizationInviteRequest, OrganizationKeyManifest, OrganizationMemberResponse,
-    OrganizationSafetyConfirmRequest, OrganizationSafetyResponse, RecipientPackageRequest,
-    RecipientPackageResponse,
+    OrganizationInviteRequest, OrganizationMemberResponse, OrganizationSafetyConfirmRequest,
+    OrganizationSafetyResponse, RecipientPackageRequest, RecipientPackageResponse,
 };
 use uuid::Uuid;
 

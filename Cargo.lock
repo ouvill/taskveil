@@ -3583,12 +3583,14 @@ dependencies = [
  "core-foundation-sys",
  "hex",
  "hkdf 0.12.4",
+ "hmac 0.12.1",
  "jni",
  "opaque-ke",
  "rand 0.8.6",
  "security-framework",
  "security-framework-sys",
  "sha2 0.10.9",
+ "taskveil-protocol",
  "tempfile",
  "thiserror 2.0.18",
  "uuid",
@@ -3617,6 +3619,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "taskveil-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "taskveil-server"
 version = "0.1.0"
 dependencies = [
@@ -3639,6 +3651,7 @@ dependencies = [
  "taskveil-client",
  "taskveil-crypto",
  "taskveil-domain",
+ "taskveil-protocol",
  "taskveil-storage",
  "taskveil-sync",
  "tempfile",
@@ -3674,17 +3687,15 @@ dependencies = [
  "argon2",
  "base64",
  "chrono",
- "hkdf 0.12.4",
- "hmac 0.12.1",
  "opaque-ke",
  "proptest",
  "rand 0.8.6",
  "reqwest",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "taskveil-crypto",
  "taskveil-domain",
+ "taskveil-protocol",
  "thiserror 2.0.18",
  "uuid",
  "zeroize",

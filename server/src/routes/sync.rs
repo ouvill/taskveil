@@ -16,7 +16,7 @@ use crate::{
     },
     AppError, SharedState,
 };
-use taskveil_sync::protocol::{
+use taskveil_protocol::sync::{
     BaseScanResponse, ContinuityAckRequest, ContinuityAckResponse, PullResponse, PushRequest,
     PushResponse, PushStatus, ResyncStartResponse, StableRecordCursor, SyncCollection,
     SYNC_PROTOCOL_VERSION, SYNC_PROTOCOL_VERSION_HEADER,
@@ -138,7 +138,7 @@ async fn active_key_bundle(
     State(state): State<SharedState>,
     Path(tenant_id): Path<Uuid>,
     headers: HeaderMap,
-) -> Result<Json<taskveil_sync::account::ActiveKeyBundleDto>, AppError> {
+) -> Result<Json<taskveil_protocol::account::ActiveKeyBundleDto>, AppError> {
     let token = bearer_token(&headers)?;
     let auth_context =
         billing::authenticate_sync_request(&state.pool, &state.billing, token, tenant_id).await?;
@@ -324,7 +324,7 @@ fn require_current_protocol(headers: &HeaderMap) -> Result<(), AppError> {
 mod tests {
     use super::*;
     use axum::http::{header, HeaderValue};
-    use taskveil_sync::protocol::{PushResult, SyncCollection};
+    use taskveil_protocol::sync::{PushResult, SyncCollection};
 
     #[test]
     fn bearer_scheme_is_case_insensitive_and_rejects_ambiguous_values() {

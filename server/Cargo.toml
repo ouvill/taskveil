@@ -23,7 +23,7 @@ sqlx-postgres.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 taskveil-crypto.workspace = true
-taskveil-sync.workspace = true
+taskveil-protocol.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
@@ -36,6 +36,7 @@ testcontainers-modules.workspace = true
 tempfile.workspace = true
 taskveil-client = { workspace = true, features = ["test-support"] }
 taskveil-domain.workspace = true
+taskveil-sync.workspace = true
 taskveil-storage.workspace = true
 tower.workspace = true
 zeroize.workspace = true

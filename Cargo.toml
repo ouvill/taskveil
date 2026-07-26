@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "core/domain",
     "core/crypto",
+    "core/protocol",
     "core/client",
     "core/sync",
     "core/storage",
@@ -79,6 +80,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # workspace-local crates
 taskveil-domain = { path = "core/domain" }
 taskveil-crypto = { path = "core/crypto" }
+taskveil-protocol = { path = "core/protocol" }
 taskveil-client = { path = "core/client" }
 taskveil-sync = { path = "core/sync" }
 taskveil-storage = { path = "core/storage" }

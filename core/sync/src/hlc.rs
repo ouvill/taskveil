@@ -10,9 +10,6 @@ const ENCODED_PREFIX: &str = "01";
 const BIASED_WALL_WIDTH: usize = 20;
 const COUNTER_WIDTH: usize = 10;
 const DEVICE_ID_MAX_BYTES: usize = 64;
-const DEVICE_HEX_WIDTH: usize = DEVICE_ID_MAX_BYTES * 2;
-const ENCODED_LEN: usize =
-    ENCODED_PREFIX.len() + BIASED_WALL_WIDTH + COUNTER_WIDTH + DEVICE_HEX_WIDTH;
 
 /// HLC encode/decode error.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -107,36 +104,16 @@ impl Hlc {
 
     /// [`Hlc::encode`] で生成された固定幅文字列からHLCを復元する。
     pub fn decode(encoded: &str) -> Result<Self, HlcError> {
-        if encoded.len() != ENCODED_LEN {
-            return Err(HlcError::InvalidLength);
-        }
-        if !encoded.starts_with(ENCODED_PREFIX) {
-            return Err(HlcError::UnsupportedVersion);
-        }
-
-        let wall_start = ENCODED_PREFIX.len();
-        let counter_start = wall_start + BIASED_WALL_WIDTH;
-        let device_start = counter_start + COUNTER_WIDTH;
-
-        let biased_wall = encoded[wall_start..counter_start]
-            .parse::<u64>()
-            .map_err(|_| HlcError::InvalidDigits)?;
-        let counter = encoded[counter_start..device_start]
-            .parse::<u32>()
-            .map_err(|_| HlcError::InvalidDigits)?;
-        let device_bytes = decode_hex(&encoded[device_start..])?;
-        let unpadded_len = device_bytes
-            .iter()
-            .position(|byte| *byte == 0)
-            .unwrap_or(device_bytes.len());
-        let device_id = String::from_utf8(device_bytes[..unpadded_len].to_vec())
-            .map_err(|_| HlcError::InvalidDeviceId)?;
-        validate_device_id(&device_id)?;
-
+        let wire = taskveil_protocol::WireHlc::decode(encoded).map_err(|error| match error {
+            taskveil_protocol::HlcWireError::InvalidDeviceId => HlcError::InvalidDeviceId,
+            taskveil_protocol::HlcWireError::InvalidLength => HlcError::InvalidLength,
+            taskveil_protocol::HlcWireError::UnsupportedVersion => HlcError::UnsupportedVersion,
+            taskveil_protocol::HlcWireError::InvalidDigits => HlcError::InvalidDigits,
+        })?;
         Ok(Self {
-            wall_ms: unbias_wall_ms(biased_wall),
-            counter,
-            device_id,
+            wall_ms: wire.wall_ms,
+            counter: wire.counter,
+            device_id: wire.device_id,
         })
     }
 
@@ -160,10 +137,6 @@ fn biased_wall_ms(wall_ms: i64) -> u64 {
     (wall_ms as i128 - i64::MIN as i128) as u64
 }
 
-fn unbias_wall_ms(value: u64) -> i64 {
-    (value as i128 + i64::MIN as i128) as i64
-}
-
 fn encode_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -172,29 +145,6 @@ fn encode_hex(bytes: &[u8]) -> String {
         out.push(HEX[(byte & 0x0f) as usize] as char);
     }
     out
-}
-
-fn decode_hex(encoded: &str) -> Result<Vec<u8>, HlcError> {
-    if !encoded.len().is_multiple_of(2) {
-        return Err(HlcError::InvalidDigits);
-    }
-    encoded
-        .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let high = hex_digit(pair[0])?;
-            let low = hex_digit(pair[1])?;
-            Ok((high << 4) | low)
-        })
-        .collect()
-}
-
-fn hex_digit(byte: u8) -> Result<u8, HlcError> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        _ => Err(HlcError::InvalidDigits),
-    }
 }
 
 impl PartialOrd for Hlc {

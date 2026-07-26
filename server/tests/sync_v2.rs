@@ -296,7 +296,7 @@ impl Fixture {
         }
     }
 
-    async fn push(&self, op: PushOp) -> taskveil_sync::protocol::PushResult {
+    async fn push(&self, op: PushOp) -> taskveil_protocol::sync::PushResult {
         self.close_continuity().await;
         sync::push(
             &self.pool,
@@ -350,7 +350,7 @@ impl Fixture {
             &self.pool,
             self.tenant_id,
             self.auth.clone(),
-            taskveil_sync::protocol::ContinuityAckRequest { proof },
+            taskveil_protocol::sync::ContinuityAckRequest { proof },
         )
         .await
         .unwrap();
@@ -1011,7 +1011,7 @@ async fn unsupported_preflight_durably_blocks_outbox_before_push() {
                     counter.fetch_add(1, Ordering::SeqCst);
                     axum::Json(test_capabilities(
                         tenant_id,
-                        taskveil_sync::protocol::SYNC_PROTOCOL_VERSION + 1,
+                        taskveil_protocol::sync::SYNC_PROTOCOL_VERSION + 1,
                     ))
                 }
             }),
@@ -1022,7 +1022,7 @@ async fn unsupported_preflight_durably_blocks_outbox_before_push() {
                 let counter = push_counter.clone();
                 async move {
                     counter.fetch_add(1, Ordering::SeqCst);
-                    axum::Json(taskveil_sync::protocol::PushResponse { results: vec![] })
+                    axum::Json(taskveil_protocol::sync::PushResponse { results: vec![] })
                 }
             }),
         );
@@ -1109,7 +1109,7 @@ async fn continuity_410_still_enforces_protocol_upgrade_before_resync() {
                         if query.since == 1 {
                             let mut capabilities = test_capabilities(
                                 tenant_id,
-                                taskveil_sync::protocol::SYNC_PROTOCOL_VERSION + 1,
+                                taskveil_protocol::sync::SYNC_PROTOCOL_VERSION + 1,
                             );
                             capabilities.gc_horizon_seq = 2;
                             capabilities.continuity_seq = 1;
@@ -1119,7 +1119,7 @@ async fn continuity_410_still_enforces_protocol_upgrade_before_resync() {
                         }
                         let mut capabilities = test_capabilities(
                             tenant_id,
-                            taskveil_sync::protocol::SYNC_PROTOCOL_VERSION + 1,
+                            taskveil_protocol::sync::SYNC_PROTOCOL_VERSION + 1,
                         );
                         capabilities.gc_horizon_seq = 2;
                         axum::Json(capabilities).into_response()
@@ -1133,7 +1133,7 @@ async fn continuity_410_still_enforces_protocol_upgrade_before_resync() {
                 let counter = start_counter.clone();
                 async move {
                     counter.fetch_add(1, Ordering::SeqCst);
-                    axum::Json(taskveil_sync::protocol::ResyncStartResponse {
+                    axum::Json(taskveil_protocol::sync::ResyncStartResponse {
                         base_seq: 2,
                         generation: 1,
                     })
@@ -1195,7 +1195,7 @@ async fn gc_horizon_full_resync_closes_before_local_outbox_push() {
             axum::routing::get(move || async move {
                 let mut capabilities = test_capabilities(
                     proof_tenant_id,
-                    taskveil_sync::protocol::SYNC_PROTOCOL_VERSION,
+                    taskveil_protocol::sync::SYNC_PROTOCOL_VERSION,
                 );
                 capabilities.gc_horizon_seq = 2;
                 capabilities.continuity_seq = 1;
@@ -1210,7 +1210,7 @@ async fn gc_horizon_full_resync_closes_before_local_outbox_push() {
                 let counter = start_counter.clone();
                 async move {
                     counter.fetch_add(1, Ordering::SeqCst);
-                    axum::Json(taskveil_sync::protocol::ResyncStartResponse {
+                    axum::Json(taskveil_protocol::sync::ResyncStartResponse {
                         base_seq: 2,
                         generation: 1,
                     })
@@ -1220,7 +1220,7 @@ async fn gc_horizon_full_resync_closes_before_local_outbox_push() {
         .route(
             "/v2/tenants/{tenant_id}/resync/base",
             axum::routing::get(|| async {
-                axum::Json(taskveil_sync::protocol::BaseScanResponse {
+                axum::Json(taskveil_protocol::sync::BaseScanResponse {
                     records: Vec::new(),
                     next_cursor: None,
                     has_more: false,
@@ -1233,12 +1233,12 @@ async fn gc_horizon_full_resync_closes_before_local_outbox_push() {
                 let closed = closed_for_pull.clone();
                 async move {
                     closed.store(true, Ordering::SeqCst);
-                    axum::Json(taskveil_sync::protocol::PullResponse {
+                    axum::Json(taskveil_protocol::sync::PullResponse {
                         records: Vec::new(),
                         next_since: 2,
                         has_more: false,
                         high_water: 2,
-                        closure_proof: Some(taskveil_sync::protocol::ClosureProof {
+                        closure_proof: Some(taskveil_protocol::sync::ClosureProof {
                             proof_id: Uuid::now_v7(),
                             tenant_id: proof_tenant_id,
                             device_id: proof_device_id,
@@ -1252,18 +1252,18 @@ async fn gc_horizon_full_resync_closes_before_local_outbox_push() {
         .route(
             "/v2/tenants/{tenant_id}/push",
             axum::routing::post(
-                move |axum::Json(request): axum::Json<taskveil_sync::protocol::PushRequest>| {
+                move |axum::Json(request): axum::Json<taskveil_protocol::sync::PushRequest>| {
                     let closed = closed_for_push.clone();
                     let violation = violation.clone();
                     async move {
                         if !closed.load(Ordering::SeqCst) {
                             violation.store(true, Ordering::SeqCst);
                         }
-                        axum::Json(taskveil_sync::protocol::PushResponse {
+                        axum::Json(taskveil_protocol::sync::PushResponse {
                             results: request
                                 .ops
                                 .into_iter()
-                                .map(|op| taskveil_sync::protocol::PushResult {
+                                .map(|op| taskveil_protocol::sync::PushResult {
                                     op_id: op.op_id,
                                     record_id: op.record_id,
                                     collection: op.collection,
@@ -1280,7 +1280,7 @@ async fn gc_horizon_full_resync_closes_before_local_outbox_push() {
         .route(
             "/v2/tenants/{tenant_id}/continuity/ack",
             axum::routing::post(|| async {
-                axum::Json(taskveil_sync::protocol::ContinuityAckResponse {
+                axum::Json(taskveil_protocol::sync::ContinuityAckResponse {
                     continuity_seq: 2,
                     continuity_generation: 1,
                 })
@@ -1371,19 +1371,19 @@ async fn closure_ack_failure_keeps_local_commit_and_retries_before_push() {
             axum::routing::get(move || async move {
                 axum::Json(test_capabilities(
                     tenant_id,
-                    taskveil_sync::protocol::SYNC_PROTOCOL_VERSION,
+                    taskveil_protocol::sync::SYNC_PROTOCOL_VERSION,
                 ))
             }),
         )
         .route(
             "/v2/tenants/{tenant_id}/pull",
             axum::routing::get(move || async move {
-                axum::Json(taskveil_sync::protocol::PullResponse {
+                axum::Json(taskveil_protocol::sync::PullResponse {
                     records: Vec::new(),
                     next_since: 1,
                     has_more: false,
                     high_water: 1,
-                    closure_proof: Some(taskveil_sync::protocol::ClosureProof {
+                    closure_proof: Some(taskveil_protocol::sync::ClosureProof {
                         proof_id: Uuid::now_v7(),
                         tenant_id,
                         device_id: proof_device_id,
@@ -1401,7 +1401,7 @@ async fn closure_ack_failure_keeps_local_commit_and_retries_before_push() {
                     if counter.fetch_add(1, Ordering::SeqCst) == 0 {
                         return (StatusCode::INTERNAL_SERVER_ERROR, "retry").into_response();
                     }
-                    axum::Json(taskveil_sync::protocol::ContinuityAckResponse {
+                    axum::Json(taskveil_protocol::sync::ContinuityAckResponse {
                         continuity_seq: 1,
                         continuity_generation: 0,
                     })
@@ -1412,15 +1412,15 @@ async fn closure_ack_failure_keeps_local_commit_and_retries_before_push() {
         .route(
             "/v2/tenants/{tenant_id}/push",
             axum::routing::post(
-                move |axum::Json(request): axum::Json<taskveil_sync::protocol::PushRequest>| {
+                move |axum::Json(request): axum::Json<taskveil_protocol::sync::PushRequest>| {
                     let pushed = pushed_flag.clone();
                     async move {
                         pushed.store(true, Ordering::SeqCst);
-                        axum::Json(taskveil_sync::protocol::PushResponse {
+                        axum::Json(taskveil_protocol::sync::PushResponse {
                             results: request
                                 .ops
                                 .into_iter()
-                                .map(|op| taskveil_sync::protocol::PushResult {
+                                .map(|op| taskveil_protocol::sync::PushResult {
                                     op_id: op.op_id,
                                     record_id: op.record_id,
                                     collection: op.collection,
@@ -2805,7 +2805,7 @@ async fn server_trusted_continuity_binds_proofs_and_guards_all_writes() {
         &fixture.pool,
         fixture.tenant_id,
         fixture.auth.clone(),
-        taskveil_sync::protocol::ContinuityAckRequest {
+        taskveil_protocol::sync::ContinuityAckRequest {
             proof: wrong_tenant
         },
     )
@@ -2817,7 +2817,7 @@ async fn server_trusted_continuity_binds_proofs_and_guards_all_writes() {
         &fixture.pool,
         fixture.tenant_id,
         fixture.auth.clone(),
-        taskveil_sync::protocol::ContinuityAckRequest {
+        taskveil_protocol::sync::ContinuityAckRequest {
             proof: wrong_device
         },
     )
@@ -2827,7 +2827,7 @@ async fn server_trusted_continuity_binds_proofs_and_guards_all_writes() {
         &fixture.pool,
         fixture.tenant_id,
         fixture.auth.clone(),
-        taskveil_sync::protocol::ContinuityAckRequest {
+        taskveil_protocol::sync::ContinuityAckRequest {
             proof: proof.clone(),
         },
     )
@@ -2837,7 +2837,7 @@ async fn server_trusted_continuity_binds_proofs_and_guards_all_writes() {
         &fixture.pool,
         fixture.tenant_id,
         fixture.auth.clone(),
-        taskveil_sync::protocol::ContinuityAckRequest {
+        taskveil_protocol::sync::ContinuityAckRequest {
             proof: proof.clone(),
         },
     )
@@ -2904,7 +2904,7 @@ async fn server_trusted_continuity_binds_proofs_and_guards_all_writes() {
         &fixture.pool,
         fixture.tenant_id,
         fixture.auth.clone(),
-        taskveil_sync::protocol::ContinuityAckRequest {
+        taskveil_protocol::sync::ContinuityAckRequest {
             proof: full_resync_proof.clone(),
         },
     )
@@ -2927,7 +2927,7 @@ async fn server_trusted_continuity_binds_proofs_and_guards_all_writes() {
         &fixture.pool,
         fixture.tenant_id,
         fixture.auth.clone(),
-        taskveil_sync::protocol::ContinuityAckRequest {
+        taskveil_protocol::sync::ContinuityAckRequest {
             proof: full_resync_proof,
         },
     )
@@ -3477,8 +3477,8 @@ async fn request_status(
 ) -> StatusCode {
     let mut builder = Request::builder().method(method).uri(uri);
     builder = builder.header(
-        taskveil_sync::protocol::SYNC_PROTOCOL_VERSION_HEADER,
-        taskveil_sync::protocol::SYNC_PROTOCOL_VERSION.to_string(),
+        taskveil_protocol::sync::SYNC_PROTOCOL_VERSION_HEADER,
+        taskveil_protocol::sync::SYNC_PROTOCOL_VERSION.to_string(),
     );
     if let Some(token) = token {
         builder = builder.header("authorization", format!("Bearer {token}"));
