@@ -309,6 +309,7 @@ fn sync_cursor_column(connection: &Connection, target: &str) -> Option<(String, 
 
 #[derive(Clone, Copy)]
 enum PerformanceSeedSchema {
+    Initial,
     Latest,
 }
 
@@ -319,6 +320,8 @@ struct PerformanceSeed {
     task_count: usize,
     due_task_count: usize,
     closed_task_count: usize,
+    insert_elapsed: Duration,
+    database_bytes: i64,
 }
 
 fn seed_performance_database(
@@ -326,12 +329,46 @@ fn seed_performance_database(
     key: &[u8; 32],
     schema: PerformanceSeedSchema,
 ) -> PerformanceSeed {
-    match schema {
-        PerformanceSeedSchema::Latest => {
-            let mut connection = open_encrypted(path, key).unwrap();
-            insert_performance_seed(&mut connection)
+    let mut connection = match schema {
+        PerformanceSeedSchema::Initial => {
+            let mut connection = Connection::open(path).unwrap();
+            connection.busy_timeout(LOCAL_DB_BUSY_TIMEOUT).unwrap();
+            apply_sqlcipher_key(&connection, key).unwrap();
+            ensure_schema_at_version(&mut connection, &MIGRATIONS[..1], 1).unwrap();
+            connection
         }
-    }
+        PerformanceSeedSchema::Latest => open_encrypted(path, key).unwrap(),
+    };
+    let started = std::time::Instant::now();
+    let mut seed = insert_performance_seed(&mut connection);
+    seed.insert_elapsed = started.elapsed();
+    let page_count = pragma_i64(&connection, "PRAGMA page_count");
+    let page_size = pragma_i64(&connection, "PRAGMA page_size");
+    seed.database_bytes = page_count * page_size;
+    seed
+}
+
+fn pragma_i64(connection: &Connection, pragma: &str) -> i64 {
+    connection
+        .query_row(pragma, [], |row| match row.get_ref(0)? {
+            rusqlite::types::ValueRef::Integer(value) => Ok(value),
+            rusqlite::types::ValueRef::Text(value) => std::str::from_utf8(value)
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .ok_or_else(|| {
+                    rusqlite::Error::InvalidColumnType(
+                        0,
+                        pragma.to_string(),
+                        rusqlite::types::Type::Text,
+                    )
+                }),
+            value => Err(rusqlite::Error::InvalidColumnType(
+                0,
+                pragma.to_string(),
+                value.data_type(),
+            )),
+        })
+        .unwrap()
 }
 
 fn insert_performance_seed(connection: &mut Connection) -> PerformanceSeed {
@@ -484,6 +521,8 @@ fn insert_performance_seed(connection: &mut Connection) -> PerformanceSeed {
         task_count: LIST_COUNT * TASKS_PER_LIST,
         due_task_count,
         closed_task_count,
+        insert_elapsed: Duration::ZERO,
+        database_bytes: 0,
     }
 }
 

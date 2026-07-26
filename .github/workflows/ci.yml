@@ -274,6 +274,9 @@ jobs:
         working-directory: app/rust
         run: env CARGO_TARGET_DIR=target cargo build --release
 
+      - name: Build SQLCipher 10k performance fixture seeder
+        run: cargo build -p taskveil-client --example seed_home_calendar_performance_fixture --features test-support
+
       - name: Flutter analyze
         working-directory: app
         run: flutter analyze

@@ -1,5 +1,138 @@
 use crate::*;
 
+// `INDEXED BY` is intentional: fresh databases have no planner statistics and
+// otherwise choose the generic deleted_at index. Migration v2 makes these index
+// names part of the latest-schema contract, so production and EXPLAIN use the
+// same stable plan.
+pub(crate) const LIST_HOME_QUERY: &str = "
+    WITH RECURSIVE
+    home_candidates(id) AS (
+        SELECT tasks.id
+        FROM tasks INDEXED BY idx_tasks_active_date_due_range
+        WHERE tasks.deleted_at IS NULL
+          AND tasks.status IN ('todo', 'in_progress')
+          AND tasks.due_kind = 'date'
+        UNION
+        SELECT tasks.id
+        FROM tasks INDEXED BY idx_tasks_active_datetime_due_range
+        WHERE tasks.deleted_at IS NULL
+          AND tasks.status IN ('todo', 'in_progress')
+          AND tasks.due_kind = 'datetime'
+        UNION
+        SELECT tasks.id
+        FROM tasks INDEXED BY idx_tasks_active_scheduled_range
+        WHERE tasks.deleted_at IS NULL
+          AND tasks.status IN ('todo', 'in_progress')
+          AND tasks.scheduled_at IS NOT NULL
+          AND tasks.scheduled_at >= ?1
+          AND tasks.scheduled_at < ?2
+        UNION
+        SELECT tasks.id
+        FROM tasks INDEXED BY idx_tasks_closed_completed_range
+        WHERE tasks.deleted_at IS NULL
+          AND tasks.status IN ('done', 'wont_do')
+          AND tasks.completed_at IS NOT NULL
+          AND tasks.completed_at >= ?1
+          AND tasks.completed_at < ?2
+    ),
+    home_targets(id) AS (
+        SELECT tasks.id
+        FROM home_candidates
+        INNER JOIN tasks ON tasks.id = home_candidates.id
+        INNER JOIN lists ON lists.id = tasks.list_id
+        WHERE lists.archived_at IS NULL
+    ),
+    home_scope(id) AS (
+        SELECT id FROM home_targets
+        UNION
+        SELECT child.id
+        FROM tasks child
+        INNER JOIN home_scope parent ON child.parent_task_id = parent.id
+    ),
+    home_ancestors(id) AS (
+        SELECT tasks.parent_task_id
+        FROM tasks
+        INNER JOIN home_targets ON home_targets.id = tasks.id
+        WHERE tasks.parent_task_id IS NOT NULL
+        UNION
+        SELECT tasks.parent_task_id
+        FROM tasks
+        INNER JOIN home_ancestors ancestor ON ancestor.id = tasks.id
+        WHERE tasks.parent_task_id IS NOT NULL
+    ),
+    home_display_scope(id) AS (
+        SELECT id FROM home_scope
+        UNION
+        SELECT id FROM home_ancestors
+    )
+    SELECT tasks.id, tasks.list_id, tasks.parent_task_id, tasks.title,
+           tasks.note, tasks.status, tasks.priority, tasks.due_kind, tasks.due_on,
+           tasks.due_at_ms, tasks.due_time_zone, tasks.scheduled_at,
+           tasks.estimated_minutes, tasks.sort_order, tasks.completed_at,
+           tasks.closed_reason, tasks.deleted_at, tasks.assignee, tasks.series_id,
+           tasks.series_revision, tasks.blueprint_node_key,
+           tasks.series_occurrence_at, tasks.created_at, tasks.updated_at,
+           lists.name,
+           EXISTS(SELECT 1 FROM home_targets WHERE home_targets.id = tasks.id)
+    FROM tasks
+    INNER JOIN lists ON lists.id = tasks.list_id
+    INNER JOIN home_display_scope ON home_display_scope.id = tasks.id
+    WHERE lists.archived_at IS NULL
+      AND tasks.deleted_at IS NULL
+    ORDER BY tasks.due_kind IS NULL ASC,
+             CASE tasks.due_kind WHEN 'datetime' THEN 0 WHEN 'date' THEN 1 ELSE 2 END ASC,
+             tasks.due_at_ms ASC,
+             tasks.due_on ASC,
+             tasks.sort_order ASC,
+             tasks.id ASC";
+
+pub(crate) const LIST_CALENDAR_OCCURRENCES_QUERY: &str = "
+    WITH calendar_targets(id) AS (
+        SELECT tasks.id
+        FROM tasks INDEXED BY idx_tasks_active_date_due_range
+        WHERE tasks.deleted_at IS NULL
+          AND tasks.status IN ('todo', 'in_progress')
+          AND tasks.due_kind = 'date'
+          AND tasks.due_on >= ?1
+          AND tasks.due_on < ?2
+        UNION
+        SELECT tasks.id
+        FROM tasks INDEXED BY idx_tasks_active_datetime_due_range
+        WHERE tasks.deleted_at IS NULL
+          AND tasks.status IN ('todo', 'in_progress')
+          AND tasks.due_kind = 'datetime'
+          AND tasks.due_at_ms >= ?3
+          AND tasks.due_at_ms < ?4
+        UNION
+        SELECT tasks.id
+        FROM tasks INDEXED BY idx_tasks_active_scheduled_range
+        WHERE tasks.deleted_at IS NULL
+          AND tasks.status IN ('todo', 'in_progress')
+          AND tasks.scheduled_at IS NOT NULL
+          AND tasks.scheduled_at >= ?3
+          AND tasks.scheduled_at < ?4
+        UNION
+        SELECT tasks.id
+        FROM tasks INDEXED BY idx_tasks_closed_completed_range
+        WHERE tasks.deleted_at IS NULL
+          AND tasks.status IN ('done', 'wont_do')
+          AND tasks.completed_at IS NOT NULL
+          AND tasks.completed_at >= ?3
+          AND tasks.completed_at < ?4
+    )
+    SELECT tasks.id, tasks.list_id, tasks.parent_task_id, tasks.title,
+           tasks.note, tasks.status, tasks.priority, tasks.due_kind, tasks.due_on,
+           tasks.due_at_ms, tasks.due_time_zone, tasks.scheduled_at,
+           tasks.estimated_minutes, tasks.sort_order, tasks.completed_at,
+           tasks.closed_reason, tasks.deleted_at, tasks.assignee, tasks.series_id,
+           tasks.series_revision, tasks.blueprint_node_key,
+           tasks.series_occurrence_at, tasks.created_at, tasks.updated_at,
+           lists.name, lists.archived_at
+    FROM calendar_targets
+    INNER JOIN tasks ON tasks.id = calendar_targets.id
+    INNER JOIN lists ON lists.id = tasks.list_id
+    ORDER BY tasks.sort_order ASC, tasks.id ASC";
+
 /// SQLite-backed implementation of [`TaskRepository`].
 pub struct SqliteTaskRepository {
     connection: Connection,
@@ -109,73 +242,7 @@ impl TaskRepository for SqliteTaskRepository {
         today_start_ms: i64,
         tomorrow_start_ms: i64,
     ) -> Result<Vec<HomeTask>, StorageError> {
-        let mut statement = self.connection.prepare(
-            "WITH RECURSIVE home_targets(id) AS (
-                 SELECT tasks.id
-                 FROM tasks
-                 INNER JOIN lists ON lists.id = tasks.list_id
-                 WHERE lists.archived_at IS NULL
-                   AND (
-                       (
-                           tasks.status IN ('todo', 'in_progress')
-                           AND (
-                               tasks.due_kind IS NOT NULL
-                               OR (
-                                   tasks.scheduled_at >= ?1
-                                   AND tasks.scheduled_at < ?2
-                               )
-                           )
-                       )
-                       OR (
-                           tasks.status IN ('done', 'wont_do')
-                           AND tasks.completed_at >= ?1
-                           AND tasks.completed_at < ?2
-                       )
-                   )
-             ),
-             home_scope(id) AS (
-                 SELECT id FROM home_targets
-                 UNION
-                 SELECT child.id
-                 FROM tasks child
-                 INNER JOIN home_scope parent ON child.parent_task_id = parent.id
-             ),
-             home_ancestors(id) AS (
-                 SELECT tasks.parent_task_id
-                 FROM tasks
-                 INNER JOIN home_targets ON home_targets.id = tasks.id
-                 WHERE tasks.parent_task_id IS NOT NULL
-                 UNION
-                 SELECT tasks.parent_task_id
-                 FROM tasks
-                 INNER JOIN home_ancestors ancestor ON ancestor.id = tasks.id
-                 WHERE tasks.parent_task_id IS NOT NULL
-             ),
-             home_display_scope(id) AS (
-                 SELECT id FROM home_scope
-                 UNION
-                 SELECT id FROM home_ancestors
-             )
-             SELECT tasks.id, tasks.list_id, tasks.parent_task_id, tasks.title,
-                    tasks.note, tasks.status, tasks.priority, tasks.due_kind, tasks.due_on, tasks.due_at_ms, tasks.due_time_zone,
-                    tasks.scheduled_at, tasks.estimated_minutes, tasks.sort_order,
-                    tasks.completed_at, tasks.closed_reason, tasks.deleted_at,
-                    tasks.assignee, tasks.series_id,
-                    tasks.series_revision, tasks.blueprint_node_key,
-                    tasks.series_occurrence_at, tasks.created_at, tasks.updated_at,
-                    lists.name,
-                    EXISTS(SELECT 1 FROM home_targets WHERE home_targets.id = tasks.id)
-             FROM tasks
-             INNER JOIN lists ON lists.id = tasks.list_id
-             INNER JOIN home_display_scope ON home_display_scope.id = tasks.id
-             WHERE lists.archived_at IS NULL
-             ORDER BY tasks.due_kind IS NULL ASC,
-                      CASE tasks.due_kind WHEN 'datetime' THEN 0 WHEN 'date' THEN 1 ELSE 2 END ASC,
-                      tasks.due_at_ms ASC,
-                      tasks.due_on ASC,
-                      tasks.sort_order ASC,
-                      tasks.id ASC",
-        )?;
+        let mut statement = self.connection.prepare(LIST_HOME_QUERY)?;
         let tasks = statement
             .query_map(params![today_start_ms, tomorrow_start_ms], row_to_home_task)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -187,26 +254,7 @@ impl TaskRepository for SqliteTaskRepository {
         &self,
         range: &CalendarRange,
     ) -> Result<Vec<CalendarOccurrence>, StorageError> {
-        let mut statement = self.connection.prepare(
-            "SELECT tasks.id, tasks.list_id, tasks.parent_task_id, tasks.title,
-                    tasks.note, tasks.status, tasks.priority, tasks.due_kind, tasks.due_on, tasks.due_at_ms, tasks.due_time_zone,
-                    tasks.scheduled_at, tasks.estimated_minutes, tasks.sort_order,
-                    tasks.completed_at, tasks.closed_reason, tasks.deleted_at,
-                    tasks.assignee, tasks.series_id,
-                    tasks.series_revision, tasks.blueprint_node_key,
-                    tasks.series_occurrence_at, tasks.created_at, tasks.updated_at,
-                    lists.name, lists.archived_at
-             FROM tasks
-             INNER JOIN lists ON lists.id = tasks.list_id
-             WHERE tasks.deleted_at IS NULL
-               AND (
-                    (tasks.status IN ('todo', 'in_progress') AND tasks.due_kind = 'date' AND tasks.due_on >= ?1 AND tasks.due_on < ?2)
-                    OR (tasks.status IN ('todo', 'in_progress') AND tasks.due_kind = 'datetime' AND tasks.due_at_ms >= ?3 AND tasks.due_at_ms < ?4)
-                    OR (tasks.status IN ('todo', 'in_progress') AND tasks.scheduled_at >= ?3 AND tasks.scheduled_at < ?4)
-                    OR (tasks.status IN ('done', 'wont_do') AND tasks.completed_at >= ?3 AND tasks.completed_at < ?4)
-               )
-             ORDER BY tasks.sort_order ASC, tasks.id ASC",
-        )?;
+        let mut statement = self.connection.prepare(LIST_CALENDAR_OCCURRENCES_QUERY)?;
         let rows = statement
             .query_map(
                 params![

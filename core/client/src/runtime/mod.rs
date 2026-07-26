@@ -141,6 +141,16 @@ impl TaskveilClient {
         &self.db_path
     }
 
+    /// Seeds the encrypted local profile for cross-crate performance tests.
+    ///
+    /// This method is unavailable in product builds.
+    #[cfg(feature = "test-support")]
+    pub fn seed_home_calendar_performance_fixture(&self) -> Result<usize, ClientError> {
+        let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
+        taskveil_storage::test_support::seed_home_calendar_performance_fixture(&mut connection)
+            .map_err(ClientError::from)
+    }
+
     pub fn sync_server_url(&self) -> Result<String, ClientError> {
         let stored = self.setting(SYNC_SERVER_URL_SETTING_KEY)?;
         Ok(stored
