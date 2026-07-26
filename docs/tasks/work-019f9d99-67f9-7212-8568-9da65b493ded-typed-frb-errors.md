@@ -237,21 +237,29 @@ FRB 2.12.0が提供するtyped `Result<T, E>`を使用し、新規error transpor
   登録のJSON decode / idempotent retry経路に4箇所残るcompile errorを検出した。
   JSON decodeは`ProtocolDecode`、send failureは`Transport`としてretry後も区別して
   返す根本修正を行い、メール登録の全FRB関数も`BridgeErrorDto`へ統一した。
-- 2026-07-27最終候補:
+- 2026-07-27 reminder notification統合前の候補:
   - base: `cc2521798ef937592f0a96829c70d82ba5ee940f`
   - base-only rebase前後でbranch patch-id
     `b286b0f0022d0ddd90d997bb4190ea1359370bef`と、fuzz / `Cargo.lock`を除く
     source treeが一致。
+- reminder notification reconciliation実装済み`main`
+  `585186a2707c1de4452e3ab2af62e34e28768230`へさらにrebaseし、新しい3つの
+  notification command FRB APIをすべて`BridgeErrorDto`へ統合した。`u32` limit
+  conversionもtyped `invalidInput`とし、3 APIのsignatureをcompile-time testで固定した。
+- 最終統合検証:
   - `flutter_rust_bridge_codegen generate --config-file
-    flutter_rust_bridge.yaml`: pass、生成差分なし。
+    flutter_rust_bridge.yaml`: pass。email / reminder / typed errorを含む生成物を更新し、
+    再生成がidempotentであることを確認。
   - `cargo fmt --all -- --check`,
     `cargo clippy --workspace -- -D warnings`: pass。
-  - `cargo test --workspace`: pass。client 140、crypto 54 + real Keychain 2 ignored、
+  - `cargo test --workspace`: client 140、crypto 54 + real Keychain 2 ignored、
     domain 62、server unit 53 / auth 17 / billing 9 / migrations 3 / realtime 2 /
-    RLS 1 / sync-v2 27、storage 93 + manual perf 1 ignored、sync 101、bridge 3、
-    client doc test 4を含む。
+    RLS 1 / sync-v2 27、storage 96 + manual perf 1 ignored、sync 101、bridge 4、
+    client doc test 4を含む機能 / Docker統合testはpass。連続実行時のみSQLCipher
+    10k性能testがHome 1195 ms（上限750 ms）となったため、閾値を変更せず同一testを
+    単独再実行し、Home 719 ms、Calendar 149 msでpass。
   - bridge release build、`flutter analyze`: pass。
-  - `flutter test`: 329 pass、visual QA harness 1 intentional skip。実SQLCipher
-    10k performanceはHome median 199 ms、Calendar median 99 msでpass。
+  - `flutter test`: 333 pass、visual QA harness 1 intentional skip。実SQLCipher
+    10k performanceはHome median 242 ms、Calendar median 137 msでpass。
   - Account/email typed error対象Flutter 33、boundary正例 / 4負例、
     hardcoded strings、`git diff --check`: pass。

@@ -8,17 +8,11 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'api.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `account_registration_pending_to_dto`, `account_registration_state_to_dto`, `reminder_notification_command_to_dto`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `from`
-
-Future<String> greet({required String name}) =>
-    RustLib.instance.api.crateApiGreet(name: name);
+// These functions are ignored because they are not marked as `pub`: `account_registration_pending_to_dto`, `account_registration_state_to_dto`, `invalid_input`, `new`, `reminder_notification_command_to_dto`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`
 
 Future<String> getLocalTimeZone() =>
     RustLib.instance.api.crateApiGetLocalTimeZone();
-
-Future<String> createDraftTask({required String title}) =>
-    RustLib.instance.api.crateApiCreateDraftTask(title: title);
 
 /// Initializes Taskveil core for the process using `db_dir`.
 ///
@@ -701,6 +695,75 @@ class BillingStateDto {
           updatedAt == other.updatedAt;
 }
 
+class BridgeErrorArgumentDto {
+  final BridgeErrorArgumentKeyDto key;
+  final PlatformInt64 value;
+
+  const BridgeErrorArgumentDto({required this.key, required this.value});
+
+  @override
+  int get hashCode => key.hashCode ^ value.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is BridgeErrorArgumentDto &&
+          runtimeType == other.runtimeType &&
+          key == other.key &&
+          value == other.value;
+}
+
+/// Closed localization argument keys. No free-form internal string can cross
+/// the bridge. Current errors need no arguments; this type reserves a safe,
+/// reviewable extension point for future bounded values.
+enum BridgeErrorArgumentKeyDto { limit }
+
+/// Closed, stable error codes exported to Flutter.
+///
+/// Variants are intentionally coarser than internal errors so implementation
+/// details cannot become part of the UI or telemetry contract.
+enum BridgeErrorCodeDto {
+  invalidInput,
+  notFound,
+  conflict,
+  unauthorized,
+  credentialUnavailable,
+  accountBoundUnavailable,
+  entitlementRequired,
+  upgradeRequired,
+  busy,
+  leaseLost,
+  clockSkew,
+  cryptoUnavailable,
+  storageFailure,
+  syncFailure,
+  internal,
+}
+
+class BridgeErrorDto implements FrbException {
+  final BridgeErrorCodeDto code;
+  final List<BridgeErrorArgumentDto> arguments;
+  final bool retryable;
+
+  const BridgeErrorDto({
+    required this.code,
+    required this.arguments,
+    required this.retryable,
+  });
+
+  @override
+  int get hashCode => code.hashCode ^ arguments.hashCode ^ retryable.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is BridgeErrorDto &&
+          runtimeType == other.runtimeType &&
+          code == other.code &&
+          arguments == other.arguments &&
+          retryable == other.retryable;
+}
+
 class CalendarOccurrenceDto {
   final TaskDto task;
   final String listName;
@@ -1121,7 +1184,7 @@ class SyncStatusDto {
   final bool running;
   final PlatformInt64? lastSuccessAt;
   final PlatformInt64? lastFailureAt;
-  final String? lastError;
+  final BridgeErrorDto? lastError;
   final int pushedCount;
   final int pushAckedCount;
   final int pushSupersededCount;

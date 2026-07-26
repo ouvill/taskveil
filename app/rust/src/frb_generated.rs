@@ -40,7 +40,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1516629863;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 860599650;
 
 // Section: executor
 
@@ -76,7 +76,7 @@ fn wire__crate__api__account_login_impl(
             let api_device_name = <Option<String>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
-                transform_result_sse::<_, String>(
+                transform_result_sse::<_, crate::api::BridgeErrorDto>(
                     (move || async move {
                         let output_ok = crate::api::account_login(
                             api_email,
@@ -117,7 +117,7 @@ fn wire__crate__api__account_logout_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             deserializer.end();
             move |context| async move {
-                transform_result_sse::<_, String>(
+                transform_result_sse::<_, crate::api::BridgeErrorDto>(
                     (move || async move {
                         let output_ok = crate::api::account_logout().await?;
                         Ok(output_ok)
@@ -152,7 +152,7 @@ fn wire__crate__api__account_registration_ack_recovery_key_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::account_registration_ack_recovery_key()?;
                     Ok(output_ok)
                 })())
@@ -186,7 +186,7 @@ fn wire__crate__api__account_registration_begin_impl(
             let api_server_url = <Option<String>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
-                transform_result_sse::<_, String>(
+                transform_result_sse::<_, crate::api::BridgeErrorDto>(
                     (move || async move {
                         let output_ok =
                             crate::api::account_registration_begin(api_email, api_server_url)
@@ -223,7 +223,7 @@ fn wire__crate__api__account_registration_cancel_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::account_registration_cancel()?;
                     Ok(output_ok)
                 })())
@@ -257,7 +257,7 @@ fn wire__crate__api__account_registration_complete_impl(
             let api_device_name = <Option<String>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
-                transform_result_sse::<_, String>(
+                transform_result_sse::<_, crate::api::BridgeErrorDto>(
                     (move || async move {
                         let output_ok = crate::api::account_registration_complete(
                             api_password,
@@ -296,7 +296,7 @@ fn wire__crate__api__account_registration_recovery_key_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::account_registration_recovery_key()?;
                     Ok(output_ok)
                 })())
@@ -328,7 +328,7 @@ fn wire__crate__api__account_registration_resend_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             deserializer.end();
             move |context| async move {
-                transform_result_sse::<_, String>(
+                transform_result_sse::<_, crate::api::BridgeErrorDto>(
                     (move || async move {
                         let output_ok = crate::api::account_registration_resend().await?;
                         Ok(output_ok)
@@ -363,7 +363,7 @@ fn wire__crate__api__account_registration_state_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::account_registration_state()?;
                     Ok(output_ok)
                 })())
@@ -396,7 +396,7 @@ fn wire__crate__api__account_registration_verify_otp_impl(
             let api_otp = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
-                transform_result_sse::<_, String>(
+                transform_result_sse::<_, crate::api::BridgeErrorDto>(
                     (move || async move {
                         let output_ok =
                             crate::api::account_registration_verify_otp(api_otp).await?;
@@ -434,7 +434,7 @@ fn wire__crate__api__ack_reminder_notification_command_impl(
             let api_revision = <i64>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::ack_reminder_notification_command(
                         api_reminder_id,
                         api_revision,
@@ -470,7 +470,7 @@ fn wire__crate__api__archive_list_impl(
             let api_list_id = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::archive_list(api_list_id)?;
                     Ok(output_ok)
                 })())
@@ -502,7 +502,7 @@ fn wire__crate__api__billing_bootstrap_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             deserializer.end();
             move |context| async move {
-                transform_result_sse::<_, String>(
+                transform_result_sse::<_, crate::api::BridgeErrorDto>(
                     (move || async move {
                         let output_ok = crate::api::billing_bootstrap().await?;
                         Ok(output_ok)
@@ -538,7 +538,7 @@ fn wire__crate__api__clear_task_reminders_impl(
             let api_task_id = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::clear_task_reminders(api_task_id)?;
                     Ok(output_ok)
                 })())
@@ -573,7 +573,7 @@ fn wire__crate__api__confirm_organization_safety_number_impl(
             let api_digest = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
-                transform_result_sse::<_, String>(
+                transform_result_sse::<_, crate::api::BridgeErrorDto>(
                     (move || async move {
                         let output_ok = crate::api::confirm_organization_safety_number(
                             api_tenant_id,
@@ -614,7 +614,7 @@ fn wire__crate__api__count_task_descendants_impl(
             let api_task_id = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::count_task_descendants(api_task_id)?;
                     Ok(output_ok)
                 })())
@@ -647,41 +647,8 @@ fn wire__crate__api__count_tasks_in_list_impl(
             let api_list_id = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::count_tasks_in_list(api_list_id)?;
-                    Ok(output_ok)
-                })())
-            }
-        },
-    )
-}
-fn wire__crate__api__create_draft_task_impl(
-    port_: flutter_rust_bridge::for_generated::MessagePort,
-    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
-    rust_vec_len_: i32,
-    data_len_: i32,
-) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "create_draft_task",
-            port: Some(port_),
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
-        },
-        move || {
-            let message = unsafe {
-                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
-                    ptr_,
-                    rust_vec_len_,
-                    data_len_,
-                )
-            };
-            let mut deserializer =
-                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
-            let api_title = <String>::sse_decode(&mut deserializer);
-            deserializer.end();
-            move |context| {
-                transform_result_sse::<_, ()>((move || {
-                    let output_ok = Result::<_, ()>::Ok(crate::api::create_draft_task(api_title))?;
                     Ok(output_ok)
                 })())
             }
@@ -714,7 +681,7 @@ fn wire__crate__api__create_list_impl(
             let api_sort_order = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::create_list(api_name, api_sort_order)?;
                     Ok(output_ok)
                 })())
@@ -754,7 +721,7 @@ fn wire__crate__api__create_task_impl(
             let api_estimated_minutes = <Option<i32>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::create_task(
                         api_list_id,
                         api_title,
@@ -797,7 +764,7 @@ fn wire__crate__api__create_task_reminder_impl(
             let api_remind_at = <i64>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::create_task_reminder(api_task_id, api_remind_at)?;
                     Ok(output_ok)
                 })())
@@ -834,7 +801,7 @@ fn wire__crate__api__create_task_series_from_task_impl(
             let api_time_zone = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::create_task_series_from_task(
                         api_task_id,
                         api_target_list_id,
@@ -876,7 +843,7 @@ fn wire__crate__api__create_task_series_from_template_impl(
             let api_time_zone = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::create_task_series_from_template(
                         api_template_id,
                         api_rrule,
@@ -916,7 +883,7 @@ fn wire__crate__api__create_template_impl(
             let api_nodes = <Vec<crate::api::TaskBlueprintNodeDto>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok =
                         crate::api::create_template(api_name, api_default_list_id, api_nodes)?;
                     Ok(output_ok)
@@ -950,7 +917,7 @@ fn wire__crate__api__delete_list_impl(
             let api_list_id = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::delete_list(api_list_id)?;
                     Ok(output_ok)
                 })())
@@ -983,7 +950,7 @@ fn wire__crate__api__delete_reminder_impl(
             let api_reminder_id = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::delete_reminder(api_reminder_id)?;
                     Ok(output_ok)
                 })())
@@ -1016,7 +983,7 @@ fn wire__crate__api__delete_task_impl(
             let api_task_id = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::delete_task(api_task_id)?;
                     Ok(output_ok)
                 })())
@@ -1049,7 +1016,7 @@ fn wire__crate__api__delete_task_series_impl(
             let api_series_id = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::delete_task_series(api_series_id)?;
                     Ok(output_ok)
                 })())
@@ -1082,7 +1049,7 @@ fn wire__crate__api__delete_template_impl(
             let api_template_id = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::delete_template(api_template_id)?;
                     Ok(output_ok)
                 })())
@@ -1115,7 +1082,7 @@ fn wire__crate__api__discard_active_timer_session_impl(
             let api_expected_session_id = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok =
                         crate::api::discard_active_timer_session(api_expected_session_id)?;
                     Ok(output_ok)
@@ -1149,7 +1116,7 @@ fn wire__crate__api__finish_active_timer_session_impl(
             let api_session = <crate::api::CompletedTimerSessionDto>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::finish_active_timer_session(api_session)?;
                     Ok(output_ok)
                 })())
@@ -1181,7 +1148,7 @@ fn wire__crate__api__get_account_session_state_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::get_account_session_state()?;
                     Ok(output_ok)
                 })())
@@ -1213,7 +1180,7 @@ fn wire__crate__api__get_active_timer_session_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::get_active_timer_session()?;
                     Ok(output_ok)
                 })())
@@ -1245,7 +1212,7 @@ fn wire__crate__api__get_archived_lists_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::get_archived_lists()?;
                     Ok(output_ok)
                 })())
@@ -1277,7 +1244,7 @@ fn wire__crate__api__get_cached_billing_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::get_cached_billing()?;
                     Ok(output_ok)
                 })())
@@ -1310,7 +1277,7 @@ fn wire__crate__api__get_calendar_occurrences_impl(
             let api_range = <crate::api::CalendarRangeInput>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::get_calendar_occurrences(api_range)?;
                     Ok(output_ok)
                 })())
@@ -1343,7 +1310,7 @@ fn wire__crate__api__get_completed_timer_sessions_impl(
             let api_task_id = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::get_completed_timer_sessions(api_task_id)?;
                     Ok(output_ok)
                 })())
@@ -1376,7 +1343,7 @@ fn wire__crate__api__get_frontend_setting_impl(
             let api_key = <crate::api::FrontendSettingKeyDto>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::get_frontend_setting(api_key)?;
                     Ok(output_ok)
                 })())
@@ -1410,7 +1377,7 @@ fn wire__crate__api__get_home_tasks_impl(
             let api_tomorrow_start_ms = <i64>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok =
                         crate::api::get_home_tasks(api_today_start_ms, api_tomorrow_start_ms)?;
                     Ok(output_ok)
@@ -1443,7 +1410,7 @@ fn wire__crate__api__get_latest_task_undo_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::get_latest_task_undo()?;
                     Ok(output_ok)
                 })())
@@ -1476,7 +1443,7 @@ fn wire__crate__api__get_list_reminders_impl(
             let api_list_id = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::get_list_reminders(api_list_id)?;
                     Ok(output_ok)
                 })())
@@ -1508,7 +1475,7 @@ fn wire__crate__api__get_lists_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::get_lists()?;
                     Ok(output_ok)
                 })())
@@ -1540,7 +1507,7 @@ fn wire__crate__api__get_local_time_zone_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::get_local_time_zone()?;
                     Ok(output_ok)
                 })())
@@ -1572,7 +1539,7 @@ fn wire__crate__api__get_realtime_ticket_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             deserializer.end();
             move |context| async move {
-                transform_result_sse::<_, String>(
+                transform_result_sse::<_, crate::api::BridgeErrorDto>(
                     (move || async move {
                         let output_ok = crate::api::get_realtime_ticket().await?;
                         Ok(output_ok)
@@ -1607,7 +1574,7 @@ fn wire__crate__api__get_sync_server_url_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::get_sync_server_url()?;
                     Ok(output_ok)
                 })())
@@ -1639,7 +1606,7 @@ fn wire__crate__api__get_sync_status_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::get_sync_status()?;
                     Ok(output_ok)
                 })())
@@ -1672,7 +1639,7 @@ fn wire__crate__api__get_task_reminders_impl(
             let api_task_id = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::get_task_reminders(api_task_id)?;
                     Ok(output_ok)
                 })())
@@ -1704,7 +1671,7 @@ fn wire__crate__api__get_task_series_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::get_task_series()?;
                     Ok(output_ok)
                 })())
@@ -1738,7 +1705,7 @@ fn wire__crate__api__get_task_series_streak_impl(
             let api_at_ms = <i64>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::get_task_series_streak(api_series_id, api_at_ms)?;
                     Ok(output_ok)
                 })())
@@ -1771,7 +1738,7 @@ fn wire__crate__api__get_task_subtree_reminders_impl(
             let api_task_id = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::get_task_subtree_reminders(api_task_id)?;
                     Ok(output_ok)
                 })())
@@ -1804,7 +1771,7 @@ fn wire__crate__api__get_tasks_impl(
             let api_list_id = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::get_tasks(api_list_id)?;
                     Ok(output_ok)
                 })())
@@ -1836,41 +1803,8 @@ fn wire__crate__api__get_templates_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::get_templates()?;
-                    Ok(output_ok)
-                })())
-            }
-        },
-    )
-}
-fn wire__crate__api__greet_impl(
-    port_: flutter_rust_bridge::for_generated::MessagePort,
-    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
-    rust_vec_len_: i32,
-    data_len_: i32,
-) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "greet",
-            port: Some(port_),
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
-        },
-        move || {
-            let message = unsafe {
-                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
-                    ptr_,
-                    rust_vec_len_,
-                    data_len_,
-                )
-            };
-            let mut deserializer =
-                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
-            let api_name = <String>::sse_decode(&mut deserializer);
-            deserializer.end();
-            move |context| {
-                transform_result_sse::<_, ()>((move || {
-                    let output_ok = Result::<_, ()>::Ok(crate::api::greet(api_name))?;
                     Ok(output_ok)
                 })())
             }
@@ -1903,7 +1837,7 @@ fn wire__crate__api__init_core_impl(
             let api_default_inbox_name = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::init_core(api_db_dir, api_default_inbox_name)?;
                     Ok(output_ok)
                 })())
@@ -1936,7 +1870,7 @@ fn wire__crate__api__instantiate_template_impl(
             let api_template_id = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::instantiate_template(api_template_id)?;
                     Ok(output_ok)
                 })())
@@ -1969,7 +1903,7 @@ fn wire__crate__api__list_pending_reminders_impl(
             let api_now_ms = <i64>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::list_pending_reminders(api_now_ms)?;
                     Ok(output_ok)
                 })())
@@ -2003,7 +1937,7 @@ fn wire__crate__api__list_reminder_notification_commands_impl(
             let api_limit = <u32>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok =
                         crate::api::list_reminder_notification_commands(api_now_ms, api_limit)?;
                     Ok(output_ok)
@@ -2038,7 +1972,7 @@ fn wire__crate__api__organization_safety_number_impl(
             let api_member_user_id = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
-                transform_result_sse::<_, String>(
+                transform_result_sse::<_, crate::api::BridgeErrorDto>(
                     (move || async move {
                         let output_ok = crate::api::organization_safety_number(
                             api_tenant_id,
@@ -2078,7 +2012,7 @@ fn wire__crate__api__pomodoro_target_reached_at_impl(
             let api_session = <crate::api::ActiveTimerSessionDto>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::pomodoro_target_reached_at(api_session)?;
                     Ok(output_ok)
                 })())
@@ -2111,7 +2045,7 @@ fn wire__crate__api__prepare_reminder_notification_reconciliation_impl(
             let api_now_ms = <i64>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok =
                         crate::api::prepare_reminder_notification_reconciliation(api_now_ms)?;
                     Ok(output_ok)
@@ -2144,7 +2078,7 @@ fn wire__crate__api__refresh_billing_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             deserializer.end();
             move |context| async move {
-                transform_result_sse::<_, String>(
+                transform_result_sse::<_, crate::api::BridgeErrorDto>(
                     (move || async move {
                         let output_ok = crate::api::refresh_billing().await?;
                         Ok(output_ok)
@@ -2181,7 +2115,7 @@ fn wire__crate__api__rename_list_impl(
             let api_name = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::rename_list(api_list_id, api_name)?;
                     Ok(output_ok)
                 })())
@@ -2216,7 +2150,7 @@ fn wire__crate__api__reorder_task_impl(
             let api_next_task_id = <Option<String>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::reorder_task(
                         api_task_id,
                         api_previous_task_id,
@@ -2254,7 +2188,7 @@ fn wire__crate__api__replace_template_blueprint_impl(
             let api_task_id = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok =
                         crate::api::replace_template_blueprint(api_template_id, api_task_id)?;
                     Ok(output_ok)
@@ -2287,7 +2221,7 @@ fn wire__crate__api__rotate_device_key_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::rotate_device_key()?;
                     Ok(output_ok)
                 })())
@@ -2322,7 +2256,7 @@ fn wire__crate__api__save_task_as_template_impl(
             let api_default_list_id = <Option<String>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::save_task_as_template(
                         api_task_id,
                         api_name,
@@ -2359,7 +2293,7 @@ fn wire__crate__api__search_tasks_impl(
             let api_query = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::search_tasks(api_query)?;
                     Ok(output_ok)
                 })())
@@ -2393,7 +2327,7 @@ fn wire__crate__api__set_frontend_setting_impl(
             let api_value = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::set_frontend_setting(api_key, api_value)?;
                     Ok(output_ok)
                 })())
@@ -2426,7 +2360,7 @@ fn wire__crate__api__set_sync_server_url_impl(
             let api_server_url = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::set_sync_server_url(api_server_url)?;
                     Ok(output_ok)
                 })())
@@ -2461,7 +2395,7 @@ fn wire__crate__api__set_task_status_impl(
             let api_closed_reason = <Option<String>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok =
                         crate::api::set_task_status(api_task_id, api_status, api_closed_reason)?;
                     Ok(output_ok)
@@ -2495,7 +2429,7 @@ fn wire__crate__api__settle_due_series_impl(
             let api_at_ms = <i64>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::settle_due_series(api_at_ms)?;
                     Ok(output_ok)
                 })())
@@ -2529,7 +2463,7 @@ fn wire__crate__api__snooze_reminder_impl(
             let api_snoozed_until = <i64>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok =
                         crate::api::snooze_reminder(api_reminder_id, api_snoozed_until)?;
                     Ok(output_ok)
@@ -2563,7 +2497,7 @@ fn wire__crate__api__start_active_timer_session_impl(
             let api_session = <crate::api::ActiveTimerSessionDto>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::start_active_timer_session(api_session)?;
                     Ok(output_ok)
                 })())
@@ -2595,7 +2529,7 @@ fn wire__crate__api__sync_now_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             deserializer.end();
             move |context| async move {
-                transform_result_sse::<_, String>(
+                transform_result_sse::<_, crate::api::BridgeErrorDto>(
                     (move || async move {
                         let output_ok = crate::api::sync_now().await?;
                         Ok(output_ok)
@@ -2630,7 +2564,7 @@ fn wire__crate__api__sync_now_outcome_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             deserializer.end();
             move |context| async move {
-                transform_result_sse::<_, String>(
+                transform_result_sse::<_, crate::api::BridgeErrorDto>(
                     (move || async move {
                         let output_ok = crate::api::sync_now_outcome().await?;
                         Ok(output_ok)
@@ -2666,7 +2600,7 @@ fn wire__crate__api__unarchive_list_impl(
             let api_list_id = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::unarchive_list(api_list_id)?;
                     Ok(output_ok)
                 })())
@@ -2699,7 +2633,7 @@ fn wire__crate__api__undo_task_operation_impl(
             let api_undo_id = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::undo_task_operation(api_undo_id)?;
                     Ok(output_ok)
                 })())
@@ -2732,7 +2666,7 @@ fn wire__crate__api__update_active_timer_session_impl(
             let api_session = <crate::api::ActiveTimerSessionDto>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::update_active_timer_session(api_session)?;
                     Ok(output_ok)
                 })())
@@ -2766,7 +2700,7 @@ fn wire__crate__api__update_reminder_impl(
             let api_remind_at = <i64>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::update_reminder(api_reminder_id, api_remind_at)?;
                     Ok(output_ok)
                 })())
@@ -2805,7 +2739,7 @@ fn wire__crate__api__update_task_impl(
             let api_estimated_minutes = <Option<i32>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::update_task(
                         api_task_id,
                         api_title,
@@ -2852,7 +2786,7 @@ fn wire__crate__api__update_task_series_impl(
             let api_enabled = <bool>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::update_task_series(
                         api_series_id,
                         api_target_list_id,
@@ -2896,7 +2830,7 @@ fn wire__crate__api__update_template_impl(
             let api_nodes = <Vec<crate::api::TaskBlueprintNodeDto>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::update_template(
                         api_template_id,
                         api_name,
@@ -2936,7 +2870,7 @@ fn wire__crate__api__validate_recurrence_rule_impl(
             let api_time_zone = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::api::BridgeErrorDto>((move || {
                     let output_ok = crate::api::validate_recurrence_rule(
                         api_rrule,
                         api_starts_at,
@@ -3112,6 +3046,68 @@ impl SseDecode for bool {
     }
 }
 
+impl SseDecode for crate::api::BridgeErrorArgumentDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_key = <crate::api::BridgeErrorArgumentKeyDto>::sse_decode(deserializer);
+        let mut var_value = <i64>::sse_decode(deserializer);
+        return crate::api::BridgeErrorArgumentDto {
+            key: var_key,
+            value: var_value,
+        };
+    }
+}
+
+impl SseDecode for crate::api::BridgeErrorArgumentKeyDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::BridgeErrorArgumentKeyDto::Limit,
+            _ => unreachable!("Invalid variant for BridgeErrorArgumentKeyDto: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::BridgeErrorCodeDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::BridgeErrorCodeDto::InvalidInput,
+            1 => crate::api::BridgeErrorCodeDto::NotFound,
+            2 => crate::api::BridgeErrorCodeDto::Conflict,
+            3 => crate::api::BridgeErrorCodeDto::Unauthorized,
+            4 => crate::api::BridgeErrorCodeDto::CredentialUnavailable,
+            5 => crate::api::BridgeErrorCodeDto::AccountBoundUnavailable,
+            6 => crate::api::BridgeErrorCodeDto::EntitlementRequired,
+            7 => crate::api::BridgeErrorCodeDto::UpgradeRequired,
+            8 => crate::api::BridgeErrorCodeDto::Busy,
+            9 => crate::api::BridgeErrorCodeDto::LeaseLost,
+            10 => crate::api::BridgeErrorCodeDto::ClockSkew,
+            11 => crate::api::BridgeErrorCodeDto::CryptoUnavailable,
+            12 => crate::api::BridgeErrorCodeDto::StorageFailure,
+            13 => crate::api::BridgeErrorCodeDto::SyncFailure,
+            14 => crate::api::BridgeErrorCodeDto::Internal,
+            _ => unreachable!("Invalid variant for BridgeErrorCodeDto: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::BridgeErrorDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_code = <crate::api::BridgeErrorCodeDto>::sse_decode(deserializer);
+        let mut var_arguments = <Vec<crate::api::BridgeErrorArgumentDto>>::sse_decode(deserializer);
+        let mut var_retryable = <bool>::sse_decode(deserializer);
+        return crate::api::BridgeErrorDto {
+            code: var_code,
+            arguments: var_arguments,
+            retryable: var_retryable,
+        };
+    }
+}
+
 impl SseDecode for crate::api::CalendarOccurrenceDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -3244,6 +3240,20 @@ impl SseDecode for i64 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         deserializer.cursor.read_i64::<NativeEndian>().unwrap()
+    }
+}
+
+impl SseDecode for Vec<crate::api::BridgeErrorArgumentDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::BridgeErrorArgumentDto>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
     }
 }
 
@@ -3481,6 +3491,17 @@ impl SseDecode for Option<bool> {
     }
 }
 
+impl SseDecode for Option<crate::api::BridgeErrorDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::BridgeErrorDto>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for Option<i32> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -3683,7 +3704,7 @@ impl SseDecode for crate::api::SyncStatusDto {
         let mut var_running = <bool>::sse_decode(deserializer);
         let mut var_lastSuccessAt = <Option<i64>>::sse_decode(deserializer);
         let mut var_lastFailureAt = <Option<i64>>::sse_decode(deserializer);
-        let mut var_lastError = <Option<String>>::sse_decode(deserializer);
+        let mut var_lastError = <Option<crate::api::BridgeErrorDto>>::sse_decode(deserializer);
         let mut var_pushedCount = <i32>::sse_decode(deserializer);
         let mut var_pushAckedCount = <i32>::sse_decode(deserializer);
         let mut var_pushSupersededCount = <i32>::sse_decode(deserializer);
@@ -4023,93 +4044,91 @@ fn pde_ffi_dispatcher_primary_impl(
         ),
         16 => wire__crate__api__count_task_descendants_impl(port, ptr, rust_vec_len, data_len),
         17 => wire__crate__api__count_tasks_in_list_impl(port, ptr, rust_vec_len, data_len),
-        18 => wire__crate__api__create_draft_task_impl(port, ptr, rust_vec_len, data_len),
-        19 => wire__crate__api__create_list_impl(port, ptr, rust_vec_len, data_len),
-        20 => wire__crate__api__create_task_impl(port, ptr, rust_vec_len, data_len),
-        21 => wire__crate__api__create_task_reminder_impl(port, ptr, rust_vec_len, data_len),
-        22 => {
+        18 => wire__crate__api__create_list_impl(port, ptr, rust_vec_len, data_len),
+        19 => wire__crate__api__create_task_impl(port, ptr, rust_vec_len, data_len),
+        20 => wire__crate__api__create_task_reminder_impl(port, ptr, rust_vec_len, data_len),
+        21 => {
             wire__crate__api__create_task_series_from_task_impl(port, ptr, rust_vec_len, data_len)
         }
-        23 => wire__crate__api__create_task_series_from_template_impl(
+        22 => wire__crate__api__create_task_series_from_template_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        24 => wire__crate__api__create_template_impl(port, ptr, rust_vec_len, data_len),
-        25 => wire__crate__api__delete_list_impl(port, ptr, rust_vec_len, data_len),
-        26 => wire__crate__api__delete_reminder_impl(port, ptr, rust_vec_len, data_len),
-        27 => wire__crate__api__delete_task_impl(port, ptr, rust_vec_len, data_len),
-        28 => wire__crate__api__delete_task_series_impl(port, ptr, rust_vec_len, data_len),
-        29 => wire__crate__api__delete_template_impl(port, ptr, rust_vec_len, data_len),
-        30 => {
+        23 => wire__crate__api__create_template_impl(port, ptr, rust_vec_len, data_len),
+        24 => wire__crate__api__delete_list_impl(port, ptr, rust_vec_len, data_len),
+        25 => wire__crate__api__delete_reminder_impl(port, ptr, rust_vec_len, data_len),
+        26 => wire__crate__api__delete_task_impl(port, ptr, rust_vec_len, data_len),
+        27 => wire__crate__api__delete_task_series_impl(port, ptr, rust_vec_len, data_len),
+        28 => wire__crate__api__delete_template_impl(port, ptr, rust_vec_len, data_len),
+        29 => {
             wire__crate__api__discard_active_timer_session_impl(port, ptr, rust_vec_len, data_len)
         }
-        31 => wire__crate__api__finish_active_timer_session_impl(port, ptr, rust_vec_len, data_len),
-        32 => wire__crate__api__get_account_session_state_impl(port, ptr, rust_vec_len, data_len),
-        33 => wire__crate__api__get_active_timer_session_impl(port, ptr, rust_vec_len, data_len),
-        34 => wire__crate__api__get_archived_lists_impl(port, ptr, rust_vec_len, data_len),
-        35 => wire__crate__api__get_cached_billing_impl(port, ptr, rust_vec_len, data_len),
-        36 => wire__crate__api__get_calendar_occurrences_impl(port, ptr, rust_vec_len, data_len),
-        37 => {
+        30 => wire__crate__api__finish_active_timer_session_impl(port, ptr, rust_vec_len, data_len),
+        31 => wire__crate__api__get_account_session_state_impl(port, ptr, rust_vec_len, data_len),
+        32 => wire__crate__api__get_active_timer_session_impl(port, ptr, rust_vec_len, data_len),
+        33 => wire__crate__api__get_archived_lists_impl(port, ptr, rust_vec_len, data_len),
+        34 => wire__crate__api__get_cached_billing_impl(port, ptr, rust_vec_len, data_len),
+        35 => wire__crate__api__get_calendar_occurrences_impl(port, ptr, rust_vec_len, data_len),
+        36 => {
             wire__crate__api__get_completed_timer_sessions_impl(port, ptr, rust_vec_len, data_len)
         }
-        38 => wire__crate__api__get_frontend_setting_impl(port, ptr, rust_vec_len, data_len),
-        39 => wire__crate__api__get_home_tasks_impl(port, ptr, rust_vec_len, data_len),
-        40 => wire__crate__api__get_latest_task_undo_impl(port, ptr, rust_vec_len, data_len),
-        41 => wire__crate__api__get_list_reminders_impl(port, ptr, rust_vec_len, data_len),
-        42 => wire__crate__api__get_lists_impl(port, ptr, rust_vec_len, data_len),
-        43 => wire__crate__api__get_local_time_zone_impl(port, ptr, rust_vec_len, data_len),
-        44 => wire__crate__api__get_realtime_ticket_impl(port, ptr, rust_vec_len, data_len),
-        45 => wire__crate__api__get_sync_server_url_impl(port, ptr, rust_vec_len, data_len),
-        46 => wire__crate__api__get_sync_status_impl(port, ptr, rust_vec_len, data_len),
-        47 => wire__crate__api__get_task_reminders_impl(port, ptr, rust_vec_len, data_len),
-        48 => wire__crate__api__get_task_series_impl(port, ptr, rust_vec_len, data_len),
-        49 => wire__crate__api__get_task_series_streak_impl(port, ptr, rust_vec_len, data_len),
-        50 => wire__crate__api__get_task_subtree_reminders_impl(port, ptr, rust_vec_len, data_len),
-        51 => wire__crate__api__get_tasks_impl(port, ptr, rust_vec_len, data_len),
-        52 => wire__crate__api__get_templates_impl(port, ptr, rust_vec_len, data_len),
-        53 => wire__crate__api__greet_impl(port, ptr, rust_vec_len, data_len),
-        54 => wire__crate__api__init_core_impl(port, ptr, rust_vec_len, data_len),
-        55 => wire__crate__api__instantiate_template_impl(port, ptr, rust_vec_len, data_len),
-        56 => wire__crate__api__list_pending_reminders_impl(port, ptr, rust_vec_len, data_len),
-        57 => wire__crate__api__list_reminder_notification_commands_impl(
+        37 => wire__crate__api__get_frontend_setting_impl(port, ptr, rust_vec_len, data_len),
+        38 => wire__crate__api__get_home_tasks_impl(port, ptr, rust_vec_len, data_len),
+        39 => wire__crate__api__get_latest_task_undo_impl(port, ptr, rust_vec_len, data_len),
+        40 => wire__crate__api__get_list_reminders_impl(port, ptr, rust_vec_len, data_len),
+        41 => wire__crate__api__get_lists_impl(port, ptr, rust_vec_len, data_len),
+        42 => wire__crate__api__get_local_time_zone_impl(port, ptr, rust_vec_len, data_len),
+        43 => wire__crate__api__get_realtime_ticket_impl(port, ptr, rust_vec_len, data_len),
+        44 => wire__crate__api__get_sync_server_url_impl(port, ptr, rust_vec_len, data_len),
+        45 => wire__crate__api__get_sync_status_impl(port, ptr, rust_vec_len, data_len),
+        46 => wire__crate__api__get_task_reminders_impl(port, ptr, rust_vec_len, data_len),
+        47 => wire__crate__api__get_task_series_impl(port, ptr, rust_vec_len, data_len),
+        48 => wire__crate__api__get_task_series_streak_impl(port, ptr, rust_vec_len, data_len),
+        49 => wire__crate__api__get_task_subtree_reminders_impl(port, ptr, rust_vec_len, data_len),
+        50 => wire__crate__api__get_tasks_impl(port, ptr, rust_vec_len, data_len),
+        51 => wire__crate__api__get_templates_impl(port, ptr, rust_vec_len, data_len),
+        52 => wire__crate__api__init_core_impl(port, ptr, rust_vec_len, data_len),
+        53 => wire__crate__api__instantiate_template_impl(port, ptr, rust_vec_len, data_len),
+        54 => wire__crate__api__list_pending_reminders_impl(port, ptr, rust_vec_len, data_len),
+        55 => wire__crate__api__list_reminder_notification_commands_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        58 => wire__crate__api__organization_safety_number_impl(port, ptr, rust_vec_len, data_len),
-        59 => wire__crate__api__pomodoro_target_reached_at_impl(port, ptr, rust_vec_len, data_len),
-        60 => wire__crate__api__prepare_reminder_notification_reconciliation_impl(
+        56 => wire__crate__api__organization_safety_number_impl(port, ptr, rust_vec_len, data_len),
+        57 => wire__crate__api__pomodoro_target_reached_at_impl(port, ptr, rust_vec_len, data_len),
+        58 => wire__crate__api__prepare_reminder_notification_reconciliation_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        61 => wire__crate__api__refresh_billing_impl(port, ptr, rust_vec_len, data_len),
-        62 => wire__crate__api__rename_list_impl(port, ptr, rust_vec_len, data_len),
-        63 => wire__crate__api__reorder_task_impl(port, ptr, rust_vec_len, data_len),
-        64 => wire__crate__api__replace_template_blueprint_impl(port, ptr, rust_vec_len, data_len),
-        65 => wire__crate__api__rotate_device_key_impl(port, ptr, rust_vec_len, data_len),
-        66 => wire__crate__api__save_task_as_template_impl(port, ptr, rust_vec_len, data_len),
-        67 => wire__crate__api__search_tasks_impl(port, ptr, rust_vec_len, data_len),
-        68 => wire__crate__api__set_frontend_setting_impl(port, ptr, rust_vec_len, data_len),
-        69 => wire__crate__api__set_sync_server_url_impl(port, ptr, rust_vec_len, data_len),
-        70 => wire__crate__api__set_task_status_impl(port, ptr, rust_vec_len, data_len),
-        71 => wire__crate__api__settle_due_series_impl(port, ptr, rust_vec_len, data_len),
-        72 => wire__crate__api__snooze_reminder_impl(port, ptr, rust_vec_len, data_len),
-        73 => wire__crate__api__start_active_timer_session_impl(port, ptr, rust_vec_len, data_len),
-        74 => wire__crate__api__sync_now_impl(port, ptr, rust_vec_len, data_len),
-        75 => wire__crate__api__sync_now_outcome_impl(port, ptr, rust_vec_len, data_len),
-        76 => wire__crate__api__unarchive_list_impl(port, ptr, rust_vec_len, data_len),
-        77 => wire__crate__api__undo_task_operation_impl(port, ptr, rust_vec_len, data_len),
-        78 => wire__crate__api__update_active_timer_session_impl(port, ptr, rust_vec_len, data_len),
-        79 => wire__crate__api__update_reminder_impl(port, ptr, rust_vec_len, data_len),
-        80 => wire__crate__api__update_task_impl(port, ptr, rust_vec_len, data_len),
-        81 => wire__crate__api__update_task_series_impl(port, ptr, rust_vec_len, data_len),
-        82 => wire__crate__api__update_template_impl(port, ptr, rust_vec_len, data_len),
-        83 => wire__crate__api__validate_recurrence_rule_impl(port, ptr, rust_vec_len, data_len),
+        59 => wire__crate__api__refresh_billing_impl(port, ptr, rust_vec_len, data_len),
+        60 => wire__crate__api__rename_list_impl(port, ptr, rust_vec_len, data_len),
+        61 => wire__crate__api__reorder_task_impl(port, ptr, rust_vec_len, data_len),
+        62 => wire__crate__api__replace_template_blueprint_impl(port, ptr, rust_vec_len, data_len),
+        63 => wire__crate__api__rotate_device_key_impl(port, ptr, rust_vec_len, data_len),
+        64 => wire__crate__api__save_task_as_template_impl(port, ptr, rust_vec_len, data_len),
+        65 => wire__crate__api__search_tasks_impl(port, ptr, rust_vec_len, data_len),
+        66 => wire__crate__api__set_frontend_setting_impl(port, ptr, rust_vec_len, data_len),
+        67 => wire__crate__api__set_sync_server_url_impl(port, ptr, rust_vec_len, data_len),
+        68 => wire__crate__api__set_task_status_impl(port, ptr, rust_vec_len, data_len),
+        69 => wire__crate__api__settle_due_series_impl(port, ptr, rust_vec_len, data_len),
+        70 => wire__crate__api__snooze_reminder_impl(port, ptr, rust_vec_len, data_len),
+        71 => wire__crate__api__start_active_timer_session_impl(port, ptr, rust_vec_len, data_len),
+        72 => wire__crate__api__sync_now_impl(port, ptr, rust_vec_len, data_len),
+        73 => wire__crate__api__sync_now_outcome_impl(port, ptr, rust_vec_len, data_len),
+        74 => wire__crate__api__unarchive_list_impl(port, ptr, rust_vec_len, data_len),
+        75 => wire__crate__api__undo_task_operation_impl(port, ptr, rust_vec_len, data_len),
+        76 => wire__crate__api__update_active_timer_session_impl(port, ptr, rust_vec_len, data_len),
+        77 => wire__crate__api__update_reminder_impl(port, ptr, rust_vec_len, data_len),
+        78 => wire__crate__api__update_task_impl(port, ptr, rust_vec_len, data_len),
+        79 => wire__crate__api__update_task_series_impl(port, ptr, rust_vec_len, data_len),
+        80 => wire__crate__api__update_template_impl(port, ptr, rust_vec_len, data_len),
+        81 => wire__crate__api__validate_recurrence_rule_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -4293,6 +4312,98 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::BillingStateDto>
     for crate::api::BillingStateDto
 {
     fn into_into_dart(self) -> crate::api::BillingStateDto {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::BridgeErrorArgumentDto {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.key.into_into_dart().into_dart(),
+            self.value.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::BridgeErrorArgumentDto
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::BridgeErrorArgumentDto>
+    for crate::api::BridgeErrorArgumentDto
+{
+    fn into_into_dart(self) -> crate::api::BridgeErrorArgumentDto {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::BridgeErrorArgumentKeyDto {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Limit => 0.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::BridgeErrorArgumentKeyDto
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::BridgeErrorArgumentKeyDto>
+    for crate::api::BridgeErrorArgumentKeyDto
+{
+    fn into_into_dart(self) -> crate::api::BridgeErrorArgumentKeyDto {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::BridgeErrorCodeDto {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::InvalidInput => 0.into_dart(),
+            Self::NotFound => 1.into_dart(),
+            Self::Conflict => 2.into_dart(),
+            Self::Unauthorized => 3.into_dart(),
+            Self::CredentialUnavailable => 4.into_dart(),
+            Self::AccountBoundUnavailable => 5.into_dart(),
+            Self::EntitlementRequired => 6.into_dart(),
+            Self::UpgradeRequired => 7.into_dart(),
+            Self::Busy => 8.into_dart(),
+            Self::LeaseLost => 9.into_dart(),
+            Self::ClockSkew => 10.into_dart(),
+            Self::CryptoUnavailable => 11.into_dart(),
+            Self::StorageFailure => 12.into_dart(),
+            Self::SyncFailure => 13.into_dart(),
+            Self::Internal => 14.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::BridgeErrorCodeDto
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::BridgeErrorCodeDto>
+    for crate::api::BridgeErrorCodeDto
+{
+    fn into_into_dart(self) -> crate::api::BridgeErrorCodeDto {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::BridgeErrorDto {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.code.into_into_dart().into_dart(),
+            self.arguments.into_into_dart().into_dart(),
+            self.retryable.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::BridgeErrorDto {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::BridgeErrorDto> for crate::api::BridgeErrorDto {
+    fn into_into_dart(self) -> crate::api::BridgeErrorDto {
         self
     }
 }
@@ -5032,6 +5143,67 @@ impl SseEncode for bool {
     }
 }
 
+impl SseEncode for crate::api::BridgeErrorArgumentDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <crate::api::BridgeErrorArgumentKeyDto>::sse_encode(self.key, serializer);
+        <i64>::sse_encode(self.value, serializer);
+    }
+}
+
+impl SseEncode for crate::api::BridgeErrorArgumentKeyDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::BridgeErrorArgumentKeyDto::Limit => 0,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::BridgeErrorCodeDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::BridgeErrorCodeDto::InvalidInput => 0,
+                crate::api::BridgeErrorCodeDto::NotFound => 1,
+                crate::api::BridgeErrorCodeDto::Conflict => 2,
+                crate::api::BridgeErrorCodeDto::Unauthorized => 3,
+                crate::api::BridgeErrorCodeDto::CredentialUnavailable => 4,
+                crate::api::BridgeErrorCodeDto::AccountBoundUnavailable => 5,
+                crate::api::BridgeErrorCodeDto::EntitlementRequired => 6,
+                crate::api::BridgeErrorCodeDto::UpgradeRequired => 7,
+                crate::api::BridgeErrorCodeDto::Busy => 8,
+                crate::api::BridgeErrorCodeDto::LeaseLost => 9,
+                crate::api::BridgeErrorCodeDto::ClockSkew => 10,
+                crate::api::BridgeErrorCodeDto::CryptoUnavailable => 11,
+                crate::api::BridgeErrorCodeDto::StorageFailure => 12,
+                crate::api::BridgeErrorCodeDto::SyncFailure => 13,
+                crate::api::BridgeErrorCodeDto::Internal => 14,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::BridgeErrorDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <crate::api::BridgeErrorCodeDto>::sse_encode(self.code, serializer);
+        <Vec<crate::api::BridgeErrorArgumentDto>>::sse_encode(self.arguments, serializer);
+        <bool>::sse_encode(self.retryable, serializer);
+    }
+}
+
 impl SseEncode for crate::api::CalendarOccurrenceDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -5133,6 +5305,16 @@ impl SseEncode for i64 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         serializer.cursor.write_i64::<NativeEndian>(self).unwrap();
+    }
+}
+
+impl SseEncode for Vec<crate::api::BridgeErrorArgumentDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::BridgeErrorArgumentDto>::sse_encode(item, serializer);
+        }
     }
 }
 
@@ -5321,6 +5503,16 @@ impl SseEncode for Option<bool> {
     }
 }
 
+impl SseEncode for Option<crate::api::BridgeErrorDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::BridgeErrorDto>::sse_encode(value, serializer);
+        }
+    }
+}
+
 impl SseEncode for Option<i32> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -5477,7 +5669,7 @@ impl SseEncode for crate::api::SyncStatusDto {
         <bool>::sse_encode(self.running, serializer);
         <Option<i64>>::sse_encode(self.last_success_at, serializer);
         <Option<i64>>::sse_encode(self.last_failure_at, serializer);
-        <Option<String>>::sse_encode(self.last_error, serializer);
+        <Option<crate::api::BridgeErrorDto>>::sse_encode(self.last_error, serializer);
         <i32>::sse_encode(self.pushed_count, serializer);
         <i32>::sse_encode(self.push_acked_count, serializer);
         <i32>::sse_encode(self.push_superseded_count, serializer);

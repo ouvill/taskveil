@@ -1127,6 +1127,15 @@ mod tests {
     use taskveil_client::ClientErrorKind;
 
     #[test]
+    fn reminder_notification_apis_preserve_typed_errors() {
+        let _: fn(i64) -> Result<Vec<ReminderNotificationCommandDto>, BridgeErrorDto> =
+            prepare_reminder_notification_reconciliation;
+        let _: fn(i64, u32) -> Result<Vec<ReminderNotificationCommandDto>, BridgeErrorDto> =
+            list_reminder_notification_commands;
+        let _: fn(String, i64) -> Result<bool, BridgeErrorDto> = ack_reminder_notification_command;
+    }
+
+    #[test]
     fn internal_error_details_are_reduced_to_allowlisted_codes() {
         let cases = [
             (
