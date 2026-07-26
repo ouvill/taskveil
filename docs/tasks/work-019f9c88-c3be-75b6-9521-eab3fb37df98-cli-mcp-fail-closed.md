@@ -1,7 +1,7 @@
 ---
 id: 019f9c88-c3be-75b6-9521-eab3fb37df98
 title: Fail closed for unavailable CLI and MCP frontends
-status: active
+status: done
 lane: standard
 milestone: maintenance
 ---
@@ -113,5 +113,10 @@ coordinationとproduction OS secret storeの完了後に別work itemで扱う。
 
 ### GitHub
 
-- Commit: 本work itemと同じcommitで記録する。
-- PR / CI / merge: 作成後に追記する。
+- Commit: `d9d1c31925f4980d3ca1c7b7daf8df61859bd835`
+- PR: [#66](https://github.com/ouvill/taskveil/pull/66)
+- CI: Rust、Flutter / iOS、Android arm64 package、fuzz、dependency / secret、
+  SQLx、Worker、infraの全必須checkが成功した。Android Emulator testsは変更分類により
+  意図どおりskipされた。
+- Merge: 2026-07-26にsquash merge
+  (`4fcda754d6cb86e5567a1eb1285a3d2282141aa4`)。Issue #63はclose済み。
