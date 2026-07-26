@@ -15,7 +15,7 @@ GitHub Issue #58では、正常なpull closureごとに
 同期回数に比例して増加する問題を扱う。ACK前proofだけは次のclosure発行時に削除されるが、
 ACK済みproofにはretention境界がない。
 
-統合候補`af8d55d`にはprotocol v9 page token hardeningが入り、
+profile coordination統合済みmain `9ef410a`にはprotocol v9 page token hardeningが入り、
 `device_resync_sessions`はfull resync restartごとに同じtenant / deviceの旧rowを削除して
 1行へ置換する。技術仕様もdeviceごとに1行を正本としているため、この契約を維持し、
 成功ACK時には完了済みsessionを削除する。
@@ -124,7 +124,8 @@ continuity proofはACK response lossに対する冪等再送を維持する必�
 - proof ID、tenant / device ID、high-water、record metadataをlogや監視labelへ含めない。
 - protocol v9 tokenの最大寿命24時間と5分margin、tombstone 180日保持を変更しない。
 - 公開前のSecurity Advisory名、一時fork、private情報を文書・履歴へ含めない。
-- 統合候補が未公開のためpush / PR / mergeを行わない。
+- public main `9ef410a`直上へIssue固有commitだけを再構成し、
+  Security Advisory用commitやprivate差分を履歴へ含めない。
 
 ## 8. 完了報告に含めるべき内容
 
@@ -160,7 +161,8 @@ continuity proofはACK response lossに対する冪等再送を維持する必�
   `cargo clippy --workspace -- -D warnings`、`cargo test --workspace`、
   `sh app/tool/check_client_boundaries.sh`、`sh app/tool/test_client_boundaries.sh`、
   `git diff --check`はすべて成功した。Flutter変更がないためFlutter固有gateは対象外。
-- Commit: `e7fbd76ae3eefffcb282ee1a0fa3bc960f5bb38a`
+- Commits: `7a85e0a`（retention境界）、`f9217d4`（lock順序）、
+  `b8e5600`（完了記録）。
 - 未解決: なし。
 
 ### 独立検証
