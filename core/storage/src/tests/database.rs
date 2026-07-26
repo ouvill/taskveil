@@ -749,6 +749,145 @@ fn task_67_reports_10000_task_storage_timings() {
 }
 
 #[test]
+fn home_and_calendar_production_plans_use_partial_range_indexes() {
+    let file = NamedTempFile::new().unwrap();
+    let connection = open_encrypted(file.path(), &KEY).unwrap();
+    let home_plan = explain_query_plan(
+        &connection,
+        crate::task_repository::LIST_HOME_QUERY,
+        params![1_788_220_800_000_i64, 1_788_307_200_000_i64],
+    );
+    let calendar_plan = explain_query_plan(
+        &connection,
+        crate::task_repository::LIST_CALENDAR_OCCURRENCES_QUERY,
+        params![
+            "2026-08-30",
+            "2026-09-06",
+            1_788_220_800_000_i64,
+            1_788_825_600_000_i64
+        ],
+    );
+
+    println!("Home EXPLAIN QUERY PLAN:");
+    for detail in &home_plan {
+        println!("- {detail}");
+    }
+    println!("Calendar EXPLAIN QUERY PLAN:");
+    for detail in &calendar_plan {
+        println!("- {detail}");
+    }
+
+    for index in [
+        "idx_tasks_active_date_due_range",
+        "idx_tasks_active_datetime_due_range",
+        "idx_tasks_active_scheduled_range",
+        "idx_tasks_closed_completed_range",
+    ] {
+        assert!(
+            home_plan.iter().any(|detail| detail.contains(index)),
+            "Home query plan did not use {index}: {home_plan:#?}"
+        );
+        assert!(
+            calendar_plan.iter().any(|detail| detail.contains(index)),
+            "Calendar query plan did not use {index}: {calendar_plan:#?}"
+        );
+    }
+}
+
+#[test]
+fn sqlcipher_10000_task_query_and_index_write_budgets_hold() {
+    const HOME_MEDIAN_BUDGET: Duration = Duration::from_millis(750);
+    const CALENDAR_MEDIAN_BUDGET: Duration = Duration::from_millis(250);
+    const WRITE_TIME_RATIO_PERCENT_BUDGET: u128 = 150;
+    const WRITE_TIME_SLACK: Duration = Duration::from_millis(500);
+    const DATABASE_SIZE_RATIO_PERCENT_BUDGET: i64 = 110;
+
+    let initial_file = NamedTempFile::new().unwrap();
+    let latest_file = NamedTempFile::new().unwrap();
+    let initial =
+        seed_performance_database(initial_file.path(), &KEY, PerformanceSeedSchema::Initial);
+    let latest = seed_performance_database(latest_file.path(), &KEY, PerformanceSeedSchema::Latest);
+    assert_eq!(latest.task_count, 10_000);
+
+    let connection = open_encrypted(latest_file.path(), &KEY).unwrap();
+    let repository = SqliteTaskRepository::new(connection);
+    repository
+        .list_home(latest.today_start_ms, latest.tomorrow_start_ms)
+        .unwrap();
+    let range = CalendarRange::new(
+        CivilDate::parse("2026-08-30").unwrap(),
+        CivilDate::parse("2026-09-06").unwrap(),
+        UtcInstant::from_millis(latest.today_start_ms).unwrap(),
+        UtcInstant::from_millis(latest.today_start_ms + 7 * 86_400_000).unwrap(),
+    )
+    .unwrap();
+    repository.list_calendar_occurrences(&range).unwrap();
+
+    let mut home_samples = Vec::with_capacity(5);
+    let mut calendar_samples = Vec::with_capacity(5);
+    let mut home_rows = 0;
+    let mut calendar_rows = 0;
+    for _ in 0..5 {
+        let started = std::time::Instant::now();
+        home_rows = repository
+            .list_home(latest.today_start_ms, latest.tomorrow_start_ms)
+            .unwrap()
+            .len();
+        home_samples.push(started.elapsed());
+
+        let started = std::time::Instant::now();
+        calendar_rows = repository.list_calendar_occurrences(&range).unwrap().len();
+        calendar_samples.push(started.elapsed());
+    }
+    home_samples.sort_unstable();
+    calendar_samples.sort_unstable();
+    let home_median = home_samples[home_samples.len() / 2];
+    let calendar_median = calendar_samples[calendar_samples.len() / 2];
+
+    println!(
+        "SQLCipher 10k benchmark: home_rows={home_rows} home_median_ms={} \
+         calendar_rows={calendar_rows} calendar_median_ms={} \
+         initial_insert_ms={} latest_insert_ms={} initial_bytes={} latest_bytes={}",
+        home_median.as_millis(),
+        calendar_median.as_millis(),
+        initial.insert_elapsed.as_millis(),
+        latest.insert_elapsed.as_millis(),
+        initial.database_bytes,
+        latest.database_bytes,
+    );
+
+    assert!(
+        home_median <= HOME_MEDIAN_BUDGET,
+        "Home median {:?} exceeded {:?}",
+        home_median,
+        HOME_MEDIAN_BUDGET
+    );
+    assert!(
+        calendar_median <= CALENDAR_MEDIAN_BUDGET,
+        "Calendar median {:?} exceeded {:?}",
+        calendar_median,
+        CALENDAR_MEDIAN_BUDGET
+    );
+    assert!(
+        latest.insert_elapsed.as_millis()
+            <= initial.insert_elapsed.as_millis() * WRITE_TIME_RATIO_PERCENT_BUDGET / 100
+                + WRITE_TIME_SLACK.as_millis(),
+        "index write time {:?} exceeded baseline {:?} with ratio {}% and slack {:?}",
+        latest.insert_elapsed,
+        initial.insert_elapsed,
+        WRITE_TIME_RATIO_PERCENT_BUDGET,
+        WRITE_TIME_SLACK
+    );
+    assert!(
+        latest.database_bytes * 100 <= initial.database_bytes * DATABASE_SIZE_RATIO_PERCENT_BUDGET,
+        "indexed database {} bytes exceeded baseline {} bytes at {}%",
+        latest.database_bytes,
+        initial.database_bytes,
+        DATABASE_SIZE_RATIO_PERCENT_BUDGET
+    );
+}
+
+#[test]
 fn fts5_search_works_after_reopening_encrypted_database() {
     let file = NamedTempFile::new().unwrap();
     let mut task = sample_task();
@@ -764,6 +903,21 @@ fn fts5_search_works_after_reopening_encrypted_database() {
     let repository = SqliteTaskRepository::new(connection);
 
     assert_eq!(repository.search_tasks("sqlcipher").unwrap(), vec![task]);
+}
+
+fn explain_query_plan<P: rusqlite::Params>(
+    connection: &Connection,
+    query: &str,
+    params: P,
+) -> Vec<String> {
+    let mut statement = connection
+        .prepare(&format!("EXPLAIN QUERY PLAN {query}"))
+        .unwrap();
+    statement
+        .query_map(params, |row| row.get(3))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
 }
 
 #[test]

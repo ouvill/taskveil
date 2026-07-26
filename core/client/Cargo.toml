@@ -7,7 +7,7 @@ publish.workspace = true
 
 [features]
 default = []
-test-support = []
+test-support = ["taskveil-storage/test-support"]
 
 [dependencies]
 thiserror.workspace = true
@@ -26,3 +26,7 @@ serde_json.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 tokio.workspace = true
+
+[[example]]
+name = "seed_home_calendar_performance_fixture"
+required-features = ["test-support"]

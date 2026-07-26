@@ -383,6 +383,16 @@ fn list_home_filters_due_active_and_closed_tasks_across_active_lists() {
     )
     .unwrap();
     archived_task.due = Some(TaskDue::date_time(today_start, "UTC").unwrap());
+    let mut deleted_task = new_task(
+        work.id,
+        None,
+        "Deleted".to_string(),
+        "a6".to_string(),
+        today_start,
+    )
+    .unwrap();
+    deleted_task.due = Some(TaskDue::date_time(today_start, "UTC").unwrap());
+    deleted_task.deleted_at = Some(today_start + 1);
     let mut closed_today = new_task(
         work.id,
         None,
@@ -444,6 +454,7 @@ fn list_home_filters_due_active_and_closed_tasks_across_active_lists() {
         scheduled_today,
         scheduled_tomorrow,
         archived_task,
+        deleted_task,
         closed_today,
         closed_yesterday,
         wont_do_today,
@@ -481,6 +492,10 @@ fn list_home_filters_due_active_and_closed_tasks_across_active_lists() {
         titles.iter().filter(|title| **title == "Due today").count(),
         1,
         "a dual due/scheduled target remains one Home row"
+    );
+    assert!(
+        !titles.contains(&"Deleted"),
+        "soft-deleted tasks remain outside Home"
     );
     for title in ["Closed today", "Wont do today"] {
         assert!(

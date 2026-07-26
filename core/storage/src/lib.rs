@@ -29,6 +29,8 @@ mod settings_repository;
 mod sync_state_repository;
 mod task_repository;
 mod template_series_repository;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 mod timer_repository;
 mod traits;
 mod transaction;
@@ -66,9 +68,11 @@ pub use traits::{
 };
 pub use transaction::{OwnedSqliteWriteTx, SqliteWriteTx};
 
+#[cfg(test)]
+use migrations::ensure_schema_at_version;
 use migrations::{ensure_schema, MIGRATIONS};
 
-pub const LATEST_MIGRATION_VERSION: i32 = 1;
+pub const LATEST_MIGRATION_VERSION: i32 = 2;
 const LOCAL_DB_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[cfg(test)]

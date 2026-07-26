@@ -13,11 +13,18 @@ const CREATE_MIGRATION_TABLE: &str = "
     );
 ";
 
-pub(super) const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "initial",
-    sql: include_str!("../migrations/0001_initial.sql"),
-}];
+pub(super) const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "initial",
+        sql: include_str!("../migrations/0001_initial.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "home_calendar_range_indexes",
+        sql: include_str!("../migrations/0002_home_calendar_range_indexes.sql"),
+    },
+];
 
 #[derive(Clone, Copy)]
 pub(super) struct Migration {
@@ -36,8 +43,16 @@ pub(super) fn ensure_schema(
     connection: &mut Connection,
     migrations: &[Migration],
 ) -> Result<(), StorageError> {
+    ensure_schema_at_version(connection, migrations, LATEST_MIGRATION_VERSION)
+}
+
+pub(super) fn ensure_schema_at_version(
+    connection: &mut Connection,
+    migrations: &[Migration],
+    expected_latest_version: i32,
+) -> Result<(), StorageError> {
     validate_database_key(connection)?;
-    validate_manifest(migrations)?;
+    validate_manifest(migrations, expected_latest_version)?;
 
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let has_ledger = table_exists(&transaction, MIGRATION_TABLE)?;
@@ -88,7 +103,10 @@ fn validate_database_key(connection: &Connection) -> Result<(), StorageError> {
         .map_err(|_| StorageError::InvalidDatabaseKey)
 }
 
-fn validate_manifest(migrations: &[Migration]) -> Result<(), StorageError> {
+fn validate_manifest(
+    migrations: &[Migration],
+    expected_latest_version: i32,
+) -> Result<(), StorageError> {
     for (expected, migration) in (1_i32..).zip(migrations) {
         if migration.version != expected {
             return Err(StorageError::IncompatibleSchema(format!(
@@ -96,9 +114,9 @@ fn validate_manifest(migrations: &[Migration]) -> Result<(), StorageError> {
             )));
         }
     }
-    if migrations.last().map(|migration| migration.version) != Some(LATEST_MIGRATION_VERSION) {
+    if migrations.last().map(|migration| migration.version) != Some(expected_latest_version) {
         return Err(StorageError::IncompatibleSchema(format!(
-            "migration manifest does not end at version {LATEST_MIGRATION_VERSION}"
+            "migration manifest does not end at version {expected_latest_version}"
         )));
     }
     Ok(())
@@ -223,17 +241,21 @@ mod tests {
 
         let connection = open_encrypted(file.path(), &KEY).unwrap();
 
-        assert_eq!(ledger_count(&connection), 1);
+        assert_eq!(
+            ledger_count(&connection),
+            i64::from(LATEST_MIGRATION_VERSION)
+        );
         let (version, name, checksum_length): (i32, String, i64) = connection
             .query_row(
                 "SELECT version, name, length(checksum)
-                 FROM _taskveil_migrations",
-                [],
+                 FROM _taskveil_migrations
+                 WHERE version = ?1",
+                [LATEST_MIGRATION_VERSION],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
         assert_eq!(version, LATEST_MIGRATION_VERSION);
-        assert_eq!(name, "initial");
+        assert_eq!(name, "home_calendar_range_indexes");
         assert_eq!(checksum_length, 48);
         assert!(table_exists(&connection, "tasks").unwrap());
     }
@@ -296,6 +318,34 @@ mod tests {
     }
 
     #[test]
+    fn version_one_database_upgrades_to_range_indexes_without_rewriting_history() {
+        let file = NamedTempFile::new().unwrap();
+        let mut connection = open_raw(file.path());
+        ensure_schema_at_version(&mut connection, &MIGRATIONS[..1], 1).unwrap();
+        assert!(index_exists(&connection, "idx_tasks_home_targets"));
+        assert!(!index_exists(
+            &connection,
+            "idx_tasks_active_scheduled_range"
+        ));
+
+        ensure_schema(&mut connection, MIGRATIONS).unwrap();
+
+        assert_eq!(
+            ledger_count(&connection),
+            i64::from(LATEST_MIGRATION_VERSION)
+        );
+        assert!(!index_exists(&connection, "idx_tasks_home_targets"));
+        for index in [
+            "idx_tasks_active_date_due_range",
+            "idx_tasks_active_datetime_due_range",
+            "idx_tasks_active_scheduled_range",
+            "idx_tasks_closed_completed_range",
+        ] {
+            assert!(index_exists(&connection, index), "{index} was not created");
+        }
+    }
+
+    #[test]
     fn reopening_latest_database_does_not_reapply_migration() {
         let file = NamedTempFile::new().unwrap();
         let connection = open_encrypted(file.path(), &KEY).unwrap();
@@ -310,7 +360,10 @@ mod tests {
 
         let connection = open_encrypted(file.path(), &KEY).unwrap();
 
-        assert_eq!(ledger_count(&connection), 1);
+        assert_eq!(
+            ledger_count(&connection),
+            i64::from(LATEST_MIGRATION_VERSION)
+        );
         assert_eq!(
             connection
                 .query_row(
@@ -343,7 +396,10 @@ mod tests {
             Err(StorageError::IncompatibleSchema(message))
                 if message == "migration checksum mismatch at version 1"
         ));
-        assert_eq!(ledger_count(&open_raw(file.path())), 1);
+        assert_eq!(
+            ledger_count(&open_raw(file.path())),
+            i64::from(LATEST_MIGRATION_VERSION)
+        );
     }
 
     #[test]
@@ -354,8 +410,8 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO _taskveil_migrations (version, name, checksum)
-                 VALUES (2, 'future', x'00')",
-                [],
+                 VALUES (?1, 'future', x'00')",
+                [LATEST_MIGRATION_VERSION + 1],
             )
             .unwrap();
         drop(connection);
@@ -363,9 +419,10 @@ mod tests {
         assert!(matches!(
             open_encrypted(file.path(), &KEY),
             Err(StorageError::UnsupportedMigrationVersion {
-                found: 2,
-                latest: 1
-            })
+                found,
+                latest
+            }) if found == LATEST_MIGRATION_VERSION + 1
+                && latest == LATEST_MIGRATION_VERSION
         ));
     }
 
@@ -395,10 +452,7 @@ mod tests {
         drop(open_encrypted(file.path(), &KEY).unwrap());
         let connection = open_raw(file.path());
         connection
-            .execute(
-                "UPDATE _taskveil_migrations SET version = 2 WHERE version = 1",
-                [],
-            )
+            .execute("DELETE FROM _taskveil_migrations WHERE version = 1", [])
             .unwrap();
         drop(connection);
 
@@ -429,19 +483,26 @@ mod tests {
     fn failed_migration_rolls_back_schema_and_ledger() {
         let file = NamedTempFile::new().unwrap();
         let mut connection = open_raw(file.path());
-        let failing = [Migration {
-            version: 1,
-            name: "failing",
-            sql: "CREATE TABLE partial (id INTEGER);
-                  SELECT value FROM missing_failure_injection_table;",
-        }];
+        let failing = [
+            Migration {
+                version: 1,
+                name: "baseline",
+                sql: "CREATE TABLE baseline (id INTEGER);",
+            },
+            Migration {
+                version: 2,
+                name: "failing",
+                sql: "CREATE TABLE partial (id INTEGER);
+                      SELECT value FROM missing_failure_injection_table;",
+            },
+        ];
 
         let result = ensure_schema(&mut connection, &failing);
 
         assert!(matches!(
             result,
             Err(StorageError::MigrationFailed {
-                target_version: 1,
+                target_version: 2,
                 migration: "failing",
                 ..
             })
@@ -471,7 +532,10 @@ mod tests {
             handle.join().unwrap().unwrap();
         }
 
-        assert_eq!(ledger_count(&open_raw(&path)), 1);
+        assert_eq!(
+            ledger_count(&open_raw(&path)),
+            i64::from(LATEST_MIGRATION_VERSION)
+        );
     }
 
     #[test]
@@ -490,5 +554,19 @@ mod tests {
         first_transaction.rollback().unwrap();
 
         handle.join().unwrap().unwrap();
+    }
+
+    fn index_exists(connection: &Connection, name: &str) -> bool {
+        connection
+            .query_row(
+                "SELECT EXISTS (
+                     SELECT 1
+                     FROM sqlite_schema
+                     WHERE type = 'index' AND name = ?1
+                 )",
+                [name],
+                |row| row.get(0),
+            )
+            .unwrap()
     }
 }
