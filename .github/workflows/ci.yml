@@ -199,6 +199,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "failed to set secure temp owner" }
           & icacls.exe $secureTemp /inheritance:r
           if ($LASTEXITCODE -ne 0) { throw "failed to remove inherited temp ACLs" }
+          & icacls.exe $secureTemp /remove:g "*S-1-5-32-545"
+          if ($LASTEXITCODE -ne 0) { throw "failed to remove built-in Users grants" }
           & icacls.exe $secureTemp /grant:r "${currentUser}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F"
           if ($LASTEXITCODE -ne 0) { throw "failed to grant secure temp ACLs" }
           $aclProbe = Join-Path $secureTemp "taskveil-acl-probe"

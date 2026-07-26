@@ -264,5 +264,6 @@ OS別fail-closed契約は未確定である。本work itemはこれらを
   descriptorをowner + DACLだけで取得していたため、必須のgroup SIDがなく
   `AccessCheck`が`ERROR_INVALID_SECURITY_DESCR`を返す原因を特定した。
   `GROUP_SECURITY_INFORMATION`を含む完全なdescriptorへ修正し、Windows platform
-  matrixを再検証する。
+  matrixを再検証する。runner tempには`BUILTIN\Users`へのchild create / write ACEも
+  明示的に残っていたため、製品側で許容せずWindows CI fixtureからgrantを除去した。
 - 検証者: 独立review agent、Codex root orchestrator
