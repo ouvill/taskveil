@@ -50,6 +50,7 @@ pub use model::{
 pub use mutation_service::ClientError;
 pub(crate) use mutation_service::{LocalMutationContext, SqliteMutationService, UpdateTaskInput};
 pub use runtime::{
+    AccountRegistrationPending, AccountRegistrationPhase, AccountRegistrationState,
     CalendarOccurrenceKind, CalendarOccurrenceView, CalendarRange, CreateTaskCommand,
     CreateTaskSeriesFromTaskCommand, CreateTaskSeriesFromTemplateCommand, CreateTemplateCommand,
     HomeTaskView, LocalProfileConfig, ReminderView, ReorderTaskCommand,

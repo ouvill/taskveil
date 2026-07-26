@@ -99,7 +99,11 @@ async fn assert_runtime_cannot_modify_migration_ledgers(fixture: &Fixture) {
     .await
     .unwrap();
 
-    for table in ["_sqlx_migrations", "taskveil_schema_migrations"] {
+    for table in [
+        "_sqlx_migrations",
+        "taskveil_schema_migrations",
+        "taskveil_pre_release_resets",
+    ] {
         let row = query(
             "SELECT has_table_privilege(current_user, $1, 'SELECT') AS can_select,
                     has_table_privilege(current_user, $1, 'INSERT') AS can_insert,
@@ -275,6 +279,62 @@ async fn representative_legacy_data_is_present(pool: &PgPool) -> bool {
     .unwrap()
 }
 
+async fn representative_legacy_account_graph_was_reset(pool: &PgPool) -> bool {
+    query(
+        "SELECT
+             NOT EXISTS (
+                 SELECT 1 FROM users
+                 WHERE id = '00000000-0000-0000-0000-000000000001'
+             )
+             AND NOT EXISTS (
+                 SELECT 1 FROM user_key_generations
+                 WHERE user_id = '00000000-0000-0000-0000-000000000001'
+             )
+             AND NOT EXISTS (
+                 SELECT 1 FROM tenant_key_generations
+                 WHERE tenant_id = '00000000-0000-0000-0000-000000000003'
+             )
+             AND NOT EXISTS (
+                 SELECT 1 FROM key_recipients
+                 WHERE tenant_id = '00000000-0000-0000-0000-000000000003'
+             )
+             AND NOT EXISTS (
+                 SELECT 1 FROM sync_records
+                 WHERE record_id = '00000000-0000-0000-0000-000000000004'
+             )
+             AND NOT EXISTS (
+                 SELECT 1 FROM billing_customers
+                 WHERE user_id = '00000000-0000-0000-0000-000000000001'
+             )
+             AND NOT EXISTS (
+                 SELECT 1 FROM session_families
+                 WHERE id = '00000000-0000-0000-0000-000000000006'
+             )
+             AND NOT EXISTS (
+                 SELECT 1 FROM access_tokens
+                 WHERE id = '00000000-0000-0000-0000-000000000007'
+             )
+             AND NOT EXISTS (
+                 SELECT 1 FROM refresh_tokens
+                 WHERE id = '00000000-0000-0000-0000-000000000008'
+             )
+             AND EXISTS (
+                 SELECT 1 FROM taskveil_schema_migrations
+                 WHERE version = '202607240002_task_series_domain'
+             )
+             AND EXISTS (
+                 SELECT 1 FROM taskveil_pre_release_resets
+                 WHERE reset_key =
+                     'email-verification-stable-opaque-credential-v1'
+             ) AS reset",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
+    .try_get("reset")
+    .unwrap()
+}
+
 #[tokio::test]
 async fn migrator_records_versions_skips_applied_sql_and_rejects_checksum_changes() {
     let fixture = Fixture::start().await;
@@ -363,7 +423,37 @@ async fn migrator_bootstraps_ledger_for_database_created_by_legacy_runner() {
         applied_count,
         i64::try_from(migration_paths().len()).unwrap()
     );
-    assert!(representative_legacy_data_is_present(&fixture.pool).await);
+    assert!(representative_legacy_account_graph_was_reset(&fixture.pool).await);
+
+    raw_sql(
+        "INSERT INTO users
+             (id, email, canonical_email, opaque_credential_id,
+              opaque_suite_id, opaque_record, account_root_public)
+         VALUES
+             ('00000000-0000-0000-0000-000000000009',
+              'migration-post-reset@example.invalid',
+              'migration-post-reset@example.invalid',
+              '00000000-0000-0000-0000-000000000010',
+              2,
+              decode('01', 'hex'),
+              decode('02', 'hex'));",
+    )
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+    db::run_migrations(&fixture.pool).await.unwrap();
+    let post_reset_user_exists: bool = query(
+        "SELECT EXISTS (
+             SELECT 1 FROM users
+             WHERE id = '00000000-0000-0000-0000-000000000009'
+         ) AS present",
+    )
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap()
+    .try_get("present")
+    .unwrap();
+    assert!(post_reset_user_exists);
     assert_runtime_cannot_modify_migration_ledgers(&fixture).await;
 }
 

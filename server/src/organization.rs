@@ -12,7 +12,7 @@ use taskveil_protocol::organization::{
 };
 use uuid::Uuid;
 
-use crate::{auth::AuthContext, db, AppError};
+use crate::{auth::AuthContext, db, email_verification::canonicalize_email, AppError};
 
 pub async fn invite_member(
     pool: &PgPool,
@@ -20,14 +20,12 @@ pub async fn invite_member(
     auth: AuthContext,
     request: OrganizationInviteRequest,
 ) -> Result<OrganizationMemberResponse, AppError> {
-    let email = request.email.trim().to_ascii_lowercase();
-    if email.is_empty() || email.len() > 320 || !email.contains('@') {
-        return Err(AppError::bad_request("invalid email"));
-    }
+    let email = canonicalize_email(&request.email)?;
     let mut tx = db::begin_tenant_transaction(pool, tenant_id).await?;
     let owner_user_id = require_org_admin(&mut tx, tenant_id, auth.user_id).await?;
     let member_user_id =
-        sqlx::query_scalar!("SELECT id FROM users WHERE lower(email) = lower($1)", email)
+        sqlx::query_scalar::<_, Uuid>("SELECT id FROM users WHERE canonical_email = $1")
+            .bind(email.canonical())
             .fetch_optional(&mut *tx)
             .await?
             .ok_or_else(|| AppError::not_found("account not found"))?;

@@ -18,6 +18,7 @@ taskveil-storage.workspace = true
 taskveil-sync.workspace = true
 zeroize.workspace = true
 iana-time-zone.workspace = true
+idna.workspace = true
 chrono.workspace = true
 base64.workspace = true
 serde.workspace = true

@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:taskveil/src/core/providers.dart';
 import 'package:taskveil/src/generated/l10n/app_localizations.dart';
+import 'package:taskveil/src/rust/api.dart';
 import 'package:taskveil/src/screens/account_screen.dart';
 import 'package:taskveil/src/ui/theme.dart';
 
@@ -87,17 +88,161 @@ void main() {
 
     await tester.tap(find.text('Register'));
     await tester.pumpAndSettle();
-    await _enterCredentials(tester);
+    await tester.enterText(find.byType(TextField).first, 'alice@example.com');
     await tester.tap(find.widgetWithText(FilledButton, 'Register').last);
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).first, '12345678');
+    final verifyCode = find.widgetWithText(FilledButton, 'Verify code').last;
+    await tester.ensureVisible(verifyCode);
+    await tester.tap(verifyCode);
+    await tester.pumpAndSettle();
+    expect(find.text('Cancel registration'), findsNothing);
+    await tester.enterText(find.byType(TextField).first, 'correct password');
+    final finish = find
+        .widgetWithText(FilledButton, 'Set password and finish')
+        .last;
+    await tester.ensureVisible(finish);
+    await tester.tap(finish);
     await tester.pumpAndSettle();
 
     expect(find.byKey(const ValueKey('account-recovery-key')), findsOneWidget);
     expect(find.text('alice@example.com'), findsOneWidget);
 
     await _pumpAccountScreen(tester, fake);
+    expect(find.byKey(const ValueKey('account-recovery-key')), findsOneWidget);
+
+    await tester.scrollUntilVisible(
+      find.byKey(const ValueKey('account-logout')),
+      160,
+      scrollable: _accountScrollable().first,
+    );
+    await tester.tap(find.byKey(const ValueKey('account-logout')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('account-recovery-key')), findsOneWidget);
+
+    await tester.scrollUntilVisible(
+      find.text('I saved my Recovery Key'),
+      160,
+      scrollable: _accountScrollable().first,
+    );
+    await tester.tap(find.text('I saved my Recovery Key'));
+    await tester.pumpAndSettle();
+    await _pumpAccountScreen(tester, fake);
 
     expect(find.text('alice@example.com'), findsOneWidget);
     expect(find.byKey(const ValueKey('account-recovery-key')), findsNothing);
+  });
+
+  testWidgets('register announces mailbox verification while pending', (
+    tester,
+  ) async {
+    final fake = FakeBridgeService();
+    await _pumpAccountScreen(tester, fake);
+
+    await tester.tap(find.text('Register'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).first, 'alice@example.com');
+    await tester.tap(find.widgetWithText(FilledButton, 'Register').last);
+    await tester.pumpAndSettle();
+
+    final pending = find.byKey(const ValueKey('account-verification-pending'));
+    expect(pending, findsOneWidget);
+    expect(tester.getSemantics(pending).flagsCollection.isLiveRegion, isTrue);
+
+    expect(find.text('Resend code'), findsOneWidget);
+  });
+
+  for (final restored in [
+    ('email', 'Register'),
+    ('otp', 'Verify code'),
+    ('password', 'Set password and finish'),
+  ]) {
+    testWidgets('restores ${restored.$1} registration phase after restart', (
+      tester,
+    ) async {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final fake = FakeBridgeService(
+        restoredRegistrationState: AccountRegistrationStateDto(
+          phase: restored.$1,
+          email: 'restored@example.com',
+          expiresAtMs: now + 300000,
+          nextRetryAtMs: restored.$1 == 'otp' ? now : null,
+          canCancel: restored.$1 != 'password',
+        ),
+      );
+      await _pumpAccountScreen(tester, fake);
+
+      expect(find.text(restored.$2), findsWidgets);
+      if (restored.$1 == 'email') {
+        final email = tester.widget<TextField>(find.byType(TextField).first);
+        expect(email.controller?.text, 'restored@example.com');
+      }
+    });
+  }
+
+  testWidgets('registration restore failure is fail-closed and retryable', (
+    tester,
+  ) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final fake = FakeBridgeService(
+      registrationStateFailures: 1,
+      restoredRegistrationState: AccountRegistrationStateDto(
+        phase: 'otp',
+        email: 'restored@example.com',
+        expiresAtMs: now + 300000,
+        nextRetryAtMs: now,
+        canCancel: true,
+      ),
+    );
+    await _pumpAccountScreen(tester, fake);
+
+    expect(find.text('Could not load account state.'), findsOneWidget);
+    expect(find.text('Try again'), findsOneWidget);
+    expect(find.byType(TextField), findsNothing);
+
+    await tester.tap(find.text('Try again'));
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('account-verification-pending')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('Recovery Key restore failure blocks normal UI until retry', (
+    tester,
+  ) async {
+    final fake = FakeBridgeService(recoveryKeyFailures: 1);
+    fake.seedRecoveryPendingAccount('recovery@example.com');
+    await _pumpAccountScreen(tester, fake);
+
+    expect(find.text('Could not load account state.'), findsOneWidget);
+    expect(find.byKey(const ValueKey('account-logout')), findsNothing);
+    await tester.tap(find.text('Try again'));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('account-recovery-key')), findsOneWidget);
+  });
+
+  testWidgets('OTP resend deadline is visible and disables resend', (
+    tester,
+  ) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final fake = FakeBridgeService(
+      restoredRegistrationState: AccountRegistrationStateDto(
+        phase: 'otp',
+        email: 'restored@example.com',
+        expiresAtMs: now + 300000,
+        nextRetryAtMs: now + 5000,
+        canCancel: true,
+      ),
+    );
+    await _pumpAccountScreen(tester, fake);
+
+    expect(find.textContaining('You can resend in'), findsOneWidget);
+    final resend = tester.widget<TextButton>(
+      find.widgetWithText(TextButton, 'Resend code'),
+    );
+    expect(resend.onPressed, isNull);
   });
 
   testWidgets('login shows email and logout returns to signed-out form', (

@@ -490,6 +490,21 @@
   "accountPasswordLabel": "Password",
   "accountLoginButton": "Log in",
   "accountRegisterButton": "Register",
+  "accountVerificationPending": "Enter the 8-digit code sent to your email. This confirms mailbox access only; it cannot recover encrypted data.",
+  "accountVerificationCodeLabel": "8-digit verification code",
+  "accountVerifyCodeButton": "Verify code",
+  "accountResendCodeButton": "Resend code",
+  "accountResendAvailableIn": "You can resend in {seconds} seconds.",
+  "@accountResendAvailableIn": {
+    "placeholders": {
+      "seconds": {
+        "type": "int"
+      }
+    }
+  },
+  "accountCancelRegistrationButton": "Cancel registration",
+  "accountSetPasswordButton": "Set password and finish",
+  "accountRecoveryAcknowledgeButton": "I saved my Recovery Key",
   "accountLogoutButton": "Log out",
   "accountServerUrlLabel": "Server URL",
   "accountSaveServerUrlTooltip": "Save server URL",

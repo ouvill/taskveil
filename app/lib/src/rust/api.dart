@@ -8,6 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'api.freezed.dart';
 
+// These functions are ignored because they are not marked as `pub`: `account_registration_pending_to_dto`, `account_registration_state_to_dto`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `from`
 
 Future<String> greet({required String name}) =>
@@ -47,17 +48,39 @@ Future<void> setSyncServerUrl({required String serverUrl}) =>
 Future<AccountSessionStateDto> getAccountSessionState() =>
     RustLib.instance.api.crateApiGetAccountSessionState();
 
-Future<AccountAuthResultDto> accountRegister({
+Future<AccountRegistrationStateDto?> accountRegistrationState() =>
+    RustLib.instance.api.crateApiAccountRegistrationState();
+
+Future<void> accountRegistrationCancel() =>
+    RustLib.instance.api.crateApiAccountRegistrationCancel();
+
+Future<AccountRegistrationPendingDto> accountRegistrationBegin({
   required String email,
-  required String password,
   String? serverUrl,
-  String? deviceName,
-}) => RustLib.instance.api.crateApiAccountRegister(
+}) => RustLib.instance.api.crateApiAccountRegistrationBegin(
   email: email,
-  password: password,
   serverUrl: serverUrl,
+);
+
+Future<AccountRegistrationPendingDto> accountRegistrationResend() =>
+    RustLib.instance.api.crateApiAccountRegistrationResend();
+
+Future<void> accountRegistrationVerifyOtp({required String otp}) =>
+    RustLib.instance.api.crateApiAccountRegistrationVerifyOtp(otp: otp);
+
+Future<AccountAuthResultDto> accountRegistrationComplete({
+  required String password,
+  String? deviceName,
+}) => RustLib.instance.api.crateApiAccountRegistrationComplete(
+  password: password,
   deviceName: deviceName,
 );
+
+Future<void> accountRegistrationAckRecoveryKey() =>
+    RustLib.instance.api.crateApiAccountRegistrationAckRecoveryKey();
+
+Future<String?> accountRegistrationRecoveryKey() =>
+    RustLib.instance.api.crateApiAccountRegistrationRecoveryKey();
 
 Future<AccountAuthResultDto> accountLogin({
   required String email,
@@ -445,12 +468,73 @@ class AccountAuthResultDto {
           recoveryKey == other.recoveryKey;
 }
 
+class AccountRegistrationPendingDto {
+  final String email;
+  final PlatformInt64 expiresAtMs;
+  final PlatformInt64 nextRetryAtMs;
+
+  const AccountRegistrationPendingDto({
+    required this.email,
+    required this.expiresAtMs,
+    required this.nextRetryAtMs,
+  });
+
+  @override
+  int get hashCode =>
+      email.hashCode ^ expiresAtMs.hashCode ^ nextRetryAtMs.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AccountRegistrationPendingDto &&
+          runtimeType == other.runtimeType &&
+          email == other.email &&
+          expiresAtMs == other.expiresAtMs &&
+          nextRetryAtMs == other.nextRetryAtMs;
+}
+
+class AccountRegistrationStateDto {
+  final String phase;
+  final String email;
+  final PlatformInt64 expiresAtMs;
+  final PlatformInt64? nextRetryAtMs;
+  final bool canCancel;
+
+  const AccountRegistrationStateDto({
+    required this.phase,
+    required this.email,
+    required this.expiresAtMs,
+    this.nextRetryAtMs,
+    required this.canCancel,
+  });
+
+  @override
+  int get hashCode =>
+      phase.hashCode ^
+      email.hashCode ^
+      expiresAtMs.hashCode ^
+      nextRetryAtMs.hashCode ^
+      canCancel.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AccountRegistrationStateDto &&
+          runtimeType == other.runtimeType &&
+          phase == other.phase &&
+          email == other.email &&
+          expiresAtMs == other.expiresAtMs &&
+          nextRetryAtMs == other.nextRetryAtMs &&
+          canCancel == other.canCancel;
+}
+
 class AccountSessionStateDto {
   final bool loggedIn;
   final String? email;
   final String? userId;
   final String? tenantId;
   final String? deviceId;
+  final bool recoveryPending;
 
   const AccountSessionStateDto({
     required this.loggedIn,
@@ -458,6 +542,7 @@ class AccountSessionStateDto {
     this.userId,
     this.tenantId,
     this.deviceId,
+    required this.recoveryPending,
   });
 
   @override
@@ -466,7 +551,8 @@ class AccountSessionStateDto {
       email.hashCode ^
       userId.hashCode ^
       tenantId.hashCode ^
-      deviceId.hashCode;
+      deviceId.hashCode ^
+      recoveryPending.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -477,7 +563,8 @@ class AccountSessionStateDto {
           email == other.email &&
           userId == other.userId &&
           tenantId == other.tenantId &&
-          deviceId == other.deviceId;
+          deviceId == other.deviceId &&
+          recoveryPending == other.recoveryPending;
 }
 
 class ActiveTimerSessionDto {

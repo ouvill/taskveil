@@ -1,4 +1,9 @@
-use axum::{extract::State, http::StatusCode, routing::get, Json, Router};
+use axum::{
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    routing::{get, post},
+    Json, Router,
+};
 use serde_json::{json, Value};
 
 use crate::SharedState;
@@ -13,6 +18,7 @@ pub fn router() -> Router<SharedState> {
     Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
+        .route("/internal/email/dispatch", post(dispatch_email))
         .route(
             "/.well-known/oauth-authorization-server",
             get(auth::authorization_server_metadata),
@@ -25,6 +31,29 @@ pub fn router() -> Router<SharedState> {
                 .merge(realtime::router())
                 .merge(billing::tenant_router()),
         )
+}
+
+async fn dispatch_email(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::email_verification::EmailDispatchSummary>, crate::AppError> {
+    let bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split_once(' '))
+        .filter(|(scheme, value)| {
+            scheme.eq_ignore_ascii_case("bearer") && !value.is_empty() && !value.contains(' ')
+        })
+        .map(|(_, value)| value)
+        .ok_or_else(crate::AppError::unauthorized)?;
+    if !state.email_verification.authorize_dispatch(bearer) {
+        return Err(crate::AppError::unauthorized());
+    }
+    state
+        .email_verification
+        .dispatch_email_batch(&state.pool)
+        .await
+        .map(Json)
 }
 
 async fn health() -> Json<Value> {
@@ -67,6 +96,7 @@ mod tests {
             resync_tokens: crate::resync_token::ResyncTokenKeyring::for_tests(),
             auth_protection: AuthProtection::new([0xA7; 32]),
             trust_source_ip_header: false,
+            email_verification: crate::email_verification::EmailVerificationService::for_tests(),
         });
         let (status, Json(body)) = ready(State(state)).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);

@@ -14,6 +14,8 @@ import 'package:taskveil/src/timer/timer_settings.dart';
 import 'package:taskveil/src/rust/api.dart'
     show
         AccountAuthResultDto,
+        AccountRegistrationPendingDto,
+        AccountRegistrationStateDto,
         AccountSessionStateDto,
         BillingStateDto,
         CalendarOccurrenceDto,
@@ -352,23 +354,53 @@ class AccountNotifier extends AsyncNotifier<AccountSessionStateDto> {
     return ref.watch(accountBridgeProvider).getAccountSessionState();
   }
 
-  Future<AccountAuthResultDto> register({
+  Future<AccountRegistrationPendingDto> registrationBegin({
     required String email,
-    required String password,
     String? serverUrl,
+  }) async {
+    final pending = await ref
+        .read(accountBridgeProvider)
+        .accountRegistrationBegin(email: email, serverUrl: serverUrl);
+    ref.invalidate(syncServerUrlProvider);
+    return pending;
+  }
+
+  Future<AccountRegistrationStateDto?> registrationState() {
+    return ref.read(accountBridgeProvider).accountRegistrationState();
+  }
+
+  Future<void> registrationCancel() {
+    return ref.read(accountBridgeProvider).accountRegistrationCancel();
+  }
+
+  Future<AccountRegistrationPendingDto> registrationResend() {
+    return ref.read(accountBridgeProvider).accountRegistrationResend();
+  }
+
+  Future<void> registrationVerifyOtp(String otp) {
+    return ref
+        .read(accountBridgeProvider)
+        .accountRegistrationVerifyOtp(otp: otp);
+  }
+
+  Future<AccountAuthResultDto> registrationComplete({
+    required String password,
     String? deviceName,
   }) async {
     final result = await ref
         .read(accountBridgeProvider)
-        .accountRegister(
-          email: email,
+        .accountRegistrationComplete(
           password: password,
-          serverUrl: serverUrl,
           deviceName: deviceName,
         );
     state = AsyncData(result.session);
-    ref.invalidate(syncServerUrlProvider);
     return result;
+  }
+
+  Future<void> registrationAckRecoveryKey() async {
+    final bridge = ref.read(accountBridgeProvider);
+    await bridge.accountRegistrationAckRecoveryKey();
+    state = AsyncData(await bridge.getAccountSessionState());
   }
 
   Future<AccountAuthResultDto> login({

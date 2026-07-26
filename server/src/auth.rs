@@ -23,9 +23,14 @@ use taskveil_protocol::account::{
 };
 use uuid::Uuid;
 
-use crate::{db, AppError};
+use crate::{
+    db,
+    email_verification::{canonicalize_email, EmailVerificationService},
+    AppError,
+};
 
 const OPAQUE_STATE_TTL_MINUTES: i64 = 10;
+const REGISTRATION_START_IDEMPOTENCY_TTL_MINUTES: i64 = 5;
 const ACCESS_TOKEN_TTL_MINUTES: i64 = 15;
 const REFRESH_TOKEN_IDLE_TTL_DAYS: i64 = 30;
 const SESSION_FAMILY_TTL_DAYS: i64 = 90;
@@ -42,7 +47,7 @@ type TaskveilServerSetup = ServerSetup<TaskveilCipherSuite>;
 type TaskveilServerRegistration = ServerRegistration<TaskveilCipherSuite>;
 type TaskveilServerLogin = ServerLogin<TaskveilCipherSuite>;
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct OpaqueStartRequest {
     pub email: String,
     pub device_name: Option<String>,
@@ -50,7 +55,15 @@ pub struct OpaqueStartRequest {
     pub message: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
+pub struct RegistrationOpaqueStartRequest {
+    pub registration_ticket: String,
+    pub device_name: Option<String>,
+    pub opaque_suite_id: u16,
+    pub message: String,
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct RegistrationStartResponse {
     pub state_id: Uuid,
     pub opaque_suite_id: u16,
@@ -60,6 +73,7 @@ pub struct RegistrationStartResponse {
     pub device_challenge: String,
     pub message: String,
     pub expires_at: DateTime<Utc>,
+    pub replay_expires_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -76,7 +90,7 @@ pub struct OpaqueFinishRequest {
     pub message: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RegisterFinishRequest {
     pub state_id: Uuid,
     pub message: String,
@@ -154,52 +168,99 @@ pub struct AuthContext {
 
 pub async fn register_start(
     pool: &PgPool,
-    request: OpaqueStartRequest,
+    email_verification: &EmailVerificationService,
+    request: RegistrationOpaqueStartRequest,
+    idempotency_key: &str,
     identifier_key: &[u8; 32],
 ) -> Result<RegistrationStartResponse, AppError> {
     validate_opaque_suite(request.opaque_suite_id)?;
-    let email = normalize_email(&request.email)?;
     let device_name = normalize_device_name(request.device_name);
     let client_message = decode_opaque_message(&request.message)?;
     let registration_request =
         RegistrationRequest::<TaskveilCipherSuite>::deserialize(&client_message)
             .map_err(|_| AppError::bad_request("invalid opaque message"))?;
+    let idempotency_key_digest = validate_and_hash_idempotency_key(idempotency_key)?;
+    let request_hash =
+        registration_start_request_hash(request.opaque_suite_id, &device_name, &client_message);
+
+    // A response-loss retry must not be rejected merely because unrelated new
+    // registrations have since filled the OPAQUE state capacity. Check the
+    // durable replay record before admission work, then check again in the
+    // claiming transaction to close the concurrent-first-request race.
+    let mut replay_tx = pool.begin().await?;
+    if let Some(response) = email_verification
+        .registration_start_replay(
+            &mut replay_tx,
+            &request.registration_ticket,
+            &idempotency_key_digest,
+            &request_hash,
+        )
+        .await?
+    {
+        let response = serde_json::from_slice(&response).map_err(|_| AppError::internal())?;
+        replay_tx.commit().await?;
+        return Ok(response);
+    }
+    replay_tx.rollback().await?;
+
     cleanup_expired_opaque_states(pool).await?;
     ensure_opaque_state_capacity_available(pool, identifier_key).await?;
     let server_setup = get_or_create_server_setup(pool).await?;
-    let server_start =
-        ServerRegistration::start(&server_setup, registration_request, email.as_bytes())
-            .map_err(|_| AppError::bad_request("invalid opaque message"))?;
+
+    let mut tx = pool.begin().await?;
+    if let Some(response) = email_verification
+        .registration_start_replay(
+            &mut tx,
+            &request.registration_ticket,
+            &idempotency_key_digest,
+            &request_hash,
+        )
+        .await?
+    {
+        let response = serde_json::from_slice(&response).map_err(|_| AppError::internal())?;
+        tx.commit().await?;
+        return Ok(response);
+    }
+    let verified = email_verification
+        .claim_registration_ticket(&mut tx, &request.registration_ticket)
+        .await?;
+    let server_start = ServerRegistration::start(
+        &server_setup,
+        registration_request,
+        verified.opaque_credential_id.as_bytes(),
+    )
+    .map_err(|_| AppError::bad_request("invalid opaque message"))?;
     let state_id = Uuid::now_v7();
     let user_id = Uuid::now_v7();
     let tenant_id = Uuid::now_v7();
     let device_id = Uuid::now_v7();
     let device_challenge = random_device_challenge();
     let expires_at = Utc::now() + Duration::minutes(OPAQUE_STATE_TTL_MINUTES);
+    let replay_expires_at =
+        Utc::now() + Duration::minutes(REGISTRATION_START_IDEMPOTENCY_TTL_MINUTES);
 
-    let mut tx = pool.begin().await?;
     sqlx::query(
         "INSERT INTO opaque_registration_states
-            (id, user_id, tenant_id, device_id, device_challenge, email, device_name,
-             opaque_suite_id, expires_at, identifier_key)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            (id, user_id, tenant_id, device_id, device_challenge, device_name,
+             opaque_suite_id, expires_at, identifier_key, challenge_id,
+             opaque_credential_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     )
     .bind(state_id)
     .bind(user_id)
     .bind(tenant_id)
     .bind(device_id)
     .bind(device_challenge.as_slice())
-    .bind(&email)
     .bind(&device_name)
     .bind(i16::try_from(CRYPTO_SUITE_ID).map_err(|_| AppError::internal())?)
     .bind(expires_at)
     .bind(identifier_key.as_slice())
+    .bind(verified.challenge_id)
+    .bind(verified.opaque_credential_id)
     .execute(&mut *tx)
     .await
     .map_err(map_opaque_state_insert_error)?;
-    tx.commit().await?;
-
-    Ok(RegistrationStartResponse {
+    let response = RegistrationStartResponse {
         state_id,
         opaque_suite_id: CRYPTO_SUITE_ID,
         user_id,
@@ -208,13 +269,42 @@ pub async fn register_start(
         device_challenge: STANDARD.encode(device_challenge),
         message: STANDARD.encode(server_start.message.serialize()),
         expires_at,
-    })
+        replay_expires_at,
+    };
+    let response_bytes = serde_json::to_vec(&response).map_err(|_| AppError::internal())?;
+    email_verification
+        .store_registration_start_response(
+            &mut tx,
+            verified.challenge_id,
+            &idempotency_key_digest,
+            &request_hash,
+            &response_bytes,
+            replay_expires_at,
+        )
+        .await?;
+    tx.commit().await?;
+    Ok(response)
 }
 
 pub async fn register_finish(
     pool: &PgPool,
+    email_verification: &EmailVerificationService,
     request: RegisterFinishRequest,
+    idempotency_key: &str,
 ) -> Result<SessionResponse, AppError> {
+    let state_id = request.state_id;
+    let idempotency_key_digest = validate_and_hash_idempotency_key(idempotency_key)?;
+    let request_hash = registration_finish_request_hash(&request)?;
+    let mut tx = pool.begin().await?;
+    if let Some(response) = email_verification
+        .registration_finish_replay(&mut tx, &idempotency_key_digest, &request_hash)
+        .await?
+    {
+        let response = serde_json::from_slice(&response).map_err(|_| AppError::internal())?;
+        tx.commit().await?;
+        return Ok(response);
+    }
+
     let upload = decode_opaque_message(&request.message)?;
     let registration_upload = RegistrationUpload::<TaskveilCipherSuite>::deserialize(&upload)
         .map_err(|_| AppError::bad_request("invalid opaque message"))?;
@@ -222,8 +312,7 @@ pub async fn register_finish(
     let server_record_bytes = server_record.serialize().to_vec();
     let key_bundle = decode_account_key_bundle(&request.key_bundle)?;
 
-    let mut tx = pool.begin().await?;
-    let state = consume_registration_state(&mut tx, request.state_id).await?;
+    let state = consume_registration_state(&mut tx, email_verification, state_id).await?;
     let user_id = state.user_id;
     let tenant_id = state.tenant_id;
     let device_id = state.device_id;
@@ -237,20 +326,41 @@ pub async fn register_finish(
     if key_bundle.account_root_public != enrollment.account_root_public {
         return Err(AppError::bad_request("account root mismatch"));
     }
+    if state.is_decoy {
+        sqlx::query(
+            "DELETE FROM email_registration_reservations
+             WHERE challenge_id = $1",
+        )
+        .bind(state.challenge_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        return Err(AppError::bad_request("registration unavailable"));
+    }
 
-    sqlx::query!(
+    sqlx::query(
         "INSERT INTO users
-            (id, email, opaque_suite_id, opaque_record, account_root_public)
-         VALUES ($1, $2, $3, $4, $5)",
-        user_id,
-        &state.email,
-        i16::try_from(CRYPTO_SUITE_ID).map_err(|_| AppError::internal())?,
-        &server_record_bytes,
-        &enrollment.account_root_public,
+            (id, email, canonical_email, opaque_credential_id, opaque_suite_id,
+             opaque_record, account_root_public)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
+    .bind(user_id)
+    .bind(&state.display_email)
+    .bind(&state.canonical_email)
+    .bind(state.opaque_credential_id)
+    .bind(i16::try_from(CRYPTO_SUITE_ID).map_err(|_| AppError::internal())?)
+    .bind(&server_record_bytes)
+    .bind(&enrollment.account_root_public)
     .execute(&mut *tx)
     .await
     .map_err(map_insert_user_error)?;
+    sqlx::query(
+        "DELETE FROM email_registration_reservations
+         WHERE challenge_id = $1",
+    )
+    .bind(state.challenge_id)
+    .execute(&mut *tx)
+    .await?;
 
     sqlx::query!(
         "INSERT INTO billing_customers (user_id) VALUES ($1)",
@@ -287,14 +397,25 @@ pub async fn register_finish(
     insert_account_key_bundle(&mut tx, user_id, tenant_id, key_bundle).await?;
     insert_certified_device(&mut tx, device_id, user_id, &state.device_name, &enrollment).await?;
     let tokens = create_session(&mut tx, user_id, device_id).await?;
-    tx.commit().await?;
-
-    Ok(SessionResponse {
+    let response = SessionResponse {
         user_id,
         tenant_id,
         device_id,
         tokens,
-    })
+    };
+    let response_bytes = serde_json::to_vec(&response).map_err(|_| AppError::internal())?;
+    email_verification
+        .store_registration_finish_response(
+            &mut tx,
+            state_id,
+            state.challenge_id,
+            &idempotency_key_digest,
+            &request_hash,
+            &response_bytes,
+        )
+        .await?;
+    tx.commit().await?;
+    Ok(response)
 }
 
 pub async fn login_start(
@@ -303,7 +424,7 @@ pub async fn login_start(
     identifier_key: &[u8; 32],
 ) -> Result<LoginStartResponse, AppError> {
     validate_opaque_suite(request.opaque_suite_id)?;
-    let email = normalize_email(&request.email)?;
+    let email = canonicalize_email(&request.email)?;
     let device_name = normalize_device_name(request.device_name);
     let client_message = decode_opaque_message(&request.message)?;
     let credential_request = CredentialRequest::<TaskveilCipherSuite>::deserialize(&client_message)
@@ -311,17 +432,19 @@ pub async fn login_start(
     cleanup_expired_opaque_states(pool).await?;
     ensure_opaque_state_capacity_available(pool, identifier_key).await?;
 
-    let account = sqlx::query!(
-        "SELECT u.id, u.opaque_record, u.opaque_suite_id
-             FROM users u WHERE lower(u.email) = lower($1)",
-        &email,
+    let account = sqlx::query(
+        "SELECT u.id, u.opaque_record, u.opaque_suite_id, u.opaque_credential_id
+             FROM users u WHERE u.canonical_email = $1",
     )
+    .bind(email.canonical())
     .fetch_optional(pool)
     .await?;
     // Run the same membership lookup for known and unknown accounts. A random
     // user context gives the RLS-protected query the same database shape
     // without introducing a persistent decoy identity.
-    let lookup_user_id = account.as_ref().map_or_else(Uuid::now_v7, |row| row.id);
+    let lookup_user_id = account
+        .as_ref()
+        .map_or_else(Uuid::now_v7, |row| row.get("id"));
     let mut membership_tx = pool.begin().await?;
     db::set_user_context(&mut membership_tx, lookup_user_id).await?;
     let tenant_id = sqlx::query_scalar!(
@@ -336,16 +459,28 @@ pub async fn login_start(
     let expected_suite = i16::try_from(CRYPTO_SUITE_ID).map_err(|_| AppError::internal())?;
     let identity = account
         .and_then(|row| {
-            (row.opaque_suite_id == expected_suite)
-                .then(|| TaskveilServerRegistration::deserialize(&row.opaque_record).ok())
+            let suite_id: i16 = row.get("opaque_suite_id");
+            let opaque_record: Vec<u8> = row.get("opaque_record");
+            (suite_id == expected_suite)
+                .then(|| TaskveilServerRegistration::deserialize(&opaque_record).ok())
                 .flatten()
-                .map(|record| (row.id, record))
+                .map(|record| {
+                    (
+                        row.get::<Uuid, _>("id"),
+                        row.get::<Uuid, _>("opaque_credential_id"),
+                        record,
+                    )
+                })
         })
         .zip(tenant_id)
-        .map(|((user_id, record), tenant_id)| (user_id, tenant_id, record));
-    let (user_id, tenant_id, server_record) = match identity {
-        Some((user_id, tenant_id, record)) => (Some(user_id), Some(tenant_id), Some(record)),
-        None => (None, None, None),
+        .map(|((user_id, credential_id, record), tenant_id)| {
+            (user_id, tenant_id, credential_id, record)
+        });
+    let (user_id, tenant_id, opaque_credential_id, server_record) = match identity {
+        Some((user_id, tenant_id, credential_id, record)) => {
+            (Some(user_id), Some(tenant_id), credential_id, Some(record))
+        }
+        None => (None, None, Uuid::now_v7(), None),
     };
     let server_setup = get_or_create_server_setup(pool).await?;
     let mut rng = OsRng;
@@ -354,7 +489,7 @@ pub async fn login_start(
         &server_setup,
         server_record,
         credential_request,
-        email.as_bytes(),
+        opaque_credential_id.as_bytes(),
         ServerLoginParameters::default(),
     )
     .map_err(|_| AppError::bad_request("invalid opaque message"))?;
@@ -1027,14 +1162,6 @@ pub async fn cleanup_expired_auth_state(pool: &PgPool) -> Result<u64, AppError> 
         + cleanup_expired_opaque_states(pool).await?)
 }
 
-pub(crate) fn normalize_email(email: &str) -> Result<String, AppError> {
-    let email = email.trim().to_ascii_lowercase();
-    if email.is_empty() || email.len() > 320 || !email.is_ascii() || !email.contains('@') {
-        return Err(AppError::bad_request("invalid email"));
-    }
-    Ok(email)
-}
-
 fn normalize_device_name(device_name: Option<String>) -> String {
     let trimmed = device_name
         .unwrap_or_else(|| "Taskveil device".to_string())
@@ -1045,6 +1172,42 @@ fn normalize_device_name(device_name: Option<String>) -> String {
     } else {
         trimmed.chars().take(120).collect()
     }
+}
+
+fn validate_and_hash_idempotency_key(value: &str) -> Result<[u8; 32], AppError> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(AppError::bad_request("invalid idempotency key"));
+    }
+    Ok(Sha256::digest(value.as_bytes()).into())
+}
+
+fn registration_start_request_hash(
+    opaque_suite_id: u16,
+    device_name: &str,
+    message: &[u8],
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"taskveil/register-start-request/v1\0");
+    digest.update(opaque_suite_id.to_be_bytes());
+    digest.update((device_name.len() as u64).to_be_bytes());
+    digest.update(device_name.as_bytes());
+    digest.update((message.len() as u64).to_be_bytes());
+    digest.update(message);
+    digest.finalize().into()
+}
+
+fn registration_finish_request_hash(request: &RegisterFinishRequest) -> Result<[u8; 32], AppError> {
+    let encoded = serde_json::to_vec(request).map_err(|_| AppError::internal())?;
+    let mut digest = Sha256::new();
+    digest.update(b"taskveil/register-finish-request/v1\0");
+    digest.update((encoded.len() as u64).to_be_bytes());
+    digest.update(encoded);
+    Ok(digest.finalize().into())
 }
 
 fn validate_opaque_suite(suite_id: u16) -> Result<(), AppError> {
@@ -1106,38 +1269,57 @@ struct RegistrationState {
     tenant_id: Uuid,
     device_id: Uuid,
     device_challenge: [u8; DEVICE_CHALLENGE_LEN],
-    email: String,
+    challenge_id: Uuid,
+    opaque_credential_id: Uuid,
+    display_email: String,
+    canonical_email: String,
     device_name: String,
+    is_decoy: bool,
 }
 
 async fn consume_registration_state(
     tx: &mut PgTransaction<'_>,
+    email_verification: &EmailVerificationService,
     state_id: Uuid,
 ) -> Result<RegistrationState, AppError> {
-    let row = sqlx::query!(
-        "DELETE FROM opaque_registration_states
-         WHERE id = $1 AND expires_at > now()
-         RETURNING user_id, tenant_id, device_id, device_challenge, email, device_name,
-                   opaque_suite_id",
-        state_id,
+    let row = sqlx::query(
+        "WITH consumed AS (
+             DELETE FROM opaque_registration_states
+             WHERE id = $1 AND expires_at > now()
+             RETURNING user_id, tenant_id, device_id, device_challenge, device_name,
+                       opaque_suite_id, challenge_id, opaque_credential_id
+         )
+         SELECT consumed.*, challenge.encrypted_registration, challenge.is_decoy
+         FROM consumed
+         JOIN email_registration_challenges challenge
+           ON challenge.id = consumed.challenge_id",
     )
+    .bind(state_id)
     .fetch_optional(&mut **tx)
     .await?
     .ok_or_else(|| AppError::bad_request("invalid or expired opaque state"))?;
-    let suite_id = row.opaque_suite_id;
+    let suite_id: i16 = row.try_get("opaque_suite_id")?;
     if suite_id != i16::try_from(CRYPTO_SUITE_ID).map_err(|_| AppError::internal())? {
         return Err(AppError::bad_request("unsupported opaque suite"));
     }
+    let challenge_id: Uuid = row.try_get("challenge_id")?;
+    let encrypted_registration: Vec<u8> = row.try_get("encrypted_registration")?;
+    let (display_email, canonical_email) =
+        email_verification.open_registration_identity(challenge_id, &encrypted_registration)?;
     Ok(RegistrationState {
-        user_id: row.user_id,
-        tenant_id: row.tenant_id,
-        device_id: row.device_id,
+        user_id: row.try_get("user_id")?,
+        tenant_id: row.try_get("tenant_id")?,
+        device_id: row.try_get("device_id")?,
         device_challenge: row
-            .device_challenge
+            .try_get::<Vec<u8>, _>("device_challenge")?
             .try_into()
             .map_err(|_| AppError::internal())?,
-        email: row.email,
-        device_name: row.device_name,
+        challenge_id,
+        opaque_credential_id: row.try_get("opaque_credential_id")?,
+        display_email,
+        canonical_email,
+        device_name: row.try_get("device_name")?,
+        is_decoy: row.try_get("is_decoy")?,
     })
 }
 
@@ -1555,24 +1737,12 @@ fn hash_token(token: &str) -> [u8; 32] {
 
 fn map_insert_user_error(error: sqlx_core::Error) -> AppError {
     if let sqlx_core::Error::Database(db_error) = &error {
-        if db_error.constraint() == Some("users_email_lower_unique") {
-            return AppError::conflict("account already exists");
+        if matches!(
+            db_error.constraint(),
+            Some("users_canonical_email_unique" | "users_opaque_credential_id_unique")
+        ) {
+            return AppError::bad_request("registration unavailable");
         }
     }
     AppError::from(error)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::normalize_email;
-
-    #[test]
-    fn email_canonicalization_rejects_unicode_case_variants() {
-        assert_eq!(
-            normalize_email(" Alice@Example.COM ").expect("ASCII email"),
-            "alice@example.com"
-        );
-        assert!(normalize_email("élise@example.com").is_err());
-        assert!(normalize_email("ÉLISE@example.com").is_err());
-    }
 }

@@ -13,6 +13,7 @@ on:
       - "tool/deploy/**"
       - "tool/prepare_lambda_extension.sh"
       - "realtime-worker/wrangler.jsonc"
+      - "auth-email-worker/wrangler.jsonc"
   push:
     branches: [main]
     paths:
@@ -24,6 +25,7 @@ on:
       - "tool/deploy/**"
       - "tool/prepare_lambda_extension.sh"
       - "realtime-worker/wrangler.jsonc"
+      - "auth-email-worker/wrangler.jsonc"
 
 permissions:
   contents: read

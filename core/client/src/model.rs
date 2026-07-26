@@ -20,6 +20,7 @@ pub struct AccountSessionState {
     pub user_id: Option<String>,
     pub tenant_id: Option<String>,
     pub device_id: Option<String>,
+    pub recovery_pending: bool,
 }
 
 impl AccountSessionState {
@@ -30,6 +31,7 @@ impl AccountSessionState {
             user_id: None,
             tenant_id: None,
             device_id: None,
+            recovery_pending: false,
         }
     }
 }

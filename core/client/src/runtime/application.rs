@@ -1929,6 +1929,7 @@ mod tests {
                     user_id: Some("user".into()),
                     tenant_id: Some("tenant".into()),
                     device_id: Some("device".into()),
+                    recovery_pending: false,
                 }),
                 session_restored: true,
                 loaded_credential_generation: None,

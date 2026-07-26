@@ -30,7 +30,6 @@ variable "auth_limit_hmac_key_generation" {
   type    = number
   default = 1
 }
-
 check "staging_inventory" {
   assert {
     condition     = length(trimspace(var.neon_project_id)) > 0

@@ -3,6 +3,7 @@ mod application;
 mod recurrence;
 mod sync;
 
+pub use account::{AccountRegistrationPending, AccountRegistrationPhase, AccountRegistrationState};
 pub use application::{
     CalendarOccurrenceKind, CalendarOccurrenceView, CalendarRange, CreateTaskCommand, HomeTaskView,
     ReminderView, ReorderTaskCommand, SetTaskStatusCommand, TaskUndoKind, TaskUndoView,
@@ -584,12 +585,10 @@ mod async_contract_tests {
 
     #[allow(dead_code)]
     fn network_api_futures_are_send(client: &TaskveilClient) {
-        assert_send(client.account_register(
-            "user@example.com".into(),
-            "password".into(),
-            None,
-            None,
-        ));
+        assert_send(client.account_registration_begin("user@example.com".into()));
+        assert_send(client.account_registration_resend());
+        assert_send(client.account_registration_verify_otp("12345678".into()));
+        assert_send(client.account_registration_complete("password".into(), None));
         assert_send(client.account_login("user@example.com".into(), "password".into(), None, None));
         assert_send(client.account_logout());
         assert_send(client.sync_now());

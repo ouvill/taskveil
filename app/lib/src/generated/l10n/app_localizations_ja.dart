@@ -856,6 +856,33 @@ class AppLocalizationsJa extends AppLocalizations {
   String get accountRegisterButton => '登録';
 
   @override
+  String get accountVerificationPending =>
+      'メールで届いた8桁の確認コードを入力してください。確認できるのはメールボックスへのアクセスだけで、暗号化データの復旧には使用できません。';
+
+  @override
+  String get accountVerificationCodeLabel => '8桁の確認コード';
+
+  @override
+  String get accountVerifyCodeButton => 'コードを確認';
+
+  @override
+  String get accountResendCodeButton => 'コードを再送';
+
+  @override
+  String accountResendAvailableIn(int seconds) {
+    return '$seconds秒後に再送できます。';
+  }
+
+  @override
+  String get accountCancelRegistrationButton => '登録を中止';
+
+  @override
+  String get accountSetPasswordButton => 'パスワードを設定して完了';
+
+  @override
+  String get accountRecoveryAcknowledgeButton => 'Recovery Keyを保存しました';
+
+  @override
   String get accountLogoutButton => 'ログアウト';
 
   @override

@@ -4,12 +4,27 @@ import 'package:taskveil/src/rust/api.dart' as rust_api;
 abstract interface class AccountBridgePort {
   Future<rust_api.AccountSessionStateDto> getAccountSessionState();
 
-  Future<rust_api.AccountAuthResultDto> accountRegister({
+  Future<rust_api.AccountRegistrationPendingDto> accountRegistrationBegin({
     required String email,
-    required String password,
     String? serverUrl,
+  });
+
+  Future<rust_api.AccountRegistrationStateDto?> accountRegistrationState();
+
+  Future<void> accountRegistrationCancel();
+
+  Future<rust_api.AccountRegistrationPendingDto> accountRegistrationResend();
+
+  Future<void> accountRegistrationVerifyOtp({required String otp});
+
+  Future<rust_api.AccountAuthResultDto> accountRegistrationComplete({
+    required String password,
     String? deviceName,
   });
+
+  Future<void> accountRegistrationAckRecoveryKey();
+
+  Future<String?> accountRegistrationRecoveryKey();
 
   Future<rust_api.AccountAuthResultDto> accountLogin({
     required String email,

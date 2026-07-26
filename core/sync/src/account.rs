@@ -1,10 +1,16 @@
 //! Account registration/login client and key bundle DTOs.
 
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine as _,
+};
 use chrono::{DateTime, Utc};
+use hmac::{Hmac, Mac};
 use opaque_ke::{ClientLogin, ClientRegistration, CredentialResponse, RegistrationResponse};
-use rand::rngs::OsRng;
+use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use taskveil_crypto::{
     key_hierarchy::{
         derive_kek_pw, derive_recovery_wrap_key, generate_master_key, generate_recovery_key,
@@ -25,7 +31,7 @@ use taskveil_crypto::{
 };
 use thiserror::Error;
 use uuid::Uuid;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::{KeyManifest, KeyManifestError, RotationStatus};
 pub use taskveil_protocol::account::{
@@ -61,6 +67,10 @@ pub enum AccountClientError {
     KeyBundleConflict,
     #[error("organization public-key verification failed")]
     OrganizationVerification,
+    #[error("email verification expired")]
+    EmailVerificationExpired,
+    #[error("email verification resend is available at {0} milliseconds since Unix epoch")]
+    EmailVerificationRetryAt(i64),
 }
 
 pub struct AccountClient {
@@ -74,6 +84,309 @@ pub struct AccountRegisterOutcome {
     pub local_wrapped_master_key: Vec<u8>,
     pub keys: AccountKeyMaterial,
     pub device_identity: DeviceIdentity,
+}
+
+pub enum AccountRegistrationReconcile {
+    Pending,
+    Committed(Box<AccountRegisterOutcome>),
+}
+
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+pub struct AccountRegistrationRequestPrepared {
+    version: u8,
+    origin: String,
+    email: String,
+    request_body: Vec<u8>,
+    request_idempotency_key: String,
+    handoff_secret: String,
+    expires_at_ms: i64,
+}
+
+impl AccountRegistrationRequestPrepared {
+    pub fn encode(&self) -> Result<Zeroizing<Vec<u8>>, AccountClientError> {
+        serde_json::to_vec(self)
+            .map(Zeroizing::new)
+            .map_err(|_| AccountClientError::Opaque)
+    }
+
+    pub fn decode(value: &[u8]) -> Result<Self, AccountClientError> {
+        let prepared: Self =
+            serde_json::from_slice(value).map_err(|_| AccountClientError::Opaque)?;
+        if prepared.version != 1
+            || prepared.origin.is_empty()
+            || prepared.email.is_empty()
+            || prepared.request_body.is_empty()
+            || prepared.request_idempotency_key.is_empty()
+            || prepared.handoff_secret.is_empty()
+            || prepared.expires_at_ms <= 0
+        {
+            return Err(AccountClientError::Opaque);
+        }
+        Ok(prepared)
+    }
+
+    pub fn origin(&self) -> &str {
+        &self.origin
+    }
+
+    pub fn email(&self) -> &str {
+        &self.email
+    }
+
+    pub fn expires_at_ms(&self) -> i64 {
+        self.expires_at_ms
+    }
+}
+
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+pub struct AccountRegistrationMailbox {
+    version: u8,
+    origin: String,
+    email: String,
+    request_id: String,
+    handoff_secret: String,
+    resend_idempotency_key: String,
+    verify_idempotency_key: String,
+    #[serde(default)]
+    verify_request_binding: Option<String>,
+    expires_at_ms: i64,
+    next_retry_at_ms: i64,
+}
+
+impl AccountRegistrationMailbox {
+    pub fn encode(&self) -> Result<Zeroizing<Vec<u8>>, AccountClientError> {
+        serde_json::to_vec(self)
+            .map(Zeroizing::new)
+            .map_err(|_| AccountClientError::Opaque)
+    }
+
+    pub fn decode(value: &[u8]) -> Result<Self, AccountClientError> {
+        let mailbox: Self =
+            serde_json::from_slice(value).map_err(|_| AccountClientError::Opaque)?;
+        if mailbox.version != 1
+            || mailbox.origin.is_empty()
+            || mailbox.email.is_empty()
+            || Uuid::parse_str(&mailbox.request_id).is_err()
+            || mailbox.handoff_secret.is_empty()
+            || mailbox.resend_idempotency_key.is_empty()
+            || mailbox.verify_idempotency_key.is_empty()
+            || mailbox.expires_at_ms <= 0
+            || mailbox.next_retry_at_ms <= 0
+        {
+            return Err(AccountClientError::Opaque);
+        }
+        Ok(mailbox)
+    }
+
+    pub fn origin(&self) -> &str {
+        &self.origin
+    }
+
+    pub fn email(&self) -> &str {
+        &self.email
+    }
+
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    pub fn expires_at_ms(&self) -> i64 {
+        self.expires_at_ms
+    }
+
+    pub fn prepare_otp_attempt(&mut self, otp: &str) -> Result<(), AccountClientError> {
+        if otp.len() != 8 || !otp.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(AccountClientError::EmailVerificationExpired);
+        }
+        let handoff_secret = URL_SAFE_NO_PAD
+            .decode(&self.handoff_secret)
+            .map_err(|_| AccountClientError::Base64)?;
+        let mut mac = Hmac::<Sha256>::new_from_slice(&handoff_secret)
+            .map_err(|_| AccountClientError::Opaque)?;
+        mac.update(b"taskveil/email/registration-verify-binding/v1\0");
+        mac.update(otp.as_bytes());
+        let binding = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+        if self.verify_request_binding.as_deref() != Some(binding.as_str()) {
+            self.verify_idempotency_key = Uuid::now_v7().to_string();
+            self.verify_request_binding = Some(binding);
+        }
+        Ok(())
+    }
+
+    fn apply_resend_response(&mut self, response: &RegistrationRequestResponse) {
+        self.expires_at_ms = response.expires_at.timestamp_millis();
+        self.next_retry_at_ms = response.next_retry_at.timestamp_millis();
+        self.resend_idempotency_key = Uuid::now_v7().to_string();
+        // A resend creates a new OTP generation. Its verify idempotency
+        // namespace must not inherit a rejected outcome from the prior
+        // generation, even if the random OTP value happens to repeat.
+        self.verify_idempotency_key = Uuid::now_v7().to_string();
+        self.verify_request_binding = None;
+    }
+
+    pub fn next_retry_at_ms(&self) -> i64 {
+        self.next_retry_at_ms
+    }
+}
+
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+pub struct AccountRegistrationVerified {
+    version: u8,
+    origin: String,
+    email: String,
+    request_id: String,
+    handoff_secret: String,
+    registration_ticket: String,
+    expires_at_ms: i64,
+}
+
+impl AccountRegistrationVerified {
+    pub fn encode(&self) -> Result<Zeroizing<Vec<u8>>, AccountClientError> {
+        serde_json::to_vec(self)
+            .map(Zeroizing::new)
+            .map_err(|_| AccountClientError::Opaque)
+    }
+
+    pub fn decode(value: &[u8]) -> Result<Self, AccountClientError> {
+        let verified: Self =
+            serde_json::from_slice(value).map_err(|_| AccountClientError::Opaque)?;
+        if verified.version != 1
+            || verified.origin.is_empty()
+            || verified.email.is_empty()
+            || Uuid::parse_str(&verified.request_id).is_err()
+            || verified.handoff_secret.is_empty()
+            || verified.registration_ticket.is_empty()
+            || verified.expires_at_ms <= 0
+        {
+            return Err(AccountClientError::Opaque);
+        }
+        Ok(verified)
+    }
+
+    pub fn origin(&self) -> &str {
+        &self.origin
+    }
+
+    pub fn email(&self) -> &str {
+        &self.email
+    }
+
+    pub fn expires_at_ms(&self) -> i64 {
+        self.expires_at_ms
+    }
+}
+
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+pub struct AccountRegistrationStartPrepared {
+    version: u8,
+    origin: String,
+    email: String,
+    request_id: String,
+    handoff_secret: String,
+    start_body: Vec<u8>,
+    start_idempotency_key: String,
+    client_registration_state: Vec<u8>,
+    expires_at_ms: i64,
+}
+
+impl AccountRegistrationStartPrepared {
+    pub fn encode(&self) -> Result<Zeroizing<Vec<u8>>, AccountClientError> {
+        serde_json::to_vec(self)
+            .map(Zeroizing::new)
+            .map_err(|_| AccountClientError::Opaque)
+    }
+
+    pub fn decode(value: &[u8]) -> Result<Self, AccountClientError> {
+        let prepared: Self =
+            serde_json::from_slice(value).map_err(|_| AccountClientError::Opaque)?;
+        if prepared.version != 1
+            || prepared.origin.is_empty()
+            || prepared.email.is_empty()
+            || Uuid::parse_str(&prepared.request_id).is_err()
+            || prepared.handoff_secret.is_empty()
+            || prepared.start_body.is_empty()
+            || prepared.start_idempotency_key.is_empty()
+            || prepared.client_registration_state.is_empty()
+            || prepared.expires_at_ms <= 0
+        {
+            return Err(AccountClientError::Opaque);
+        }
+        Ok(prepared)
+    }
+
+    pub fn origin(&self) -> &str {
+        &self.origin
+    }
+
+    pub fn email(&self) -> &str {
+        &self.email
+    }
+
+    pub fn expires_at_ms(&self) -> i64 {
+        self.expires_at_ms
+    }
+}
+
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+pub struct AccountRegistrationPrepared {
+    version: u8,
+    origin: String,
+    email: String,
+    request_id: String,
+    handoff_secret: String,
+    finish_body: Vec<u8>,
+    start_idempotency_key: String,
+    finish_idempotency_key: String,
+    expires_at_ms: i64,
+    recovery_key: String,
+    local_wrapped_master_key: Vec<u8>,
+    generation: u64,
+    tenant_generation: u64,
+    master_key: Vec<u8>,
+    account_root_private: Vec<u8>,
+    account_root_public: Vec<u8>,
+    tenant_root_dek: Vec<u8>,
+    device_identity: Vec<u8>,
+}
+
+impl AccountRegistrationPrepared {
+    pub fn encode(&self) -> Result<Zeroizing<Vec<u8>>, AccountClientError> {
+        serde_json::to_vec(self)
+            .map(Zeroizing::new)
+            .map_err(|_| AccountClientError::Opaque)
+    }
+
+    pub fn decode(value: &[u8]) -> Result<Self, AccountClientError> {
+        let prepared: Self =
+            serde_json::from_slice(value).map_err(|_| AccountClientError::Opaque)?;
+        if prepared.version != 1
+            || prepared.origin.is_empty()
+            || prepared.email.is_empty()
+            || Uuid::parse_str(&prepared.request_id).is_err()
+            || prepared.handoff_secret.is_empty()
+            || prepared.finish_body.is_empty()
+            || prepared.start_idempotency_key.is_empty()
+            || prepared.finish_idempotency_key.is_empty()
+            || prepared.expires_at_ms <= 0
+            || prepared.master_key.len() != KEY_LEN
+            || prepared.tenant_root_dek.len() != KEY_LEN
+        {
+            return Err(AccountClientError::Opaque);
+        }
+        Ok(prepared)
+    }
+
+    pub fn origin(&self) -> &str {
+        &self.origin
+    }
+
+    pub fn email(&self) -> &str {
+        &self.email
+    }
+
+    pub fn expires_at_ms(&self) -> i64 {
+        self.expires_at_ms
+    }
 }
 
 pub struct AccountLoginProvisional {
@@ -298,27 +611,223 @@ impl AccountClient {
         Ok(Self { base_url, http })
     }
 
-    pub async fn register(
+    pub async fn begin_registration(
         &self,
         email: &str,
+    ) -> Result<AccountRegistrationMailbox, AccountClientError> {
+        let prepared = self.prepare_registration_request(email)?;
+        self.send_registration_request(&prepared).await
+    }
+
+    pub fn prepare_registration_request(
+        &self,
+        email: &str,
+    ) -> Result<AccountRegistrationRequestPrepared, AccountClientError> {
+        let mut handoff_secret = Zeroizing::new([0u8; 32]);
+        OsRng.fill_bytes(&mut *handoff_secret);
+        let handoff_challenge: [u8; 32] = Sha256::digest(handoff_secret.as_slice()).into();
+        let request_body = serde_json::to_vec(&RegistrationRequest {
+            email: email.to_string(),
+            handoff_challenge: URL_SAFE_NO_PAD.encode(handoff_challenge),
+        })
+        .map_err(|_| AccountClientError::Opaque)?;
+        Ok(AccountRegistrationRequestPrepared {
+            version: 1,
+            origin: self.base_url.clone(),
+            email: email.to_string(),
+            request_body,
+            request_idempotency_key: Uuid::now_v7().to_string(),
+            handoff_secret: URL_SAFE_NO_PAD.encode(handoff_secret.as_slice()),
+            expires_at_ms: Utc::now().timestamp_millis()
+                + chrono::Duration::minutes(35).num_milliseconds(),
+        })
+    }
+
+    pub async fn send_registration_request(
+        &self,
+        prepared: &AccountRegistrationRequestPrepared,
+    ) -> Result<AccountRegistrationMailbox, AccountClientError> {
+        if prepared.version != 1
+            || prepared.origin != self.base_url
+            || Utc::now().timestamp_millis() >= prepared.expires_at_ms
+        {
+            return Err(AccountClientError::EmailVerificationExpired);
+        }
+        let verification = self
+            .post_json_bytes_with_idempotency::<RegistrationRequestResponse>(
+                "/v1/auth/register/request",
+                &prepared.request_body,
+                &prepared.request_idempotency_key,
+            )
+            .await?;
+        Ok(AccountRegistrationMailbox {
+            version: 1,
+            origin: self.base_url.clone(),
+            email: prepared.email.clone(),
+            request_id: verification.request_id.to_string(),
+            handoff_secret: prepared.handoff_secret.clone(),
+            resend_idempotency_key: Uuid::now_v7().to_string(),
+            verify_idempotency_key: Uuid::now_v7().to_string(),
+            verify_request_binding: None,
+            expires_at_ms: verification.expires_at.timestamp_millis(),
+            next_retry_at_ms: verification.next_retry_at.timestamp_millis(),
+        })
+    }
+
+    pub async fn resend_registration(
+        &self,
+        mailbox: &mut AccountRegistrationMailbox,
+    ) -> Result<(), AccountClientError> {
+        if mailbox.version != 1
+            || mailbox.origin != self.base_url
+            || Utc::now().timestamp_millis() >= mailbox.expires_at_ms
+        {
+            return Err(AccountClientError::EmailVerificationExpired);
+        }
+        let now_ms = Utc::now().timestamp_millis();
+        if mailbox.next_retry_at_ms > now_ms {
+            return Err(AccountClientError::EmailVerificationRetryAt(
+                mailbox.next_retry_at_ms,
+            ));
+        }
+        let request_id =
+            Uuid::parse_str(&mailbox.request_id).map_err(|_| AccountClientError::Opaque)?;
+        let response = self
+            .http
+            .post(format!("{}{}", self.base_url, "/v1/auth/register/resend"))
+            .header("idempotency-key", &mailbox.resend_idempotency_key)
+            .json(&RegistrationResendRequest {
+                request_id,
+                handoff_secret: mailbox.handoff_secret.clone(),
+            })
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(account_response_error(response.status()));
+        }
+        let response = response
+            .json::<RegistrationRequestResponse>()
+            .await
+            .map_err(AccountClientError::Http)?;
+        mailbox.apply_resend_response(&response);
+        Ok(())
+    }
+
+    pub async fn verify_registration_otp(
+        &self,
+        mailbox: &AccountRegistrationMailbox,
+        otp: &str,
+    ) -> Result<AccountRegistrationVerified, AccountClientError> {
+        if mailbox.version != 1
+            || mailbox.origin != self.base_url
+            || Utc::now().timestamp_millis() >= mailbox.expires_at_ms
+            || otp.len() != 8
+            || !otp.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Err(AccountClientError::EmailVerificationExpired);
+        }
+        let request_id =
+            Uuid::parse_str(&mailbox.request_id).map_err(|_| AccountClientError::Opaque)?;
+        let response = self
+            .http
+            .post(format!("{}{}", self.base_url, "/v1/auth/register/verify"))
+            .header("idempotency-key", &mailbox.verify_idempotency_key)
+            .json(&RegistrationVerifyRequest {
+                request_id,
+                handoff_secret: mailbox.handoff_secret.clone(),
+                otp: otp.to_string(),
+            })
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(account_response_error(response.status()));
+        }
+        let response = response
+            .json::<RegistrationVerifyResponse>()
+            .await
+            .map_err(AccountClientError::Http)?;
+        Ok(AccountRegistrationVerified {
+            version: 1,
+            origin: mailbox.origin.clone(),
+            email: mailbox.email.clone(),
+            request_id: mailbox.request_id.clone(),
+            handoff_secret: mailbox.handoff_secret.clone(),
+            registration_ticket: response.registration_ticket,
+            expires_at_ms: response.expires_at.timestamp_millis(),
+        })
+    }
+
+    pub async fn prepare_registration(
+        &self,
+        verified: &AccountRegistrationVerified,
         password: &str,
         device_name: Option<&str>,
         device_key: &[u8; KEY_LEN],
-    ) -> Result<AccountRegisterOutcome, AccountClientError> {
+    ) -> Result<AccountRegistrationPrepared, AccountClientError> {
+        let start = self.prepare_registration_start(verified, password, device_name)?;
+        self.send_registration_start(&start, password, device_key)
+            .await
+    }
+
+    pub fn prepare_registration_start(
+        &self,
+        verified: &AccountRegistrationVerified,
+        password: &str,
+        device_name: Option<&str>,
+    ) -> Result<AccountRegistrationStartPrepared, AccountClientError> {
+        if verified.version != 1
+            || verified.origin != self.base_url
+            || Utc::now().timestamp_millis() >= verified.expires_at_ms
+        {
+            return Err(AccountClientError::EmailVerificationExpired);
+        }
         let mut rng = OsRng;
         let password = Zeroizing::new(password.as_bytes().to_vec());
         let client_start = ClientRegistration::<TaskveilCipherSuite>::start(&mut rng, &password)
             .map_err(|_| AccountClientError::Opaque)?;
+        let start_body = serde_json::to_vec(&RegistrationOpaqueStartRequest {
+            registration_ticket: verified.registration_ticket.clone(),
+            device_name: device_name.map(ToOwned::to_owned),
+            opaque_suite_id: CRYPTO_SUITE_ID,
+            message: STANDARD.encode(client_start.message.serialize()),
+        })
+        .map_err(|_| AccountClientError::Opaque)?;
+        Ok(AccountRegistrationStartPrepared {
+            version: 1,
+            origin: self.base_url.clone(),
+            email: verified.email.clone(),
+            request_id: verified.request_id.clone(),
+            handoff_secret: verified.handoff_secret.clone(),
+            start_body,
+            start_idempotency_key: Uuid::now_v7().to_string(),
+            client_registration_state: client_start.state.serialize().to_vec(),
+            // A sent start may be replayed after the ticket itself expires.
+            // The server returns the exact deadline with the start response;
+            // before that response is known, retain the journal for its
+            // maximum five-minute replay window.
+            expires_at_ms: verified.expires_at_ms + chrono::Duration::minutes(5).num_milliseconds(),
+        })
+    }
+
+    pub async fn send_registration_start(
+        &self,
+        prepared: &AccountRegistrationStartPrepared,
+        password: &str,
+        device_key: &[u8; KEY_LEN],
+    ) -> Result<AccountRegistrationPrepared, AccountClientError> {
+        if prepared.version != 1
+            || prepared.origin != self.base_url
+            || Utc::now().timestamp_millis() >= prepared.expires_at_ms
+        {
+            return Err(AccountClientError::EmailVerificationExpired);
+        }
+        let mut rng = OsRng;
+        let password = Zeroizing::new(password.as_bytes().to_vec());
         let start = self
-            .post_json::<RegistrationStartResponse>(
+            .post_json_bytes_with_idempotency::<RegistrationStartResponse>(
                 "/v1/auth/register/start",
-                &OpaqueStartRequest {
-                    email: email.to_string(),
-                    device_name: device_name.map(ToOwned::to_owned),
-                    opaque_suite_id: CRYPTO_SUITE_ID,
-                    message: STANDARD.encode(client_start.message.serialize()),
-                },
-                None,
+                &prepared.start_body,
+                &prepared.start_idempotency_key,
             )
             .await?;
         validate_registration_start(&start)?;
@@ -326,8 +835,11 @@ impl AccountClient {
             &decode_base64(&start.message)?,
         )
         .map_err(|_| AccountClientError::Opaque)?;
-        let client_finish = client_start
-            .state
+        let client_state = ClientRegistration::<TaskveilCipherSuite>::deserialize(
+            &prepared.client_registration_state,
+        )
+        .map_err(|_| AccountClientError::Opaque)?;
+        let client_finish = client_state
             .finish(
                 &mut rng,
                 &password,
@@ -355,26 +867,118 @@ impl AccountClient {
         let enrollment =
             device_enrollment_dto(&key_setup.keys.account_root_public, &certificate, &proof)?;
         let device_identity = DeviceIdentity::new(device_keys.private, certificate)?;
+        let finish_request = RegisterFinishRequest {
+            state_id: start.state_id,
+            message: STANDARD.encode(client_finish.message.serialize()),
+            key_bundle: key_setup.bundle,
+            device_enrollment: enrollment,
+        };
+        let finish_body =
+            serde_json::to_vec(&finish_request).map_err(|_| AccountClientError::Opaque)?;
+        let account_root_private = key_setup.keys.account_root_private.encode().to_vec();
+        let account_root_public = key_setup.keys.account_root_public.encode()?;
+        let device_identity = device_identity.encode()?.to_vec();
+        Ok(AccountRegistrationPrepared {
+            version: 1,
+            origin: self.base_url.clone(),
+            email: prepared.email.clone(),
+            request_id: prepared.request_id.clone(),
+            handoff_secret: prepared.handoff_secret.clone(),
+            finish_body,
+            start_idempotency_key: prepared.start_idempotency_key.clone(),
+            finish_idempotency_key: Uuid::now_v7().to_string(),
+            expires_at_ms: start.expires_at.timestamp_millis(),
+            recovery_key: key_setup.recovery_key.to_string(),
+            local_wrapped_master_key: key_setup.local_wrapped_master_key,
+            generation: key_setup.keys.generation,
+            tenant_generation: key_setup.keys.tenant_generation,
+            master_key: key_setup.keys.master_key.to_vec(),
+            account_root_private,
+            account_root_public,
+            tenant_root_dek: key_setup.keys.tenant_root_dek.to_vec(),
+            device_identity,
+        })
+    }
 
+    pub async fn finish_registration(
+        &self,
+        prepared: &AccountRegistrationPrepared,
+    ) -> Result<AccountRegisterOutcome, AccountClientError> {
+        if prepared.version != 1
+            || prepared.origin != self.base_url
+            || Utc::now().timestamp_millis() >= prepared.expires_at_ms
+        {
+            return Err(AccountClientError::EmailVerificationExpired);
+        }
         let session = self
-            .post_json::<SessionResponse>(
+            .post_json_bytes_with_idempotency::<SessionResponse>(
                 "/v1/auth/register/finish",
-                &RegisterFinishRequest {
-                    state_id: start.state_id,
-                    message: STANDARD.encode(client_finish.message.serialize()),
-                    key_bundle: key_setup.bundle,
-                    device_enrollment: enrollment,
-                },
-                None,
+                &prepared.finish_body,
+                &prepared.finish_idempotency_key,
             )
             .await?;
+        Self::registration_outcome(prepared, session)
+    }
 
+    pub async fn reconcile_registration(
+        &self,
+        prepared: &AccountRegistrationPrepared,
+    ) -> Result<AccountRegistrationReconcile, AccountClientError> {
+        if prepared.version != 1 || prepared.origin != self.base_url {
+            return Err(AccountClientError::EmailVerificationExpired);
+        }
+        let request_id =
+            Uuid::parse_str(&prepared.request_id).map_err(|_| AccountClientError::Opaque)?;
+        let response = self
+            .http
+            .post(format!("{}{}", self.base_url, "/v1/auth/register/status"))
+            .json(&RegistrationStatusRequest {
+                request_id,
+                handoff_secret: prepared.handoff_secret.clone(),
+                start_idempotency_key: prepared.start_idempotency_key.clone(),
+                finish_idempotency_key: prepared.finish_idempotency_key.clone(),
+            })
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(account_response_error(response.status()));
+        }
+        let response = response
+            .json::<RegistrationStatusResponse>()
+            .await
+            .map_err(AccountClientError::Http)?;
+        match (response.status.as_str(), response.result) {
+            ("pending", None) => Ok(AccountRegistrationReconcile::Pending),
+            ("committed", Some(session)) => Self::registration_outcome(prepared, session)
+                .map(Box::new)
+                .map(AccountRegistrationReconcile::Committed),
+            _ => Err(AccountClientError::Opaque),
+        }
+    }
+
+    fn registration_outcome(
+        prepared: &AccountRegistrationPrepared,
+        session: SessionResponse,
+    ) -> Result<AccountRegisterOutcome, AccountClientError> {
+        let mut master_key = Zeroizing::new([0u8; KEY_LEN]);
+        master_key.copy_from_slice(&prepared.master_key);
+        let mut tenant_root_dek = Zeroizing::new([0u8; KEY_LEN]);
+        tenant_root_dek.copy_from_slice(&prepared.tenant_root_dek);
         Ok(AccountRegisterOutcome {
-            session: session.into_account_session(email),
-            recovery_key: key_setup.recovery_key,
-            local_wrapped_master_key: key_setup.local_wrapped_master_key,
-            keys: key_setup.keys,
-            device_identity,
+            session: session.into_account_session(&prepared.email),
+            recovery_key: Zeroizing::new(prepared.recovery_key.clone()),
+            local_wrapped_master_key: prepared.local_wrapped_master_key.clone(),
+            keys: AccountKeyMaterial {
+                generation: prepared.generation,
+                tenant_generation: prepared.tenant_generation,
+                master_key,
+                account_root_private: AccountRootPrivateKeys::decode(
+                    &prepared.account_root_private,
+                )?,
+                account_root_public: AccountRootPublicKeys::decode(&prepared.account_root_public)?,
+                tenant_root_dek,
+            },
+            device_identity: DeviceIdentity::decode(&prepared.device_identity)?,
         })
     }
 
@@ -461,6 +1065,35 @@ impl AccountClient {
             enrollment,
             challenge_expires_at_ms: response.device_challenge_expires_at.timestamp_millis(),
         })
+    }
+
+    pub fn registration_matches_account_keys(
+        prepared: &AccountRegistrationPrepared,
+        keys: &AccountKeyMaterial,
+    ) -> Result<bool, AccountClientError> {
+        let login_root_public = keys.account_root_public.encode()?;
+        let same_generation = prepared.generation == keys.generation;
+        let same_tenant_generation = prepared.tenant_generation == keys.tenant_generation;
+        let same_master_key = prepared
+            .master_key
+            .as_slice()
+            .ct_eq(keys.master_key.as_slice())
+            .into();
+        let same_account_root = prepared
+            .account_root_public
+            .as_slice()
+            .ct_eq(login_root_public.as_slice())
+            .into();
+        let same_tenant_root = prepared
+            .tenant_root_dek
+            .as_slice()
+            .ct_eq(keys.tenant_root_dek.as_slice())
+            .into();
+        Ok(same_generation
+            && same_tenant_generation
+            && same_master_key
+            && same_account_root
+            && same_tenant_root)
     }
 
     pub async fn certify_login(
@@ -930,6 +1563,50 @@ impl AccountClient {
         }
         response.json::<T>().await.map_err(AccountClientError::Http)
     }
+
+    async fn post_json_bytes_with_idempotency<T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        body: &[u8],
+        idempotency_key: &str,
+    ) -> Result<T, AccountClientError> {
+        let mut last_error = None;
+        for attempt in 0..3 {
+            let response = self
+                .http
+                .post(format!("{}{}", self.base_url, path))
+                .header("content-type", "application/json")
+                .header("idempotency-key", idempotency_key)
+                .body(body.to_vec())
+                .send()
+                .await;
+            let response = match response {
+                Ok(response) => response,
+                Err(error) => {
+                    last_error = Some(error);
+                    if attempt < 2 {
+                        continue;
+                    }
+                    break;
+                }
+            };
+            if !response.status().is_success() {
+                return Err(account_response_error(response.status()));
+            }
+            match response.json::<T>().await {
+                Ok(response) => return Ok(response),
+                Err(error) => {
+                    last_error = Some(error);
+                    if attempt < 2 {
+                        continue;
+                    }
+                }
+            }
+        }
+        Err(AccountClientError::Http(last_error.expect(
+            "an idempotent request attempt always records an error",
+        )))
+    }
 }
 
 pub fn unwrap_login_key_bundle(
@@ -1274,6 +1951,7 @@ fn validate_registration_start(
 ) -> Result<(), AccountClientError> {
     if start.opaque_suite_id != CRYPTO_SUITE_ID
         || start.device_id.is_nil()
+        || start.replay_expires_at > start.expires_at
         || decode_fixed_array::<DEVICE_CHALLENGE_LEN>(&start.device_challenge).is_err()
     {
         return Err(AccountClientError::Opaque);
@@ -1314,7 +1992,47 @@ struct OpaqueStartRequest {
     message: String,
 }
 
+#[derive(Serialize)]
+struct RegistrationRequest {
+    email: String,
+    handoff_challenge: String,
+}
+
 #[derive(Debug, Deserialize)]
+struct RegistrationRequestResponse {
+    request_id: Uuid,
+    expires_at: DateTime<Utc>,
+    next_retry_at: DateTime<Utc>,
+}
+
+#[derive(Serialize)]
+struct RegistrationResendRequest {
+    request_id: Uuid,
+    handoff_secret: String,
+}
+
+#[derive(Serialize)]
+struct RegistrationVerifyRequest {
+    request_id: Uuid,
+    handoff_secret: String,
+    otp: String,
+}
+
+#[derive(Deserialize)]
+struct RegistrationVerifyResponse {
+    registration_ticket: String,
+    expires_at: DateTime<Utc>,
+}
+
+#[derive(Serialize)]
+struct RegistrationOpaqueStartRequest {
+    registration_ticket: String,
+    device_name: Option<String>,
+    opaque_suite_id: u16,
+    message: String,
+}
+
+#[derive(Deserialize)]
 struct RegistrationStartResponse {
     state_id: Uuid,
     opaque_suite_id: u16,
@@ -1325,6 +2043,7 @@ struct RegistrationStartResponse {
     message: String,
     #[allow(dead_code)]
     expires_at: DateTime<Utc>,
+    replay_expires_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1342,6 +2061,20 @@ struct RegisterFinishRequest {
     message: String,
     key_bundle: AccountKeyBundleDto,
     device_enrollment: DeviceEnrollmentDto,
+}
+
+#[derive(Serialize)]
+struct RegistrationStatusRequest {
+    request_id: Uuid,
+    handoff_secret: String,
+    start_idempotency_key: String,
+    finish_idempotency_key: String,
+}
+
+#[derive(Deserialize)]
+struct RegistrationStatusResponse {
+    status: String,
+    result: Option<SessionResponse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1442,6 +2175,107 @@ impl TokenResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn otp_pending_journal_round_trips_durable_retry_deadline() {
+        let mailbox = AccountRegistrationMailbox {
+            version: 1,
+            origin: "https://api.example.com".to_string(),
+            email: "owner@example.com".to_string(),
+            request_id: Uuid::now_v7().to_string(),
+            handoff_secret: URL_SAFE_NO_PAD.encode([0x42; 32]),
+            resend_idempotency_key: Uuid::now_v7().to_string(),
+            verify_idempotency_key: Uuid::now_v7().to_string(),
+            verify_request_binding: None,
+            expires_at_ms: Utc::now().timestamp_millis() + 60_000,
+            next_retry_at_ms: Utc::now().timestamp_millis() + 30_000,
+        };
+        let restored = AccountRegistrationMailbox::decode(&mailbox.encode().unwrap()).unwrap();
+        assert_eq!(restored.next_retry_at_ms(), mailbox.next_retry_at_ms());
+        assert_eq!(restored.request_id(), mailbox.request_id());
+    }
+
+    #[test]
+    fn otp_idempotency_key_is_stable_for_retry_and_rotates_for_new_input() {
+        let mut mailbox = AccountRegistrationMailbox {
+            version: 1,
+            origin: "https://api.example.com".to_string(),
+            email: "owner@example.com".to_string(),
+            request_id: Uuid::now_v7().to_string(),
+            handoff_secret: URL_SAFE_NO_PAD.encode([0x42; 32]),
+            resend_idempotency_key: Uuid::now_v7().to_string(),
+            verify_idempotency_key: Uuid::now_v7().to_string(),
+            verify_request_binding: None,
+            expires_at_ms: Utc::now().timestamp_millis() + 60_000,
+            next_retry_at_ms: Utc::now().timestamp_millis() + 30_000,
+        };
+        mailbox.prepare_otp_attempt("00000001").unwrap();
+        let first_key = mailbox.verify_idempotency_key.clone();
+        let encoded = mailbox.encode().unwrap();
+        let mut restored = AccountRegistrationMailbox::decode(&encoded).unwrap();
+        restored.prepare_otp_attempt("00000001").unwrap();
+        assert_eq!(restored.verify_idempotency_key, first_key);
+        restored.prepare_otp_attempt("00000002").unwrap();
+        assert_ne!(restored.verify_idempotency_key, first_key);
+        let prior_generation_key = restored.verify_idempotency_key.clone();
+        restored.apply_resend_response(&RegistrationRequestResponse {
+            request_id: Uuid::parse_str(&restored.request_id).unwrap(),
+            expires_at: Utc::now() + chrono::Duration::minutes(10),
+            next_retry_at: Utc::now() + chrono::Duration::minutes(1),
+        });
+        restored.prepare_otp_attempt("00000002").unwrap();
+        assert_ne!(restored.verify_idempotency_key, prior_generation_key);
+    }
+
+    #[test]
+    fn expired_receipt_login_adopts_recovery_only_for_the_same_account_keys() {
+        let user_id = Uuid::now_v7();
+        let root = generate_account_root(user_id).unwrap();
+        let encoded_root_public = root.public.encode().unwrap();
+        let prepared = AccountRegistrationPrepared {
+            version: 1,
+            origin: "https://api.example.com".to_string(),
+            email: "owner@example.com".to_string(),
+            request_id: Uuid::now_v7().to_string(),
+            handoff_secret: URL_SAFE_NO_PAD.encode([0x42; 32]),
+            finish_body: vec![1],
+            start_idempotency_key: Uuid::now_v7().to_string(),
+            finish_idempotency_key: Uuid::now_v7().to_string(),
+            expires_at_ms: Utc::now().timestamp_millis() + 60_000,
+            recovery_key: "recovery words".to_string(),
+            local_wrapped_master_key: vec![0x33; 48],
+            generation: 1,
+            tenant_generation: 1,
+            master_key: vec![0x44; KEY_LEN],
+            account_root_private: root.private.encode().to_vec(),
+            account_root_public: encoded_root_public,
+            tenant_root_dek: vec![0x55; KEY_LEN],
+            device_identity: vec![1],
+        };
+        let matching = AccountKeyMaterial {
+            generation: 1,
+            tenant_generation: 1,
+            master_key: Zeroizing::new([0x44; KEY_LEN]),
+            account_root_private: root.private,
+            account_root_public: root.public,
+            tenant_root_dek: Zeroizing::new([0x55; KEY_LEN]),
+        };
+        assert!(AccountClient::registration_matches_account_keys(&prepared, &matching).unwrap());
+
+        let different_root = generate_account_root(Uuid::now_v7()).unwrap();
+        let existing_account = AccountKeyMaterial {
+            generation: 1,
+            tenant_generation: 1,
+            master_key: Zeroizing::new([0x66; KEY_LEN]),
+            account_root_private: different_root.private,
+            account_root_public: different_root.public,
+            tenant_root_dek: Zeroizing::new([0x77; KEY_LEN]),
+        };
+        assert!(
+            !AccountClient::registration_matches_account_keys(&prepared, &existing_account)
+                .unwrap()
+        );
+    }
 
     #[test]
     fn maps_payment_required_to_typed_entitlement_error() {

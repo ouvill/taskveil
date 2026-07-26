@@ -38,7 +38,6 @@ variable "auth_limit_hmac_key_generation" {
   type    = number
   default = 1
 }
-
 check "production_isolation" {
   assert {
     condition = (

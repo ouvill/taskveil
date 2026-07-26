@@ -3,6 +3,7 @@ pub mod auth_protection;
 pub mod billing;
 pub mod config;
 pub mod db;
+pub mod email_verification;
 pub mod organization;
 pub mod realtime;
 pub mod resync_token;
@@ -27,6 +28,7 @@ pub struct AppState {
     pub resync_tokens: resync_token::ResyncTokenKeyring,
     pub auth_protection: auth_protection::AuthProtection,
     pub trust_source_ip_header: bool,
+    pub email_verification: email_verification::EmailVerificationService,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -239,8 +241,11 @@ impl IntoResponse for AppError {
 }
 
 impl From<sqlx_core::Error> for AppError {
-    fn from(error: sqlx_core::Error) -> Self {
-        tracing::error!(kind = "sqlx", error = %error, "server database error");
+    fn from(_error: sqlx_core::Error) -> Self {
+        // Database diagnostics can contain bound values (including canonical email
+        // addresses). Keep application logs deliberately value-free; detailed
+        // diagnostics remain available in the database's access-controlled logs.
+        tracing::error!(kind = "sqlx", "server database error");
         Self::internal()
     }
 }

@@ -92,7 +92,7 @@ P2-M3は同期ループそのものではない。登録/ログインで鍵が�
 7. OPAQUEログインfinishを拡張し、セッションレスポンスに復号に必要なラップ済み鍵bundleを返す。クライアントはexportKey由来KEKでMKを復元し、MKでUser X25519秘密鍵/Tenant Root DEK/List DEKを復元する。
 8. デバイス登録を `docs/03` §3.2/§7.3に合わせる。ログインfinish時にdevice_nameと必要ならdevice public_keyを保存し、サーバーには `wrap(MK, DK)` を送らない。`wrap(MK, DK)` はローカルKeychain保存とする。
 9. `app/rust/src/dev_key_store.rs` のtask-64パターンを一般化し、Device Key、session token、local wrapped MK用にservice名を分離したKeychain storeを用意する。Flutter test時は既存と同様にファイル/メモリ系fallbackを使い、実Keychainへ触れない。
-10. FRB公開APIを追加する。例: `accountRegister(email, password, serverUrl?, deviceName?)`、`accountLogin(...)`、`accountLogout()`、`getAccountSessionState()`、`get/setSyncServerUrl()`。関数名は既存Dart namingに合わせる。Rust API変更後はリポジトリルートで `flutter_rust_bridge_codegen generate --config-file flutter_rust_bridge.yaml` を実行し、生成物は手編集しない。
+10. FRB公開APIを追加する。現在の登録APIは `accountRegistrationBegin`、`accountRegistrationVerifyOtp`、`accountRegistrationComplete` の段階型フローとし、`accountLogin(...)`、`accountLogout()`、`getAccountSessionState()`、`get/setSyncServerUrl()`を公開する。関数名は既存Dart namingに合わせる。Rust API変更後はリポジトリルートで `flutter_rust_bridge_codegen generate --config-file flutter_rust_bridge.yaml` を実行し、生成物は手編集しない。
 11. Flutter UIを追加する。`/account` route、`AccountScreen`、Riverpod provider/fake、en/ja ARBを実装する。Lists画面右上overflowに「アカウント」導線を置く。未ログイン時は登録/ログインフォーム、ログイン済み時はメール+ログアウトを表示する。Recovery Keyは登録完了後に一度だけ表示し、画面遷移後に再表示できないようにする。
 12. デバッグ用サーバーURLをsettings storeに保存する。キー名は既存 `ui_mode` と衝突しない `sync_server_url` 等にし、未設定時は `http://localhost:3000` を既定値にする。通常利用時に秘密情報をsettingsへ保存しない。
 13. Rust統合テストを追加する。testcontainers Postgresにmigrationを当て、実axum serverをローカルportで起動し、Rust clientから登録→セッション確認→ログアウト→ログイン→同一MK復元を検証する。誤パスワード、失効セッション、誤鍵unwrap失敗も含める。
@@ -242,16 +242,18 @@ P2-M3は同期ループそのものではない。登録/ログインで鍵が�
 
 ### 登録フロー
 
-- `core/sync/src/account.rs` に `AccountClient::register` を追加した。
+- `core/sync/src/account.rs` の登録処理は、メール要求、OTP確認、OPAQUE start、
+  finish、status reconciliationを個別のdurable段階として公開する。
 - client側でOPAQUE register start/finishを実行し、exportKeyからKEK_pwを導出する。
 - 登録時にMK、Recovery Key、User X25519鍵ペア、Tenant Root DEK、個人List DEKを生成する。
 - サーバーpayloadにはラップ済みkey bundleと公開鍵のみを含める。パスワード、exportKey、MK、KEK、DEK、Recovery Key平文は送らない。
 - ローカルにはDevice Keyで `wrap(MK, DK)` を作成し、Keychain/テスト時file fallbackへ保存する。
-- FRBの `accountRegister` は登録直後だけ `recoveryKey` をDartへ返す。
+- FRBの `accountRegistrationComplete` は登録直後だけ `recoveryKey` をDartへ返す。
 
 ### ログイン/新デバイスフロー
 
-- `core/sync/src/account.rs` に `AccountClient::login` を追加した。
+- `core/sync/src/account.rs` の `AccountClient::begin_login` から、
+  durableなdevice certification再開フローを開始する。
 - login finish responseの `wrap(MK, KEK_pw)` をOPAQUE exportKey由来KEK_pwで復号し、MKを復元する。
 - MKでUser X25519秘密鍵、Tenant Root DEK、List DEKをunwrapする。
 - ログインごとにserver `devices` 行を作成し、device public keyを保存する。
@@ -276,14 +278,19 @@ P2-M3は同期ループそのものではない。登録/ログインで鍵が�
 ### FRB公開API/DTO
 
 - 追加API:
-  - `accountRegister(email, password, serverUrl?, deviceName?)`
+  - `accountRegistrationBegin(email, serverUrl?)`
+  - `accountRegistrationVerifyOtp(otp)`
+  - `accountRegistrationComplete(password, deviceName?)`
   - `accountLogin(email, password, serverUrl?, deviceName?)`
   - `accountLogout()`
   - `getAccountSessionState()`
   - `getSyncServerUrl()`
   - `setSyncServerUrl(serverUrl)`
-- `AccountSessionStateDto` は `loggedIn`、`email`、`userId`、`tenantId`、`deviceId` のみを返す。
+- `AccountSessionStateDto` は `loggedIn`、account ID群に加えて、Recovery Key表示を
+  通常画面より先に再開するための `recoveryPending` を返す。
 - `AccountAuthResultDto` は `session` と登録直後だけの `recoveryKey` を返す。
+- 未確認のRecovery KeyはOS保護credential内の`RecoveryDisplayPending`として保持し、
+  明示ack前のlogoutや秘密の破棄を拒否する。
 - MK/KEK/DEK/DK/exportKey/session token平文はDart境界へ返さない。
 - `flutter_rust_bridge_codegen generate --config-file flutter_rust_bridge.yaml` 済みの生成物が差分に含まれる。
 

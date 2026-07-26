@@ -66,8 +66,10 @@ impl Fixture {
         let device_id = Uuid::now_v7();
         let token = "realtime-gateway-test-token".to_owned();
         query(
-            "INSERT INTO users (id, email, opaque_suite_id, opaque_record, account_root_public)
-             VALUES ($1, $2, 2, $3, '\\x00'::bytea)",
+            "INSERT INTO users
+                (id, email, canonical_email, opaque_credential_id,
+                 opaque_suite_id, opaque_record, account_root_public)
+             VALUES ($1, $2, $2, $1, 2, $3, '\\x00'::bytea)",
         )
         .bind(user_id)
         .bind(format!("{user_id}@example.test"))
@@ -204,6 +206,8 @@ impl Fixture {
             resync_tokens: taskveil_server::resync_token::ResyncTokenKeyring::for_tests(),
             auth_protection: AuthProtection::new([0xA7; 32]),
             trust_source_ip_header: false,
+            email_verification:
+                taskveil_server::email_verification::EmailVerificationService::for_tests(),
         })
     }
 
@@ -216,6 +220,8 @@ impl Fixture {
                 resync_tokens: taskveil_server::resync_token::ResyncTokenKeyring::for_tests(),
                 auth_protection: AuthProtection::new([0xA7; 32]),
                 trust_source_ip_header: false,
+                email_verification:
+                    taskveil_server::email_verification::EmailVerificationService::for_tests(),
             },
             RealtimeGateway::from_settings(settings()).unwrap(),
         )

@@ -28,6 +28,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AccountAuthResultDto dco_decode_account_auth_result_dto(dynamic raw);
 
   @protected
+  AccountRegistrationPendingDto dco_decode_account_registration_pending_dto(
+    dynamic raw,
+  );
+
+  @protected
+  AccountRegistrationStateDto dco_decode_account_registration_state_dto(
+    dynamic raw,
+  );
+
+  @protected
   AccountSessionStateDto dco_decode_account_session_state_dto(dynamic raw);
 
   @protected
@@ -46,6 +56,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DateTime dco_decode_box_autoadd_Chrono_Utc(dynamic raw);
+
+  @protected
+  AccountRegistrationStateDto
+  dco_decode_box_autoadd_account_registration_state_dto(dynamic raw);
 
   @protected
   ActiveTimerSessionDto dco_decode_box_autoadd_active_timer_session_dto(
@@ -156,6 +170,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DateTime? dco_decode_opt_box_autoadd_Chrono_Utc(dynamic raw);
 
   @protected
+  AccountRegistrationStateDto?
+  dco_decode_opt_box_autoadd_account_registration_state_dto(dynamic raw);
+
+  @protected
   ActiveTimerSessionDto? dco_decode_opt_box_autoadd_active_timer_session_dto(
     dynamic raw,
   );
@@ -258,6 +276,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  AccountRegistrationPendingDto sse_decode_account_registration_pending_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  AccountRegistrationStateDto sse_decode_account_registration_state_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   AccountSessionStateDto sse_decode_account_session_state_dto(
     SseDeserializer deserializer,
   );
@@ -280,6 +308,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DateTime sse_decode_box_autoadd_Chrono_Utc(SseDeserializer deserializer);
+
+  @protected
+  AccountRegistrationStateDto
+  sse_decode_box_autoadd_account_registration_state_dto(
+    SseDeserializer deserializer,
+  );
 
   @protected
   ActiveTimerSessionDto sse_decode_box_autoadd_active_timer_session_dto(
@@ -410,6 +444,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DateTime? sse_decode_opt_box_autoadd_Chrono_Utc(SseDeserializer deserializer);
 
   @protected
+  AccountRegistrationStateDto?
+  sse_decode_opt_box_autoadd_account_registration_state_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   ActiveTimerSessionDto? sse_decode_opt_box_autoadd_active_timer_session_dto(
     SseDeserializer deserializer,
   );
@@ -531,6 +571,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_account_registration_pending_dto(
+    AccountRegistrationPendingDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_account_registration_state_dto(
+    AccountRegistrationStateDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_account_session_state_dto(
     AccountSessionStateDto self,
     SseSerializer serializer,
@@ -560,6 +612,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_Chrono_Utc(
     DateTime self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_account_registration_state_dto(
+    AccountRegistrationStateDto self,
     SseSerializer serializer,
   );
 
@@ -725,6 +783,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_box_autoadd_Chrono_Utc(
     DateTime? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_account_registration_state_dto(
+    AccountRegistrationStateDto? self,
     SseSerializer serializer,
   );
 

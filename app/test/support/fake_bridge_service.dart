@@ -20,9 +20,20 @@ TaskDueDto testDateTimeDueFromMillis(int value, {String timeZone = 'UTC'}) =>
 /// screen/provider/router skeleton can be exercised without the native Rust
 /// library and without calling `initCore`.
 class FakeBridgeService implements BridgeService {
-  FakeBridgeService({bool onboardingCompleted = true})
-    : _settings = {if (onboardingCompleted) onboardingCompletedSettingKey: '1'};
+  FakeBridgeService({
+    bool onboardingCompleted = true,
+    this.accountRegistrationGate,
+    this.restoredRegistrationState,
+    this.registrationStateFailures = 0,
+    this.recoveryKeyFailures = 0,
+  }) : _settings = {
+         if (onboardingCompleted) onboardingCompletedSettingKey: '1',
+       };
 
+  final Future<void>? accountRegistrationGate;
+  AccountRegistrationStateDto? restoredRegistrationState;
+  int registrationStateFailures;
+  int recoveryKeyFailures;
   final List<ListDto> _lists = [];
   final List<TaskDto> _tasks = [];
   final List<TemplateDto> _templates = [];
@@ -38,8 +49,11 @@ class FakeBridgeService implements BridgeService {
   int syncNowCalls = 0;
   int realtimeTicketCalls = 0;
   int organizationSafetyConfirmCalls = 0;
+  String? _pendingRegistrationEmail;
+  String? _pendingRecoveryKey;
   AccountSessionStateDto _accountSession = const AccountSessionStateDto(
     loggedIn: false,
+    recoveryPending: false,
   );
   SyncStatusDto _syncStatus = const SyncStatusDto(
     loggedIn: false,
@@ -66,6 +80,12 @@ class FakeBridgeService implements BridgeService {
   int _accountSeq = 0;
   ActiveTimerSessionDto? _activeTimerSession;
 
+  void seedRecoveryPendingAccount(String email) {
+    _accountSession = _newAccountSession(email, recoveryPending: true);
+    _pendingRecoveryKey =
+        'amber anchor apricot atlas bamboo beacon birch breeze cabin cedar cinder cobalt coral cotton dawn delta ember fern flint garden harbor hazel indigo juniper';
+  }
+
   FakeLargeSeedSummary seedLargeDataset({
     int listCount = 10,
     int tasksPerList = 1000,
@@ -87,7 +107,10 @@ class FakeBridgeService implements BridgeService {
     organizationSafetyConfirmCalls = 0;
     _settings.clear();
     _settings[onboardingCompletedSettingKey] = '1';
-    _accountSession = const AccountSessionStateDto(loggedIn: false);
+    _accountSession = const AccountSessionStateDto(
+      loggedIn: false,
+      recoveryPending: false,
+    );
     _syncStatus = const SyncStatusDto(
       loggedIn: false,
       running: false,
@@ -226,26 +249,119 @@ class FakeBridgeService implements BridgeService {
   }
 
   @override
-  Future<AccountAuthResultDto> accountRegister({
+  Future<AccountRegistrationPendingDto> accountRegistrationBegin({
     required String email,
-    required String password,
     String? serverUrl,
-    String? deviceName,
   }) async {
-    if (email.trim().isEmpty || password.isEmpty) {
+    final registrationGate = accountRegistrationGate;
+    if (registrationGate != null) {
+      await registrationGate;
+    }
+    if (email.trim().isEmpty) {
       throw Exception('account request failed');
     }
     if (serverUrl != null && serverUrl.trim().isNotEmpty) {
       await setSyncServerUrl(serverUrl: serverUrl.trim());
     }
-    final session = _newAccountSession(email.trim());
+    _pendingRegistrationEmail = email.trim();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    restoredRegistrationState = AccountRegistrationStateDto(
+      phase: 'otp',
+      email: email.trim(),
+      expiresAtMs: now + 600000,
+      nextRetryAtMs: now,
+      canCancel: true,
+    );
+    return AccountRegistrationPendingDto(
+      email: email.trim(),
+      expiresAtMs: now + 600000,
+      nextRetryAtMs: now,
+    );
+  }
+
+  @override
+  Future<AccountRegistrationStateDto?> accountRegistrationState() async {
+    if (registrationStateFailures > 0) {
+      registrationStateFailures -= 1;
+      throw Exception('account request failed');
+    }
+    return restoredRegistrationState;
+  }
+
+  @override
+  Future<void> accountRegistrationCancel() async {
+    restoredRegistrationState = null;
+    _pendingRegistrationEmail = null;
+  }
+
+  @override
+  Future<AccountRegistrationPendingDto> accountRegistrationResend() async {
+    final email = _pendingRegistrationEmail;
+    if (email == null) throw Exception('account request failed');
+    final now = DateTime.now().millisecondsSinceEpoch;
+    return AccountRegistrationPendingDto(
+      email: email,
+      expiresAtMs: now + 600000,
+      nextRetryAtMs: now + 60000,
+    );
+  }
+
+  @override
+  Future<void> accountRegistrationVerifyOtp({required String otp}) async {
+    if (_pendingRegistrationEmail == null || otp.length != 8) {
+      throw Exception('account request failed');
+    }
+    final email = _pendingRegistrationEmail!;
+    restoredRegistrationState = AccountRegistrationStateDto(
+      phase: 'password',
+      email: email,
+      expiresAtMs: DateTime.now().millisecondsSinceEpoch + 300000,
+      canCancel: false,
+    );
+  }
+
+  @override
+  Future<AccountAuthResultDto> accountRegistrationComplete({
+    required String password,
+    String? deviceName,
+  }) async {
+    final email = _pendingRegistrationEmail;
+    if (email == null || password.isEmpty) {
+      throw Exception('account request failed');
+    }
+    final session = _newAccountSession(email, recoveryPending: true);
     _accountSession = session;
     _syncStatus = _copySyncStatus(_syncStatus, loggedIn: true);
+    _pendingRecoveryKey =
+        'amber anchor apricot atlas bamboo beacon birch breeze cabin cedar cinder cobalt coral cotton dawn delta ember fern flint garden harbor hazel indigo juniper';
+    restoredRegistrationState = null;
     return AccountAuthResultDto(
       session: session,
-      recoveryKey:
-          'amber anchor apricot atlas bamboo beacon birch breeze cabin cedar cinder cobalt coral cotton dawn delta ember fern flint garden harbor hazel indigo juniper',
+      recoveryKey: _pendingRecoveryKey,
     );
+  }
+
+  @override
+  Future<void> accountRegistrationAckRecoveryKey() async {
+    _pendingRecoveryKey = null;
+    final session = _accountSession;
+    _accountSession = AccountSessionStateDto(
+      loggedIn: session.loggedIn,
+      email: session.email,
+      userId: session.userId,
+      tenantId: session.tenantId,
+      deviceId: session.deviceId,
+      recoveryPending: false,
+    );
+  }
+
+  @override
+  Future<String?> accountRegistrationRecoveryKey() async {
+    if (recoveryKeyFailures > 0) {
+      recoveryKeyFailures -= 1;
+      throw Exception('account request failed');
+    }
+    return _pendingRecoveryKey;
   }
 
   @override
@@ -269,7 +385,13 @@ class FakeBridgeService implements BridgeService {
 
   @override
   Future<void> accountLogout() async {
-    _accountSession = const AccountSessionStateDto(loggedIn: false);
+    if (_pendingRecoveryKey != null) {
+      throw Exception('recovery acknowledgement required');
+    }
+    _accountSession = const AccountSessionStateDto(
+      loggedIn: false,
+      recoveryPending: false,
+    );
     _syncStatus = _copySyncStatus(_syncStatus, loggedIn: false);
   }
 
@@ -1666,7 +1788,10 @@ class FakeBridgeService implements BridgeService {
     return descendants;
   }
 
-  AccountSessionStateDto _newAccountSession(String email) {
+  AccountSessionStateDto _newAccountSession(
+    String email, {
+    bool recoveryPending = false,
+  }) {
     final accountSeq = _accountSeq++;
     return AccountSessionStateDto(
       loggedIn: true,
@@ -1674,6 +1799,7 @@ class FakeBridgeService implements BridgeService {
       userId: 'user-$accountSeq',
       tenantId: 'tenant-$accountSeq',
       deviceId: 'device-$accountSeq',
+      recoveryPending: recoveryPending,
     );
   }
 }

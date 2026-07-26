@@ -874,6 +874,33 @@ class AppLocalizationsEn extends AppLocalizations {
   String get accountRegisterButton => 'Register';
 
   @override
+  String get accountVerificationPending =>
+      'Enter the 8-digit code sent to your email. This confirms mailbox access only; it cannot recover encrypted data.';
+
+  @override
+  String get accountVerificationCodeLabel => '8-digit verification code';
+
+  @override
+  String get accountVerifyCodeButton => 'Verify code';
+
+  @override
+  String get accountResendCodeButton => 'Resend code';
+
+  @override
+  String accountResendAvailableIn(int seconds) {
+    return 'You can resend in $seconds seconds.';
+  }
+
+  @override
+  String get accountCancelRegistrationButton => 'Cancel registration';
+
+  @override
+  String get accountSetPasswordButton => 'Set password and finish';
+
+  @override
+  String get accountRecoveryAcknowledgeButton => 'I saved my Recovery Key';
+
+  @override
   String get accountLogoutButton => 'Log out';
 
   @override

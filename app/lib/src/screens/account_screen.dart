@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -24,20 +25,75 @@ class AccountScreen extends ConsumerStatefulWidget {
   ConsumerState<AccountScreen> createState() => _AccountScreenState();
 }
 
+enum _RegistrationStep { email, otp, password }
+
 class _AccountScreenState extends ConsumerState<AccountScreen> {
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
+  final _otpController = TextEditingController();
   final _serverUrlController = TextEditingController();
   bool _registerMode = false;
   bool _busy = false;
+  bool _restoringAccountFlow = true;
+  bool _recoveryRestoreFailed = false;
+  bool _registrationCanCancel = false;
+  int? _nextRetryAtMs;
+  Timer? _resendTimer;
+  _RegistrationStep _registrationStep = _RegistrationStep.email;
   String? _recoveryKey;
   String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    Future<void>.microtask(_restoreAccountFlow);
+  }
+
+  Future<void> _restoreAccountFlow() async {
+    if (mounted) {
+      setState(() {
+        _restoringAccountFlow = true;
+        _recoveryRestoreFailed = false;
+      });
+    }
+    try {
+      final bridge = ref.read(accountBridgeProvider);
+      final recoveryKey = await bridge.accountRegistrationRecoveryKey();
+      final registration = await bridge.accountRegistrationState();
+      if (!mounted) return;
+      setState(() {
+        _recoveryKey = recoveryKey;
+        if (registration != null) {
+          _registerMode = true;
+          _emailController.text = registration.email;
+          _registrationStep = switch (registration.phase) {
+            'email' => _RegistrationStep.email,
+            'otp' => _RegistrationStep.otp,
+            'password' => _RegistrationStep.password,
+            _ => _RegistrationStep.email,
+          };
+          _registrationCanCancel = registration.canCancel;
+          _setNextRetryAt(registration.nextRetryAtMs);
+        }
+      });
+    } catch (_) {
+      if (mounted) {
+        setState(() => _recoveryRestoreFailed = true);
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _restoringAccountFlow = false);
+      }
+    }
+  }
 
   @override
   void dispose() {
     _emailController.dispose();
     _passwordController.dispose();
+    _otpController.dispose();
     _serverUrlController.dispose();
+    _resendTimer?.cancel();
     super.dispose();
   }
 
@@ -63,136 +119,165 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
           loading: () => const AppLoadingState(),
           error: (error, stackTrace) =>
               AppErrorState(message: l10n.accountLoadFailed),
-          data: (account) => Align(
-            alignment: Alignment.topCenter,
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 620),
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.fromLTRB(
-                  AppSpacing.lg,
-                  AppSpacing.lg,
-                  AppSpacing.lg,
-                  AppSpacing.xl,
+          data: (account) {
+            if (_restoringAccountFlow) {
+              return const AppLoadingState();
+            }
+            if (_recoveryRestoreFailed ||
+                (account.recoveryPending && _recoveryKey == null)) {
+              return AppEmptyState(
+                icon: LucideIcons.keyRound300,
+                title: l10n.accountLoadFailed,
+                action: FilledButton(
+                  onPressed: _restoreAccountFlow,
+                  child: Text(l10n.retryButton),
                 ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    if (widget.showBackButton) ...[
-                      Align(
-                        alignment: AlignmentDirectional.centerStart,
-                        child: IconButton(
-                          tooltip: l10n.backButtonTooltip,
+              );
+            }
+            return Align(
+              alignment: Alignment.topCenter,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 620),
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(
+                    AppSpacing.lg,
+                    AppSpacing.lg,
+                    AppSpacing.lg,
+                    AppSpacing.xl,
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      if (widget.showBackButton) ...[
+                        Align(
                           alignment: AlignmentDirectional.centerStart,
-                          padding: EdgeInsets.zero,
-                          constraints: const BoxConstraints.tightFor(
-                            width: 48,
-                            height: 48,
-                          ),
-                          onPressed: () {
-                            if (context.canPop()) {
-                              context.pop();
-                            } else {
-                              context.go('/menu');
-                            }
-                          },
-                          icon: const Icon(LucideIcons.arrowLeft300),
-                        ),
-                      ),
-                      const SizedBox(height: AppSpacing.sm),
-                    ],
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            l10n.accountTitle,
-                            style: theme.textTheme.headlineSmall?.copyWith(
-                              color: colorScheme.onSurface,
-                              fontSize: 28,
-                              fontWeight: FontWeight.w600,
+                          child: IconButton(
+                            tooltip: l10n.backButtonTooltip,
+                            alignment: AlignmentDirectional.centerStart,
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints.tightFor(
+                              width: 48,
+                              height: 48,
                             ),
+                            onPressed: () {
+                              if (context.canPop()) {
+                                context.pop();
+                              } else {
+                                context.go('/menu');
+                              }
+                            },
+                            icon: const Icon(LucideIcons.arrowLeft300),
                           ),
                         ),
-                        if (!widget.showBackButton)
-                          const AppHeaderSearchAction(),
+                        const SizedBox(height: AppSpacing.sm),
                       ],
-                    ),
-                    const SizedBox(height: AppSpacing.sm),
-                    Text(
-                      l10n.accountSubtitle,
-                      style: theme.textTheme.bodyMedium?.copyWith(
-                        color: colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                    const SizedBox(height: AppSpacing.md),
-                    const _AccountAccentLine(),
-                    const SizedBox(height: AppSpacing.xl),
-                    if (_recoveryKey != null && account.loggedIn) ...[
-                      SelectableText(
-                        _recoveryKey!,
-                        key: const ValueKey('account-recovery-key'),
-                        style: theme.textTheme.bodyLarge,
-                      ),
-                      const SizedBox(height: AppSpacing.lg),
-                    ],
-                    if (account.loggedIn)
-                      _SignedInSection(
-                        account: account,
-                        syncStatusAsync: syncStatusAsync,
-                        billingAsync: billingAsync,
-                        busy: _busy,
-                        onLogout: _logout,
-                        onSyncNow: _syncNow,
-                        onVerifyOrganization: _showOrganizationVerification,
-                      )
-                    else
-                      _SignedOutSection(
-                        registerMode: _registerMode,
-                        busy: _busy,
-                        emailController: _emailController,
-                        passwordController: _passwordController,
-                        recoveryKey: _recoveryKey,
-                        onModeChanged: (registerMode) {
-                          setState(() {
-                            _registerMode = registerMode;
-                            _recoveryKey = null;
-                            _error = null;
-                          });
-                        },
-                        onSubmit: _submit,
-                      ),
-                    if (_error != null) ...[
-                      const SizedBox(height: AppSpacing.md),
                       Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Icon(
-                            LucideIcons.circleAlert300,
-                            size: 18,
-                            color: colorScheme.error,
-                          ),
-                          const SizedBox(width: AppSpacing.sm),
                           Expanded(
                             child: Text(
-                              _error!,
-                              style: TextStyle(color: colorScheme.error),
+                              l10n.accountTitle,
+                              style: theme.textTheme.headlineSmall?.copyWith(
+                                color: colorScheme.onSurface,
+                                fontSize: 28,
+                                fontWeight: FontWeight.w600,
+                              ),
                             ),
                           ),
+                          if (!widget.showBackButton)
+                            const AppHeaderSearchAction(),
                         ],
                       ),
+                      const SizedBox(height: AppSpacing.sm),
+                      Text(
+                        l10n.accountSubtitle,
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          color: colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                      const SizedBox(height: AppSpacing.md),
+                      const _AccountAccentLine(),
+                      const SizedBox(height: AppSpacing.xl),
+                      if (_recoveryKey != null) ...[
+                        SelectableText(
+                          _recoveryKey!,
+                          key: const ValueKey('account-recovery-key'),
+                          style: theme.textTheme.bodyLarge,
+                        ),
+                        const SizedBox(height: AppSpacing.md),
+                        FilledButton(
+                          onPressed: _busy ? null : _acknowledgeRecoveryKey,
+                          child: Text(l10n.accountRecoveryAcknowledgeButton),
+                        ),
+                        const SizedBox(height: AppSpacing.lg),
+                      ],
+                      if (account.loggedIn)
+                        _SignedInSection(
+                          account: account,
+                          syncStatusAsync: syncStatusAsync,
+                          billingAsync: billingAsync,
+                          busy: _busy,
+                          onLogout: _logout,
+                          onSyncNow: _syncNow,
+                          onVerifyOrganization: _showOrganizationVerification,
+                        )
+                      else
+                        _SignedOutSection(
+                          registerMode: _registerMode,
+                          busy: _busy,
+                          registrationStep: _registrationStep,
+                          emailController: _emailController,
+                          passwordController: _passwordController,
+                          otpController: _otpController,
+                          onModeChanged: (registerMode) {
+                            setState(() {
+                              _registerMode = registerMode;
+                              _registrationStep = _RegistrationStep.email;
+                              _passwordController.clear();
+                              _otpController.clear();
+                              _recoveryKey = null;
+                              _error = null;
+                            });
+                          },
+                          onSubmit: _submit,
+                          onResend: _resendCode,
+                          resendWaitSeconds: _resendWaitSeconds,
+                          canCancel: _registrationCanCancel,
+                          onCancel: _cancelRegistration,
+                        ),
+                      if (_error != null) ...[
+                        const SizedBox(height: AppSpacing.md),
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Icon(
+                              LucideIcons.circleAlert300,
+                              size: 18,
+                              color: colorScheme.error,
+                            ),
+                            const SizedBox(width: AppSpacing.sm),
+                            Expanded(
+                              child: Text(
+                                _error!,
+                                style: TextStyle(color: colorScheme.error),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                      const SizedBox(height: AppSpacing.xl),
+                      Divider(color: colorScheme.outlineVariant),
+                      const SizedBox(height: AppSpacing.lg),
+                      _ServerUrlSection(
+                        controller: _serverUrlController,
+                        busy: _busy,
+                        onSave: _saveServerUrl,
+                      ),
                     ],
-                    const SizedBox(height: AppSpacing.xl),
-                    Divider(color: colorScheme.outlineVariant),
-                    const SizedBox(height: AppSpacing.lg),
-                    _ServerUrlSection(
-                      controller: _serverUrlController,
-                      busy: _busy,
-                      onSave: _saveServerUrl,
-                    ),
-                  ],
+                  ),
                 ),
               ),
-            ),
-          ),
+            );
+          },
         ),
       ),
     );
@@ -226,24 +311,148 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
     });
     try {
       final notifier = ref.read(accountProvider.notifier);
-      final result = _registerMode
-          ? await notifier.register(
+      if (!_registerMode) {
+        final result = await notifier.login(
+          email: _emailController.text.trim(),
+          password: _passwordController.text,
+          serverUrl: _serverUrlController.text.trim(),
+        );
+        _passwordController.clear();
+        if (mounted) {
+          setState(() => _recoveryKey = result.recoveryKey);
+        }
+      } else {
+        switch (_registrationStep) {
+          case _RegistrationStep.email:
+            _passwordController.clear();
+            final pending = await notifier.registrationBegin(
               email: _emailController.text.trim(),
-              password: _passwordController.text,
-              serverUrl: _serverUrlController.text.trim(),
-            )
-          : await notifier.login(
-              email: _emailController.text.trim(),
-              password: _passwordController.text,
               serverUrl: _serverUrlController.text.trim(),
             );
-      _passwordController.clear();
-      if (mounted) {
-        setState(() => _recoveryKey = result.recoveryKey);
+            if (mounted) {
+              setState(() {
+                _registrationStep = _RegistrationStep.otp;
+                _registrationCanCancel = true;
+                _setNextRetryAt(pending.nextRetryAtMs);
+              });
+            }
+            break;
+          case _RegistrationStep.otp:
+            await notifier.registrationVerifyOtp(_otpController.text.trim());
+            _otpController.clear();
+            if (mounted) {
+              setState(() {
+                _registrationStep = _RegistrationStep.password;
+                _registrationCanCancel = false;
+              });
+            }
+            break;
+          case _RegistrationStep.password:
+            final result = await notifier.registrationComplete(
+              password: _passwordController.text,
+            );
+            _passwordController.clear();
+            if (mounted) {
+              setState(() => _recoveryKey = result.recoveryKey);
+            }
+            break;
+        }
       }
     } catch (_) {
       if (mounted) {
         setState(() => _error = l10n.accountRequestFailed);
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _resendCode() async {
+    final l10n = AppLocalizations.of(context)!;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      final pending = await ref
+          .read(accountProvider.notifier)
+          .registrationResend();
+      if (mounted) {
+        setState(() => _setNextRetryAt(pending.nextRetryAtMs));
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() => _error = l10n.accountRequestFailed);
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _busy = false);
+      }
+    }
+  }
+
+  int get _resendWaitSeconds {
+    final nextRetryAtMs = _nextRetryAtMs;
+    if (nextRetryAtMs == null) return 0;
+    final remaining = nextRetryAtMs - DateTime.now().millisecondsSinceEpoch;
+    return remaining <= 0 ? 0 : (remaining / 1000).ceil();
+  }
+
+  void _setNextRetryAt(int? nextRetryAtMs) {
+    _nextRetryAtMs = nextRetryAtMs;
+    _resendTimer?.cancel();
+    if (_resendWaitSeconds == 0) return;
+    _resendTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted || _resendWaitSeconds == 0) {
+        timer.cancel();
+      }
+      if (mounted) setState(() {});
+    });
+  }
+
+  Future<void> _cancelRegistration() async {
+    final l10n = AppLocalizations.of(context)!;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await ref.read(accountProvider.notifier).registrationCancel();
+      if (mounted) {
+        setState(() {
+          _registerMode = false;
+          _registrationStep = _RegistrationStep.email;
+          _registrationCanCancel = false;
+          _setNextRetryAt(null);
+          _passwordController.clear();
+          _otpController.clear();
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() => _error = l10n.accountRequestFailed);
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _busy = false);
+      }
+    }
+  }
+
+  Future<void> _acknowledgeRecoveryKey() async {
+    setState(() => _busy = true);
+    try {
+      await ref.read(accountProvider.notifier).registrationAckRecoveryKey();
+      if (mounted) {
+        setState(() {
+          _recoveryKey = null;
+          _registrationStep = _RegistrationStep.email;
+          _registrationCanCancel = false;
+        });
       }
     } finally {
       if (mounted) {
@@ -257,10 +466,12 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
     setState(() {
       _busy = true;
       _error = null;
-      _recoveryKey = null;
     });
     try {
       await ref.read(accountProvider.notifier).logout();
+      if (mounted) {
+        setState(() => _recoveryKey = null);
+      }
     } catch (_) {
       if (mounted) {
         setState(() => _error = l10n.accountRequestFailed);
@@ -420,20 +631,30 @@ class _SignedOutSection extends StatelessWidget {
   const _SignedOutSection({
     required this.registerMode,
     required this.busy,
+    required this.registrationStep,
     required this.emailController,
     required this.passwordController,
-    required this.recoveryKey,
+    required this.otpController,
     required this.onModeChanged,
     required this.onSubmit,
+    required this.onResend,
+    required this.resendWaitSeconds,
+    required this.canCancel,
+    required this.onCancel,
   });
 
   final bool registerMode;
   final bool busy;
+  final _RegistrationStep registrationStep;
   final TextEditingController emailController;
   final TextEditingController passwordController;
-  final String? recoveryKey;
+  final TextEditingController otpController;
   final ValueChanged<bool> onModeChanged;
   final VoidCallback onSubmit;
+  final VoidCallback onResend;
+  final int resendWaitSeconds;
+  final bool canCancel;
+  final VoidCallback onCancel;
 
   @override
   Widget build(BuildContext context) {
@@ -500,19 +721,55 @@ class _SignedOutSection extends StatelessWidget {
           ],
         ),
         const SizedBox(height: AppSpacing.lg),
-        TextField(
-          controller: emailController,
-          keyboardType: TextInputType.emailAddress,
-          autofillHints: const [AutofillHints.email],
-          decoration: InputDecoration(labelText: l10n.accountEmailLabel),
-        ),
-        const SizedBox(height: AppSpacing.md),
-        TextField(
-          controller: passwordController,
-          obscureText: true,
-          autofillHints: const [AutofillHints.password],
-          decoration: InputDecoration(labelText: l10n.accountPasswordLabel),
-        ),
+        if (!registerMode || registrationStep == _RegistrationStep.email) ...[
+          TextField(
+            controller: emailController,
+            keyboardType: TextInputType.emailAddress,
+            autofillHints: const [AutofillHints.email],
+            decoration: InputDecoration(labelText: l10n.accountEmailLabel),
+          ),
+          const SizedBox(height: AppSpacing.md),
+        ],
+        if (!registerMode ||
+            registrationStep == _RegistrationStep.password) ...[
+          TextField(
+            controller: passwordController,
+            obscureText: true,
+            autofillHints: const [AutofillHints.password],
+            decoration: InputDecoration(labelText: l10n.accountPasswordLabel),
+          ),
+          const SizedBox(height: AppSpacing.md),
+        ],
+        if (registerMode && registrationStep == _RegistrationStep.otp) ...[
+          Semantics(
+            liveRegion: true,
+            child: Text(
+              l10n.accountVerificationPending,
+              key: const ValueKey('account-verification-pending'),
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+          const SizedBox(height: AppSpacing.md),
+          TextField(
+            controller: otpController,
+            keyboardType: TextInputType.number,
+            autofillHints: const [AutofillHints.oneTimeCode],
+            maxLength: 8,
+            decoration: InputDecoration(
+              labelText: l10n.accountVerificationCodeLabel,
+            ),
+          ),
+          const SizedBox(height: AppSpacing.sm),
+        ],
+        if (registerMode && canCancel) ...[
+          const SizedBox(height: AppSpacing.sm),
+          TextButton(
+            onPressed: busy ? null : onCancel,
+            child: Text(l10n.accountCancelRegistrationButton),
+          ),
+        ],
         const SizedBox(height: AppSpacing.lg),
         FilledButton.icon(
           onPressed: busy ? null : onSubmit,
@@ -520,7 +777,13 @@ class _SignedOutSection extends StatelessWidget {
             registerMode ? LucideIcons.userPlus300 : LucideIcons.logIn300,
           ),
           label: Text(
-            registerMode ? l10n.accountRegisterButton : l10n.accountLoginButton,
+            !registerMode
+                ? l10n.accountLoginButton
+                : switch (registrationStep) {
+                    _RegistrationStep.email => l10n.accountRegisterButton,
+                    _RegistrationStep.otp => l10n.accountVerifyCodeButton,
+                    _RegistrationStep.password => l10n.accountSetPasswordButton,
+                  },
           ),
           style: FilledButton.styleFrom(
             minimumSize: const Size.fromHeight(50),
@@ -529,12 +792,22 @@ class _SignedOutSection extends StatelessWidget {
             ),
           ),
         ),
-        if (recoveryKey != null) ...[
-          const SizedBox(height: AppSpacing.lg),
-          SelectableText(
-            recoveryKey!,
-            key: const ValueKey('account-recovery-key'),
-            style: Theme.of(context).textTheme.bodyLarge,
+        if (registerMode && registrationStep == _RegistrationStep.otp) ...[
+          const SizedBox(height: AppSpacing.md),
+          if (resendWaitSeconds > 0) ...[
+            Text(
+              l10n.accountResendAvailableIn(resendWaitSeconds),
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: colorScheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: AppSpacing.xs),
+          ],
+          TextButton.icon(
+            onPressed: busy || resendWaitSeconds > 0 ? null : onResend,
+            icon: const Icon(LucideIcons.refreshCw300),
+            label: Text(l10n.accountResendCodeButton),
           ),
         ],
       ],

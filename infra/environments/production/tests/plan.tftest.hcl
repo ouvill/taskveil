@@ -14,6 +14,12 @@ mock_provider "aws" {
   mock_resource "aws_iam_role" {
     defaults = { arn = "arn:aws:iam::222222222222:role/taskveil-test" }
   }
+  mock_data "aws_cloudwatch_event_connection" {
+    defaults = { arn = "arn:aws:events:eu-central-1:222222222222:connection/taskveil-test/00000000-0000-0000-0000-000000000000" }
+  }
+  mock_resource "aws_cloudwatch_event_api_destination" {
+    defaults = { arn = "arn:aws:events:eu-central-1:222222222222:api-destination/taskveil-test/00000000-0000-0000-0000-000000000000" }
+  }
   mock_resource "aws_lambda_function" {
     defaults = {
       arn        = "arn:aws:lambda:eu-central-1:222222222222:function:taskveil-test-server"

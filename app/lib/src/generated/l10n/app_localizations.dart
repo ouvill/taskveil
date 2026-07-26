@@ -1633,6 +1633,54 @@ abstract class AppLocalizations {
   /// **'Register'**
   String get accountRegisterButton;
 
+  /// No description provided for @accountVerificationPending.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter the 8-digit code sent to your email. This confirms mailbox access only; it cannot recover encrypted data.'**
+  String get accountVerificationPending;
+
+  /// No description provided for @accountVerificationCodeLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'8-digit verification code'**
+  String get accountVerificationCodeLabel;
+
+  /// No description provided for @accountVerifyCodeButton.
+  ///
+  /// In en, this message translates to:
+  /// **'Verify code'**
+  String get accountVerifyCodeButton;
+
+  /// No description provided for @accountResendCodeButton.
+  ///
+  /// In en, this message translates to:
+  /// **'Resend code'**
+  String get accountResendCodeButton;
+
+  /// No description provided for @accountResendAvailableIn.
+  ///
+  /// In en, this message translates to:
+  /// **'You can resend in {seconds} seconds.'**
+  String accountResendAvailableIn(int seconds);
+
+  /// No description provided for @accountCancelRegistrationButton.
+  ///
+  /// In en, this message translates to:
+  /// **'Cancel registration'**
+  String get accountCancelRegistrationButton;
+
+  /// No description provided for @accountSetPasswordButton.
+  ///
+  /// In en, this message translates to:
+  /// **'Set password and finish'**
+  String get accountSetPasswordButton;
+
+  /// No description provided for @accountRecoveryAcknowledgeButton.
+  ///
+  /// In en, this message translates to:
+  /// **'I saved my Recovery Key'**
+  String get accountRecoveryAcknowledgeButton;
+
   /// No description provided for @accountLogoutButton.
   ///
   /// In en, this message translates to:

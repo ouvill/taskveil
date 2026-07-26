@@ -10,6 +10,10 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
 pub const AUTH_START_BODY_LIMIT: usize = 8 * 1024;
+// Registration finish carries the OPAQUE upload plus the initial encrypted
+// account/device key bundle. Keep it bounded independently from the much
+// smaller start requests.
+pub const AUTH_REGISTER_FINISH_BODY_LIMIT: usize = 64 * 1024;
 pub const TRUSTED_SOURCE_IP_HEADER: &str = "x-taskveil-source-ip";
 
 const TABLE_ENTRY_LIMIT: usize = 4_096;
@@ -200,11 +204,15 @@ impl AuthProtection {
         }
     }
 
-    fn identifier_key(&self, canonical_identifier: &str) -> [u8; 32] {
+    fn identifier_key(&self, identifier: &str) -> [u8; 32] {
+        // Callers pass their protocol's canonical identifier. Do not fold it
+        // here: email local-parts and opaque registration tickets are
+        // case-sensitive, and sharing their buckets enables cross-identity DoS.
+        let canonical = identifier.trim();
         let mut mac =
             Hmac::<Sha256>::new_from_slice(self.key.as_slice()).expect("HMAC accepts any key size");
         mac.update(b"taskveil/auth-limit/identifier/v1\0");
-        mac.update(canonical_identifier.as_bytes());
+        mac.update(canonical.as_bytes());
         mac.finalize().into_bytes().into()
     }
 }
@@ -399,7 +407,7 @@ mod tests {
         let now = Instant::now();
 
         for attempt in 0..3 {
-            let known_result = known.admit_at(source, "known@example.com", now);
+            let known_result = known.admit_at(source, " Known@example.com ", now);
             let unknown_result = unknown.admit_at(source, "unknown@example.com", now);
             assert_eq!(
                 known_result.as_ref().err(),
@@ -408,12 +416,16 @@ mod tests {
             );
         }
         let error = known
-            .admit_at(source, "known@example.com", now)
+            .admit_at(source, "Known@example.com", now)
             .expect_err("identifier limit");
         assert_eq!(error.scope, LimitScope::Identifier);
         assert_eq!(error.retry_after_seconds, None);
         assert_eq!(
-            known.identifier_key("known@example.com"),
+            known.identifier_key(" Known@example.com "),
+            known.identifier_key("Known@example.com")
+        );
+        assert_ne!(
+            known.identifier_key("Known@example.com"),
             known.identifier_key("known@example.com")
         );
         let another_key = AuthProtection::with_policy([0x23; 32], policy);

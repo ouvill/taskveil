@@ -10,6 +10,7 @@ const _phase = String.fromEnvironment('TASKVEIL_ANDROID_PARITY_PHASE');
 const _runId = String.fromEnvironment('TASKVEIL_ANDROID_PARITY_RUN_ID');
 const _email = String.fromEnvironment('TASKVEIL_ANDROID_PARITY_EMAIL');
 const _password = String.fromEnvironment('TASKVEIL_ANDROID_PARITY_PASSWORD');
+const _otp = String.fromEnvironment('TASKVEIL_ANDROID_PARITY_OTP');
 const _serverUrl = String.fromEnvironment(
   'TASKVEIL_ANDROID_PARITY_SERVER_URL',
   defaultValue: 'http://127.0.0.1:8080',
@@ -42,15 +43,17 @@ void main() {
 
     switch (_phase) {
       case 'register':
-        final result = await accountRegister(
-          email: _email,
+        expect(_otp, hasLength(8));
+        await accountRegistrationBegin(email: _email, serverUrl: _serverUrl);
+        await accountRegistrationVerifyOtp(otp: _otp);
+        final result = await accountRegistrationComplete(
           password: _password,
-          serverUrl: _serverUrl,
           deviceName: 'Android emulator A',
         );
         expect(result.session.loggedIn, isTrue);
         expect(result.session.email, _email);
         expect(result.recoveryKey, isNotNull);
+        accountRegistrationAckRecoveryKey();
         return;
       case 'device_a_push':
         final session = await getAccountSessionState();

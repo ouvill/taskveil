@@ -3,6 +3,8 @@ locals {
   api_domain       = "api.${var.environment}.${var.base_domain}"
   realtime_domain  = "realtime.${var.environment}.${var.base_domain}"
   realtime_service = "${var.project_name}-realtime-${var.environment}"
+  email_domain     = "email.${var.environment}.${var.base_domain}"
+  email_service    = "${var.project_name}-auth-email-${var.environment}"
   lambda_name      = "${local.name}-server"
   runtime_secret   = "${local.name}/runtime"
   migration_secret = "${local.name}/migration"
@@ -11,12 +13,17 @@ locals {
   authenticated_routes = toset([
     "POST /v1/auth/register/start",
     "POST /v1/auth/register/finish",
+    "POST /v1/auth/register/request",
+    "POST /v1/auth/register/resend",
+    "POST /v1/auth/register/verify",
+    "POST /v1/auth/register/status",
     "POST /v1/auth/login/start",
     "POST /v1/auth/login/finish",
     "POST /v1/auth/device/certify",
     "POST /v1/auth/token",
     "POST /v1/auth/revoke",
     "POST /v1/auth/key-wrappers",
+    "POST /internal/email/dispatch",
   ])
   tags = {
     Project     = var.project_name

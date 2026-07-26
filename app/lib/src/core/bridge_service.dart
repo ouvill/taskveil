@@ -143,17 +143,45 @@ class FrbBridgeService implements BridgeService {
       rust_api.getAccountSessionState();
 
   @override
-  Future<rust_api.AccountAuthResultDto> accountRegister({
+  Future<rust_api.AccountRegistrationPendingDto> accountRegistrationBegin({
     required String email,
-    required String password,
     String? serverUrl,
+  }) => rust_api.accountRegistrationBegin(email: email, serverUrl: serverUrl);
+
+  @override
+  Future<rust_api.AccountRegistrationStateDto?>
+  accountRegistrationState() async => rust_api.accountRegistrationState();
+
+  @override
+  Future<void> accountRegistrationCancel() async {
+    rust_api.accountRegistrationCancel();
+  }
+
+  @override
+  Future<rust_api.AccountRegistrationPendingDto> accountRegistrationResend() =>
+      rust_api.accountRegistrationResend();
+
+  @override
+  Future<void> accountRegistrationVerifyOtp({required String otp}) =>
+      rust_api.accountRegistrationVerifyOtp(otp: otp);
+
+  @override
+  Future<rust_api.AccountAuthResultDto> accountRegistrationComplete({
+    required String password,
     String? deviceName,
-  }) => rust_api.accountRegister(
-    email: email,
+  }) => rust_api.accountRegistrationComplete(
     password: password,
-    serverUrl: serverUrl,
     deviceName: deviceName,
   );
+
+  @override
+  Future<void> accountRegistrationAckRecoveryKey() async {
+    rust_api.accountRegistrationAckRecoveryKey();
+  }
+
+  @override
+  Future<String?> accountRegistrationRecoveryKey() async =>
+      rust_api.accountRegistrationRecoveryKey();
 
   @override
   Future<rust_api.AccountAuthResultDto> accountLogin({

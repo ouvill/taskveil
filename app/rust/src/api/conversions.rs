@@ -385,6 +385,7 @@ pub(super) fn account_session_to_dto(session: AccountSessionState) -> AccountSes
         user_id: session.user_id,
         tenant_id: session.tenant_id,
         device_id: session.device_id,
+        recovery_pending: session.recovery_pending,
     }
 }
 

@@ -170,8 +170,9 @@ impl Fixture {
         let token = "protocol-v2-test-token".to_string();
         query(
             "INSERT INTO users
-                (id, email, opaque_suite_id, opaque_record, account_root_public)
-             VALUES ($1, $2, $3, $4, '\\x00'::bytea)",
+                (id, email, canonical_email, opaque_credential_id,
+                 opaque_suite_id, opaque_record, account_root_public)
+             VALUES ($1, $2, $2, $1, $3, $4, '\\x00'::bytea)",
         )
         .bind(user_id)
         .bind(format!("{user_id}@example.test"))
@@ -290,6 +291,8 @@ impl Fixture {
             resync_tokens: resync_tokens.clone(),
             auth_protection: AuthProtection::new([0xA7; 32]),
             trust_source_ip_header: false,
+            email_verification:
+                taskveil_server::email_verification::EmailVerificationService::for_tests(),
         });
         Self {
             app,

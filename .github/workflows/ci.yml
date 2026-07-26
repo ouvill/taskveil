@@ -87,6 +87,42 @@ jobs:
       - name: Wrangler dry-run build
         run: npm run build
 
+  auth-email-worker-quality:
+    name: Auth email Worker quality gates
+    needs: changes
+    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: auth-email-worker
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: auth-email-worker/.node-version
+          cache: npm
+          cache-dependency-path: auth-email-worker/package-lock.json
+
+      - name: Verify pinned Node.js
+        run: test "$(node --version)" = "v24.18.0"
+
+      - name: Install Worker dependencies
+        run: npm ci
+
+      - name: Audit Worker toolchain dependencies
+        run: npm audit --audit-level=high
+
+      - name: Worker typecheck and tests
+        run: |
+          npm run typecheck
+          npm test
+
+      - name: Wrangler dry-run build
+        run: npm run build
+
   rust-quality:
     name: Rust quality gates
     needs: changes

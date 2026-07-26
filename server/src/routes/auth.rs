@@ -11,10 +11,17 @@ use crate::{
     auth::{
         self, AuthorizationServerMetadata, LoginFinishRequest, LoginSessionResponse,
         LoginStartResponse, LogoutResponse, OpaqueStartRequest, RegisterFinishRequest,
-        RegistrationStartResponse, RevocationRequest, SessionResponse, TokenRequest, TokenResponse,
+        RegistrationOpaqueStartRequest, RegistrationStartResponse, RevocationRequest,
+        SessionResponse, TokenRequest, TokenResponse,
     },
     auth_protection::{
-        AuthAdmission, ClientSource, AUTH_START_BODY_LIMIT, TRUSTED_SOURCE_IP_HEADER,
+        AuthAdmission, ClientSource, AUTH_REGISTER_FINISH_BODY_LIMIT, AUTH_START_BODY_LIMIT,
+        TRUSTED_SOURCE_IP_HEADER,
+    },
+    email_verification::{
+        canonicalize_email, RegistrationRequest, RegistrationRequestResponse,
+        RegistrationResendRequest, RegistrationStatusRequest, RegistrationStatusResponse,
+        RegistrationVerifyRequest, RegistrationVerifyResponse,
     },
     AppError, SharedState,
 };
@@ -22,10 +29,29 @@ use crate::{
 pub fn router() -> Router<SharedState> {
     Router::new()
         .route(
+            "/register/request",
+            post(registration_request).layer(DefaultBodyLimit::max(AUTH_START_BODY_LIMIT)),
+        )
+        .route(
+            "/register/resend",
+            post(registration_resend).layer(DefaultBodyLimit::max(AUTH_START_BODY_LIMIT)),
+        )
+        .route(
+            "/register/verify",
+            post(registration_verify).layer(DefaultBodyLimit::max(AUTH_START_BODY_LIMIT)),
+        )
+        .route(
+            "/register/status",
+            post(registration_status).layer(DefaultBodyLimit::max(AUTH_START_BODY_LIMIT)),
+        )
+        .route(
             "/register/start",
             post(register_start).layer(DefaultBodyLimit::max(AUTH_START_BODY_LIMIT)),
         )
-        .route("/register/finish", post(register_finish))
+        .route(
+            "/register/finish",
+            post(register_finish).layer(DefaultBodyLimit::max(AUTH_REGISTER_FINISH_BODY_LIMIT)),
+        )
         .route(
             "/login/start",
             post(login_start).layer(DefaultBodyLimit::max(AUTH_START_BODY_LIMIT)),
@@ -35,6 +61,112 @@ pub fn router() -> Router<SharedState> {
         .route("/token", post(refresh_session))
         .route("/revoke", post(revoke_token))
         .route("/key-wrappers", post(update_key_wrappers))
+}
+
+async fn registration_request(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(request): Json<RegistrationRequest>,
+) -> Result<(StatusCode, HeaderMap, Json<RegistrationRequestResponse>), AppError> {
+    admit_registration_request(&state, &headers, None, &request.email)?;
+    let idempotency_key = required_idempotency_key(&headers)?;
+    state
+        .email_verification
+        .request_registration(&state.pool, request, idempotency_key)
+        .await
+        .map(|response| {
+            (
+                StatusCode::ACCEPTED,
+                token_response_headers(),
+                Json(response),
+            )
+        })
+}
+
+async fn registration_resend(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(request): Json<RegistrationResendRequest>,
+) -> Result<(StatusCode, HeaderMap, Json<RegistrationRequestResponse>), AppError> {
+    admit_registration_source(&state, &headers, None)?;
+    let idempotency_key = required_idempotency_key(&headers)?;
+    state
+        .email_verification
+        .resend_registration(&state.pool, request, idempotency_key)
+        .await
+        .map(|response| {
+            (
+                StatusCode::ACCEPTED,
+                token_response_headers(),
+                Json(response),
+            )
+        })
+}
+
+async fn registration_verify(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(request): Json<RegistrationVerifyRequest>,
+) -> Result<(StatusCode, HeaderMap, Json<RegistrationVerifyResponse>), AppError> {
+    admit_registration_source(&state, &headers, None)?;
+    let idempotency_key = required_idempotency_key(&headers)?;
+    state
+        .email_verification
+        .verify_registration(&state.pool, request, idempotency_key)
+        .await
+        .map(|response| {
+            (
+                StatusCode::ACCEPTED,
+                token_response_headers(),
+                Json(response),
+            )
+        })
+}
+
+async fn registration_status(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(request): Json<RegistrationStatusRequest>,
+) -> Result<(HeaderMap, Json<RegistrationStatusResponse>), AppError> {
+    admit_registration_source(&state, &headers, None)?;
+    state
+        .email_verification
+        .registration_status(&state.pool, request)
+        .await
+        .map(|response| (token_response_headers(), Json(response)))
+}
+
+fn admit_registration_request(
+    state: &SharedState,
+    headers: &HeaderMap,
+    peer_address: Option<SocketAddr>,
+    email: &str,
+) -> Result<(), AppError> {
+    admit_registration_source(state, headers, peer_address)?;
+    admit_email_identifier(state, email).map(|_| ())
+}
+
+fn admit_email_identifier(state: &SharedState, email: &str) -> Result<AuthAdmission, AppError> {
+    let email = canonicalize_email(email)?;
+    state
+        .auth_protection
+        .admit_identifier(email.canonical())
+        .map_err(|error| AppError::rate_limited(error.retry_after_seconds))
+}
+
+fn admit_registration_source(
+    state: &SharedState,
+    headers: &HeaderMap,
+    peer_address: Option<SocketAddr>,
+) -> Result<(), AppError> {
+    state
+        .auth_protection
+        .admit_source(client_source(
+            headers,
+            peer_address,
+            state.trust_source_ip_header,
+        ))
+        .map_err(|error| AppError::rate_limited(error.retry_after_seconds))
 }
 
 pub async fn authorization_server_metadata(
@@ -67,20 +199,38 @@ async fn update_key_wrappers(
 
 async fn register_start(
     State(state): State<SharedState>,
-    LimitedOpaqueStart { request, admission }: LimitedOpaqueStart,
-) -> Result<Json<RegistrationStartResponse>, AppError> {
-    auth::register_start(&state.pool, request, admission.identifier_key())
-        .await
-        .map(Json)
+    LimitedRegistrationStart {
+        request,
+        admission,
+        idempotency_key,
+    }: LimitedRegistrationStart,
+) -> Result<(HeaderMap, Json<RegistrationStartResponse>), AppError> {
+    auth::register_start(
+        &state.pool,
+        &state.email_verification,
+        request,
+        &idempotency_key,
+        admission.identifier_key(),
+    )
+    .await
+    .map(|response| (token_response_headers(), Json(response)))
 }
 
 async fn register_finish(
     State(state): State<SharedState>,
-    Json(request): Json<RegisterFinishRequest>,
+    LimitedRegistrationFinish {
+        request,
+        idempotency_key,
+    }: LimitedRegistrationFinish,
 ) -> Result<(HeaderMap, Json<SessionResponse>), AppError> {
-    auth::register_finish(&state.pool, request)
-        .await
-        .map(|response| (token_response_headers(), Json(response)))
+    auth::register_finish(
+        &state.pool,
+        &state.email_verification,
+        request,
+        &idempotency_key,
+    )
+    .await
+    .map(|response| (token_response_headers(), Json(response)))
 }
 
 async fn login_start(
@@ -141,9 +291,98 @@ fn bearer_token(headers: &HeaderMap) -> Result<&str, AppError> {
     Ok(token)
 }
 
+fn required_idempotency_key(headers: &HeaderMap) -> Result<&str, AppError> {
+    headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| AppError::bad_request("missing idempotency key"))
+}
+
 struct LimitedOpaqueStart {
     request: OpaqueStartRequest,
     admission: AuthAdmission,
+}
+
+struct LimitedRegistrationStart {
+    request: RegistrationOpaqueStartRequest,
+    admission: AuthAdmission,
+    idempotency_key: String,
+}
+
+struct LimitedRegistrationFinish {
+    request: RegisterFinishRequest,
+    idempotency_key: String,
+}
+
+impl FromRequest<SharedState> for LimitedRegistrationFinish {
+    type Rejection = Response;
+
+    async fn from_request(request: Request, state: &SharedState) -> Result<Self, Self::Rejection> {
+        let peer_address = request
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ConnectInfo(address)| *address);
+        let source = client_source(
+            request.headers(),
+            peer_address,
+            state.trust_source_ip_header,
+        );
+        state
+            .auth_protection
+            .admit_source(source)
+            .map_err(|error| AppError::rate_limited(error.retry_after_seconds).into_response())?;
+        let idempotency_key = request
+            .headers()
+            .get("idempotency-key")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+            .ok_or_else(|| AppError::bad_request("missing idempotency key").into_response())?;
+        let Json(request) = Json::<RegisterFinishRequest>::from_request(request, state)
+            .await
+            .map_err(IntoResponse::into_response)?;
+        Ok(Self {
+            request,
+            idempotency_key,
+        })
+    }
+}
+
+impl FromRequest<SharedState> for LimitedRegistrationStart {
+    type Rejection = Response;
+
+    async fn from_request(request: Request, state: &SharedState) -> Result<Self, Self::Rejection> {
+        let peer_address = request
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ConnectInfo(address)| *address);
+        let source = client_source(
+            request.headers(),
+            peer_address,
+            state.trust_source_ip_header,
+        );
+        state
+            .auth_protection
+            .admit_source(source)
+            .map_err(|error| AppError::rate_limited(error.retry_after_seconds).into_response())?;
+        let idempotency_key = request
+            .headers()
+            .get("idempotency-key")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+            .ok_or_else(|| AppError::bad_request("missing idempotency key").into_response())?;
+        let Json(request) = Json::<RegistrationOpaqueStartRequest>::from_request(request, state)
+            .await
+            .map_err(IntoResponse::into_response)?;
+        let admission = state
+            .auth_protection
+            .admit_identifier(&request.registration_ticket)
+            .map_err(|error| AppError::rate_limited(error.retry_after_seconds).into_response())?;
+        Ok(Self {
+            request,
+            admission,
+            idempotency_key,
+        })
+    }
 }
 
 impl FromRequest<SharedState> for LimitedOpaqueStart {
@@ -167,12 +406,8 @@ impl FromRequest<SharedState> for LimitedOpaqueStart {
         let Json(request) = Json::<OpaqueStartRequest>::from_request(request, state)
             .await
             .map_err(IntoResponse::into_response)?;
-        let canonical_identifier =
-            auth::normalize_email(&request.email).map_err(IntoResponse::into_response)?;
-        let admission = state
-            .auth_protection
-            .admit_identifier(&canonical_identifier)
-            .map_err(|error| AppError::rate_limited(error.retry_after_seconds).into_response())?;
+        let admission =
+            admit_email_identifier(state, &request.email).map_err(IntoResponse::into_response)?;
         Ok(Self { request, admission })
     }
 }
@@ -207,6 +442,7 @@ mod tests {
     };
     use sqlx_postgres::PgPoolOptions;
     use tower::ServiceExt;
+    use uuid::Uuid;
 
     use super::*;
     use crate::{
@@ -277,6 +513,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn email_identifier_limit_uses_the_canonical_mailbox_key() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://runtime:secret@127.0.0.1:1/taskveil")
+            .unwrap();
+        let state = std::sync::Arc::new(AppState {
+            pool,
+            billing: BillingService::unavailable_for_tests(BillingEnvironment::Sandbox),
+            auth_issuer: "http://localhost".to_string(),
+            resync_tokens: crate::resync_token::ResyncTokenKeyring::for_tests(),
+            auth_protection: AuthProtection::new([0xA7; 32]),
+            trust_source_ip_header: false,
+            email_verification: crate::email_verification::EmailVerificationService::for_tests(),
+        });
+
+        for padding in 0..12 {
+            let raw = format!(
+                "{}Owner@EXAMPLE.com{}",
+                " ".repeat(padding),
+                " ".repeat(12 - padding)
+            );
+            assert!(admit_email_identifier(&state, &raw).is_ok());
+        }
+        assert!(admit_email_identifier(&state, "Owner@example.com").is_err());
+        state.pool.close().await;
+    }
+
+    #[tokio::test]
     async fn oversized_streaming_start_body_is_rejected_before_json_and_database_work() {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://runtime:secret@127.0.0.1:1/taskveil")
@@ -289,6 +552,7 @@ mod tests {
             resync_tokens: crate::resync_token::ResyncTokenKeyring::for_tests(),
             auth_protection: AuthProtection::new([0xA7; 32]),
             trust_source_ip_header: false,
+            email_verification: crate::email_verification::EmailVerificationService::for_tests(),
         });
         let request = Request::post("/v1/auth/login/start")
             .header(header::CONTENT_TYPE, "application/json")
@@ -296,6 +560,30 @@ mod tests {
             .unwrap();
         assert!(request.headers().get(header::CONTENT_LENGTH).is_none());
 
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn oversized_streaming_finish_body_is_rejected_before_json_and_database_work() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://runtime:secret@127.0.0.1:1/taskveil")
+            .unwrap();
+        pool.close().await;
+        let app = build_router(AppState {
+            pool,
+            billing: BillingService::unavailable_for_tests(BillingEnvironment::Sandbox),
+            auth_issuer: "http://localhost".to_string(),
+            resync_tokens: crate::resync_token::ResyncTokenKeyring::for_tests(),
+            auth_protection: AuthProtection::new([0xA7; 32]),
+            trust_source_ip_header: false,
+            email_verification: crate::email_verification::EmailVerificationService::for_tests(),
+        });
+        let request = Request::post("/v1/auth/register/finish")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("idempotency-key", Uuid::now_v7().to_string())
+            .body(Body::from(vec![b' '; AUTH_REGISTER_FINISH_BODY_LIMIT + 1]))
+            .unwrap();
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
@@ -313,6 +601,7 @@ mod tests {
             resync_tokens: crate::resync_token::ResyncTokenKeyring::for_tests(),
             auth_protection: AuthProtection::new([0xA7; 32]),
             trust_source_ip_header: false,
+            email_verification: crate::email_verification::EmailVerificationService::for_tests(),
         });
 
         for _ in 0..20 {

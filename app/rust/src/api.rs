@@ -1,6 +1,7 @@
 use taskveil_client::chrono::{DateTime, Utc};
 use taskveil_client::{
     pomodoro_target_reached_at as domain_pomodoro_target_reached_at, AccountAuthResult,
+    AccountRegistrationPending, AccountRegistrationPhase, AccountRegistrationState,
     AccountSessionState, ActiveTimerSession, BillingState, CalendarOccurrenceKind,
     CalendarOccurrenceView, CalendarRange, CivilDate, ClientError, CompletedTimerSession,
     CreateTaskCommand, CreateTaskSeriesFromTaskCommand, CreateTaskSeriesFromTemplateCommand,
@@ -245,11 +246,26 @@ pub struct AccountSessionStateDto {
     pub user_id: Option<String>,
     pub tenant_id: Option<String>,
     pub device_id: Option<String>,
+    pub recovery_pending: bool,
 }
 
 pub struct AccountAuthResultDto {
     pub session: AccountSessionStateDto,
     pub recovery_key: Option<String>,
+}
+
+pub struct AccountRegistrationPendingDto {
+    pub email: String,
+    pub expires_at_ms: i64,
+    pub next_retry_at_ms: i64,
+}
+
+pub struct AccountRegistrationStateDto {
+    pub phase: String,
+    pub email: String,
+    pub expires_at_ms: i64,
+    pub next_retry_at_ms: Option<i64>,
+    pub can_cancel: bool,
 }
 
 #[derive(Clone)]
@@ -366,17 +382,91 @@ pub fn get_account_session_state() -> Result<AccountSessionStateDto, String> {
     client_result(client()?.account_session_state()).map(account_session_to_dto)
 }
 
-pub async fn account_register(
+fn account_registration_pending_to_dto(
+    pending: AccountRegistrationPending,
+) -> AccountRegistrationPendingDto {
+    AccountRegistrationPendingDto {
+        email: pending.email,
+        expires_at_ms: pending.expires_at_ms,
+        next_retry_at_ms: pending.next_retry_at_ms,
+    }
+}
+
+fn account_registration_state_to_dto(
+    state: AccountRegistrationState,
+) -> AccountRegistrationStateDto {
+    AccountRegistrationStateDto {
+        phase: match state.phase {
+            AccountRegistrationPhase::Email => "email",
+            AccountRegistrationPhase::Otp => "otp",
+            AccountRegistrationPhase::Password => "password",
+        }
+        .to_string(),
+        email: state.email,
+        expires_at_ms: state.expires_at_ms,
+        next_retry_at_ms: state.next_retry_at_ms,
+        can_cancel: state.can_cancel,
+    }
+}
+
+pub fn account_registration_state() -> Result<Option<AccountRegistrationStateDto>, String> {
+    client_result(client()?.account_registration_state())
+        .map(|state| state.map(account_registration_state_to_dto))
+}
+
+pub fn account_registration_cancel() -> Result<(), String> {
+    client_result(client()?.account_registration_cancel())
+}
+
+pub async fn account_registration_begin(
     email: String,
-    password: String,
     server_url: Option<String>,
+) -> Result<AccountRegistrationPendingDto, String> {
+    let client = client()?;
+    if let Some(server_url) = server_url {
+        client
+            .set_sync_server_url(server_url)
+            .map_err(|error| error.to_string())?;
+    }
+    client
+        .account_registration_begin(email)
+        .await
+        .map_err(|error| error.to_string())
+        .map(account_registration_pending_to_dto)
+}
+
+pub async fn account_registration_resend() -> Result<AccountRegistrationPendingDto, String> {
+    client()?
+        .account_registration_resend()
+        .await
+        .map_err(|error| error.to_string())
+        .map(account_registration_pending_to_dto)
+}
+
+pub async fn account_registration_verify_otp(otp: String) -> Result<(), String> {
+    client()?
+        .account_registration_verify_otp(otp)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub async fn account_registration_complete(
+    password: String,
     device_name: Option<String>,
 ) -> Result<AccountAuthResultDto, String> {
     client()?
-        .account_register(email, password, server_url, device_name)
+        .account_registration_complete(password, device_name)
         .await
         .map_err(|error| error.to_string())
         .map(account_auth_to_dto)
+}
+
+pub fn account_registration_ack_recovery_key() -> Result<(), String> {
+    client_result(client()?.account_registration_ack_recovery_key())
+}
+
+pub fn account_registration_recovery_key() -> Result<Option<String>, String> {
+    client_result(client()?.account_registration_recovery_key())
 }
 
 pub async fn account_login(
@@ -910,7 +1000,15 @@ mod tests {
         let _: fn() -> Result<String, String> = get_sync_server_url;
         let _: fn(String) -> Result<(), String> = set_sync_server_url;
         let _: fn() -> Result<AccountSessionStateDto, String> = get_account_session_state;
-        assert_result_future(account_register(String::new(), String::new(), None, None));
+        assert_result_future(account_registration_begin(String::new(), None));
+        let _: fn() -> Result<Option<AccountRegistrationStateDto>, String> =
+            account_registration_state;
+        let _: fn() -> Result<(), String> = account_registration_cancel;
+        assert_result_future(account_registration_resend());
+        assert_result_future(account_registration_verify_otp(String::new()));
+        assert_result_future(account_registration_complete(String::new(), None));
+        let _: fn() -> Result<(), String> = account_registration_ack_recovery_key;
+        let _: fn() -> Result<Option<String>, String> = account_registration_recovery_key;
         assert_result_future(account_login(String::new(), String::new(), None, None));
         assert_result_future(account_logout());
         assert_result_future(organization_safety_number(String::new(), String::new()));

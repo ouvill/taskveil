@@ -1,0 +1,75 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "taskveil-auth-email",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-14",
+  "workers_dev": false,
+  "preview_urls": false,
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["EmailDeliveryLedger"]
+    }
+  ],
+  "observability": { "enabled": true },
+  "env": {
+    "staging": {
+      "name": "taskveil-auth-email-staging",
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "EMAIL_DELIVERY_LEDGER",
+            "class_name": "EmailDeliveryLedger"
+          }
+        ]
+      },
+      "send_email": [
+        {
+          "name": "SEND_EMAIL",
+          "allowed_sender_addresses": ["verify@example.invalid"]
+        }
+      ],
+      "queues": {
+        "producers": [
+          { "binding": "EMAIL_COMMANDS", "queue": "taskveil-auth-email-staging" }
+        ]
+      },
+      "vars": {
+        "EMAIL_FROM": "verify@example.invalid",
+        "DELIVERY_SIGNING_KEY_CURRENT_ID": "configure-secret",
+        "DELIVERY_SIGNING_KEY_PREVIOUS_ID": "disabled",
+        "DATA_KEY_CURRENT_VERSION": "1",
+        "DATA_KEY_PREVIOUS_VERSION": "0"
+      }
+    },
+    "production": {
+      "name": "taskveil-auth-email-production",
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "EMAIL_DELIVERY_LEDGER",
+            "class_name": "EmailDeliveryLedger"
+          }
+        ]
+      },
+      "send_email": [
+        {
+          "name": "SEND_EMAIL",
+          "allowed_sender_addresses": ["verify@example.invalid"]
+        }
+      ],
+      "queues": {
+        "producers": [
+          { "binding": "EMAIL_COMMANDS", "queue": "taskveil-auth-email-production" }
+        ]
+      },
+      "vars": {
+        "EMAIL_FROM": "verify@example.invalid",
+        "DELIVERY_SIGNING_KEY_CURRENT_ID": "configure-secret",
+        "DELIVERY_SIGNING_KEY_PREVIOUS_ID": "disabled",
+        "DATA_KEY_CURRENT_VERSION": "1",
+        "DATA_KEY_PREVIOUS_VERSION": "0"
+      }
+    }
+  }
+}

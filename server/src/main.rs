@@ -37,6 +37,7 @@ async fn run() -> Result<(), ()> {
             resync_tokens: config.resync_tokens,
             auth_protection: AuthProtection::new(config.auth_limit_hmac_key),
             trust_source_ip_header: config.trust_source_ip_header,
+            email_verification: config.email_verification,
         },
         config.realtime,
     );

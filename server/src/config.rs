@@ -7,6 +7,7 @@ use thiserror::Error;
 
 use crate::{
     billing::{BillingConfigurationError, BillingEnvironment, BillingService},
+    email_verification::{EmailVerificationConfig, EmailVerificationService},
     realtime::{RealtimeConfigError, RealtimeGateway},
     resync_token::{ResyncTokenConfigError, ResyncTokenKeyring},
 };
@@ -20,6 +21,22 @@ const TRUST_SOURCE_IP_HEADER: &str = "TASKVEIL_TRUST_SOURCE_IP_HEADER";
 const RUNTIME_SECRET_ID: &str = "TASKVEIL_RUNTIME_SECRET_ID";
 const EXTENSION_PORT: &str = "PARAMETERS_SECRETS_EXTENSION_HTTP_PORT";
 const AWS_SESSION_TOKEN: &str = "AWS_SESSION_TOKEN";
+const EMAIL_TOKEN_KEY_CURRENT_VERSION: &str = "TASKVEIL_EMAIL_TOKEN_KEY_CURRENT_VERSION";
+const EMAIL_TOKEN_KEY_CURRENT: &str = "TASKVEIL_EMAIL_TOKEN_KEY_CURRENT";
+const EMAIL_TOKEN_KEY_PREVIOUS_VERSION: &str = "TASKVEIL_EMAIL_TOKEN_KEY_PREVIOUS_VERSION";
+const EMAIL_TOKEN_KEY_PREVIOUS: &str = "TASKVEIL_EMAIL_TOKEN_KEY_PREVIOUS";
+const EMAIL_STATE_KEY_CURRENT_VERSION: &str = "TASKVEIL_EMAIL_STATE_KEY_CURRENT_VERSION";
+const EMAIL_STATE_KEY_CURRENT: &str = "TASKVEIL_EMAIL_STATE_KEY_CURRENT";
+const EMAIL_STATE_KEY_PREVIOUS_VERSION: &str = "TASKVEIL_EMAIL_STATE_KEY_PREVIOUS_VERSION";
+const EMAIL_STATE_KEY_PREVIOUS: &str = "TASKVEIL_EMAIL_STATE_KEY_PREVIOUS";
+const EMAIL_DATA_KEY_CURRENT_VERSION: &str = "TASKVEIL_EMAIL_DATA_KEY_CURRENT_VERSION";
+const EMAIL_DATA_KEY_CURRENT: &str = "TASKVEIL_EMAIL_DATA_KEY_CURRENT";
+const EMAIL_DATA_KEY_PREVIOUS_VERSION: &str = "TASKVEIL_EMAIL_DATA_KEY_PREVIOUS_VERSION";
+const EMAIL_DATA_KEY_PREVIOUS: &str = "TASKVEIL_EMAIL_DATA_KEY_PREVIOUS";
+const EMAIL_DELIVERY_ENDPOINT: &str = "TASKVEIL_EMAIL_DELIVERY_ENDPOINT";
+const EMAIL_DELIVERY_SIGNING_KEY_ID: &str = "TASKVEIL_EMAIL_DELIVERY_SIGNING_KEY_ID";
+const EMAIL_DELIVERY_SIGNING_KEY: &str = "TASKVEIL_EMAIL_DELIVERY_SIGNING_KEY";
+const EMAIL_DISPATCH_TRIGGER_KEY: &str = "TASKVEIL_EMAIL_DISPATCH_TRIGGER_KEY";
 
 pub struct RuntimeConfig {
     pub database_url: String,
@@ -30,6 +47,7 @@ pub struct RuntimeConfig {
     pub auth_limit_hmac_key: [u8; 32],
     pub auth_limit_hmac_key_generation: AuthLimitKeyGeneration,
     pub trust_source_ip_header: bool,
+    pub email_verification: EmailVerificationService,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -65,6 +83,8 @@ pub enum RuntimeConfigError {
     InvalidAuthLimitHmacKeyGeneration,
     #[error("trusted source IP header setting is invalid")]
     InvalidTrustedSourceIpHeader,
+    #[error("email verification configuration is invalid")]
+    InvalidEmailVerification,
     #[error("runtime secret extension request failed")]
     ExtensionRequest,
     #[error("runtime secret payload is invalid")]
@@ -156,6 +176,34 @@ impl RuntimeConfig {
         let billing = BillingService::from_values(environment, lookup)?;
         let realtime = RealtimeGateway::from_string_values(lookup)?;
         let resync_tokens = ResyncTokenKeyring::from_string_values(lookup)?;
+        let email_verification = EmailVerificationService::new(EmailVerificationConfig {
+            token_key_current_version: key_version(lookup, EMAIL_TOKEN_KEY_CURRENT_VERSION)?,
+            token_key_current: secret_key(lookup, EMAIL_TOKEN_KEY_CURRENT)?,
+            token_key_previous: optional_versioned_key(
+                lookup,
+                EMAIL_TOKEN_KEY_PREVIOUS_VERSION,
+                EMAIL_TOKEN_KEY_PREVIOUS,
+            )?,
+            state_key_current_version: key_version(lookup, EMAIL_STATE_KEY_CURRENT_VERSION)?,
+            state_key_current: secret_key(lookup, EMAIL_STATE_KEY_CURRENT)?,
+            state_key_previous: optional_versioned_key(
+                lookup,
+                EMAIL_STATE_KEY_PREVIOUS_VERSION,
+                EMAIL_STATE_KEY_PREVIOUS,
+            )?,
+            delivery_key_current_version: key_version(lookup, EMAIL_DATA_KEY_CURRENT_VERSION)?,
+            delivery_key_current: secret_key(lookup, EMAIL_DATA_KEY_CURRENT)?,
+            delivery_key_previous: optional_versioned_key(
+                lookup,
+                EMAIL_DATA_KEY_PREVIOUS_VERSION,
+                EMAIL_DATA_KEY_PREVIOUS,
+            )?,
+            delivery_endpoint: required(lookup, EMAIL_DELIVERY_ENDPOINT)?,
+            delivery_signing_key_id: required(lookup, EMAIL_DELIVERY_SIGNING_KEY_ID)?,
+            delivery_signing_key: secret_key(lookup, EMAIL_DELIVERY_SIGNING_KEY)?,
+            dispatch_trigger_key: secret_key(lookup, EMAIL_DISPATCH_TRIGGER_KEY)?,
+        })
+        .map_err(|_| RuntimeConfigError::InvalidEmailVerification)?;
         Ok(Self {
             database_url,
             billing,
@@ -165,7 +213,52 @@ impl RuntimeConfig {
             auth_limit_hmac_key,
             auth_limit_hmac_key_generation,
             trust_source_ip_header,
+            email_verification,
         })
+    }
+}
+
+fn required(
+    lookup: impl Fn(&'static str) -> Option<String>,
+    name: &'static str,
+) -> Result<String, RuntimeConfigError> {
+    lookup(name).ok_or(RuntimeConfigError::Missing(name))
+}
+
+fn key_version(
+    lookup: impl Fn(&'static str) -> Option<String>,
+    name: &'static str,
+) -> Result<u32, RuntimeConfigError> {
+    required(lookup, name)?
+        .parse::<u32>()
+        .ok()
+        .filter(|version| *version > 0)
+        .ok_or(RuntimeConfigError::InvalidEmailVerification)
+}
+
+fn secret_key(
+    lookup: impl Fn(&'static str) -> Option<String>,
+    name: &'static str,
+) -> Result<[u8; 32], RuntimeConfigError> {
+    STANDARD
+        .decode(required(lookup, name)?)
+        .ok()
+        .and_then(|key| key.try_into().ok())
+        .ok_or(RuntimeConfigError::InvalidEmailVerification)
+}
+
+fn optional_versioned_key(
+    lookup: impl Fn(&'static str) -> Option<String> + Copy,
+    version_name: &'static str,
+    key_name: &'static str,
+) -> Result<Option<(u32, [u8; 32])>, RuntimeConfigError> {
+    match (lookup(version_name), lookup(key_name)) {
+        (None, None) => Ok(None),
+        (Some(_), Some(_)) => Ok(Some((
+            key_version(lookup, version_name)?,
+            secret_key(lookup, key_name)?,
+        ))),
+        _ => Err(RuntimeConfigError::InvalidEmailVerification),
     }
 }
 
@@ -235,6 +328,16 @@ mod tests {
             "TASKVEIL_RESYNC_TOKEN_KEY_CURRENT":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
             "TASKVEIL_AUTH_LIMIT_HMAC_KEY":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
             "TASKVEIL_AUTH_LIMIT_HMAC_KEY_GENERATION":"1",
+            "TASKVEIL_EMAIL_TOKEN_KEY_CURRENT_VERSION":"1",
+            "TASKVEIL_EMAIL_TOKEN_KEY_CURRENT":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "TASKVEIL_EMAIL_STATE_KEY_CURRENT_VERSION":"1",
+            "TASKVEIL_EMAIL_STATE_KEY_CURRENT":"BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ=",
+            "TASKVEIL_EMAIL_DATA_KEY_CURRENT_VERSION":"1",
+            "TASKVEIL_EMAIL_DATA_KEY_CURRENT":"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+            "TASKVEIL_EMAIL_DELIVERY_ENDPOINT":"https://email.staging.taskveil.example/v1/enqueue",
+            "TASKVEIL_EMAIL_DELIVERY_SIGNING_KEY_ID":"email-sign-v1",
+            "TASKVEIL_EMAIL_DELIVERY_SIGNING_KEY":"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+            "TASKVEIL_EMAIL_DISPATCH_TRIGGER_KEY":"AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=",
             "REVENUECAT_SANDBOX_PROJECT_ID":"sandbox-project",
             "REVENUECAT_SANDBOX_APP_ID":"sandbox-app",
             "REVENUECAT_SANDBOX_SECRET_KEY":"sandbox-secret",
@@ -251,6 +354,16 @@ mod tests {
             "TASKVEIL_RESYNC_TOKEN_KEY_CURRENT":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
             "TASKVEIL_AUTH_LIMIT_HMAC_KEY":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
             "TASKVEIL_AUTH_LIMIT_HMAC_KEY_GENERATION":"2",
+            "TASKVEIL_EMAIL_TOKEN_KEY_CURRENT_VERSION":"1",
+            "TASKVEIL_EMAIL_TOKEN_KEY_CURRENT":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "TASKVEIL_EMAIL_STATE_KEY_CURRENT_VERSION":"1",
+            "TASKVEIL_EMAIL_STATE_KEY_CURRENT":"BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ=",
+            "TASKVEIL_EMAIL_DATA_KEY_CURRENT_VERSION":"1",
+            "TASKVEIL_EMAIL_DATA_KEY_CURRENT":"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+            "TASKVEIL_EMAIL_DELIVERY_ENDPOINT":"https://email.taskveil.example/v1/enqueue",
+            "TASKVEIL_EMAIL_DELIVERY_SIGNING_KEY_ID":"email-sign-v1",
+            "TASKVEIL_EMAIL_DELIVERY_SIGNING_KEY":"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+            "TASKVEIL_EMAIL_DISPATCH_TRIGGER_KEY":"AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=",
             "REVENUECAT_PRODUCTION_PROJECT_ID":"production-project",
             "REVENUECAT_PRODUCTION_APP_ID":"production-app",
             "REVENUECAT_PRODUCTION_SECRET_KEY":"production-secret",
