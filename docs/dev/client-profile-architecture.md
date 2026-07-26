@@ -106,6 +106,20 @@ local fenceは送信済みHTTP requestを取り消せないため、remote side 
 runtime epoch / capsule generation不一致は原則として内部reload条件にし、秘密、
 credential、復号済みcontent、生profile pathをerror、log、lock metadataへ含めない。
 
+sync readinessはprofile guard取得とruntime epoch refreshの後に一度だけ解決し、
+`LoggedOut`、`Ready`、`CredentialUnavailable`、`AccountBoundUnavailable`を区別する。
+`LoggedOut`だけを同期不要の正常終了として扱う。credentialの欠落、期限切れ、
+invalid grantは`CredentialUnavailable`、永続account bindingに必要なlocal cryptoを
+復元できない場合は`AccountBoundUnavailable`とし、secret store、DB、manifest、
+暗号materialの破損をlogged-outへ変換しない。active credentialから復元した
+user / tenant / device identityはlocal crypto bindingと完全一致することを検証し、
+remote sessionとcredential generationは検証完了後にまとめて公開する。local crypto
+runtimeの復元はremote credentialの読取・検証から分離し、credentialの欠落、破損、
+secret store障害だけを理由にaccount-bound offline mutationを停止しない。
+同期開始時に生成したimmutable contextをbackfill、push、pull、settlementへ渡し、
+同じrunの途中でaccount runtimeを再解決しない。`ClockSkewRetryable`、
+`UpgradeRequired`とprofile / database / leaseのbusy・lost分類もこの境界で保持する。
+
 同一processの2 instance testだけをprocess間coordinationの証拠にしない。barrierで同期する
 実child processを使い、stale runtime、同時mutation / sync、lease takeover、
 強制終了後の回復、path alias、異なるprofileの並行性をdesktop全対象OSで検証する。

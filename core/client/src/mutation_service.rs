@@ -36,6 +36,8 @@ pub enum ClientError {
     KeyStore(#[source] taskveil_crypto::KeyStoreError),
     #[error("account request failed")]
     AccountRequest,
+    #[error("remote account credential is unavailable")]
+    CredentialUnavailable,
     #[error("a Pro entitlement is required")]
     EntitlementRequired,
     #[error("account-bound local sync keys are unavailable")]
@@ -50,6 +52,8 @@ pub enum ClientError {
     SyncRun,
     #[error("upgrade required")]
     UpgradeRequired,
+    #[error("local HLC is temporarily ahead of the server clock")]
+    ClockSkewRetryable,
     #[error("client runtime state is unavailable")]
     RuntimeState,
     #[error("another account or sync operation is already running")]

@@ -36,7 +36,7 @@ use taskveil_sync::{
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use super::{
-    now_ms, CryptoRuntimeState, TaskveilClient, ACCOUNT_DEVICE_ID_SETTING_KEY,
+    now_ms, AccountReadiness, CryptoRuntimeState, TaskveilClient, ACCOUNT_DEVICE_ID_SETTING_KEY,
     ACCOUNT_EMAIL_SETTING_KEY, ACCOUNT_MK_GENERATION_SETTING_KEY, ACCOUNT_ROOT_PUBLIC_SETTING_KEY,
     ACCOUNT_SESSION_EXPIRES_AT_SETTING_KEY, ACCOUNT_TENANT_ID_SETTING_KEY,
     ACCOUNT_USER_ID_SETTING_KEY,
@@ -792,12 +792,16 @@ impl TaskveilClient {
 
     pub fn account_session_state(&self) -> Result<AccountSessionState, ClientError> {
         let _operation = self.begin_operation()?;
-        self.ensure_account_runtime_restored()?;
-        Ok(self
-            .account_state()?
-            .session
-            .clone()
-            .unwrap_or_else(AccountSessionState::logged_out))
+        match self.resolve_account_readiness()? {
+            AccountReadiness::LoggedOut => Ok(AccountSessionState::logged_out()),
+            AccountReadiness::Ready => self
+                .account_state()?
+                .session
+                .clone()
+                .ok_or(ClientError::CredentialUnavailable),
+            AccountReadiness::CredentialUnavailable => Err(ClientError::CredentialUnavailable),
+            AccountReadiness::AccountBoundUnavailable => Err(ClientError::AccountBoundUnavailable),
+        }
     }
 
     pub async fn account_register(
@@ -1107,29 +1111,118 @@ impl TaskveilClient {
     }
 
     pub(crate) fn ensure_account_runtime_restored(&self) -> Result<(), ClientError> {
-        let restore_crypto = matches!(self.account_state()?.crypto, CryptoRuntimeState::Unloaded);
-        if restore_crypto {
-            let active_capsule = self.active_capsule()?;
-            let master_key = match active_capsule.wrapped_master_key() {
-                Some(local_wrapped_master_key) => {
-                    let user_id = self
-                        .non_empty_setting(ACCOUNT_USER_ID_SETTING_KEY)?
-                        .ok_or(ClientError::IncompleteAccountState)
-                        .and_then(|value| parse_uuid(&value))?;
-                    let device_key = Zeroizing::new(*active_capsule.device_key());
-                    unwrap_master_key_with_device_key(
-                        user_id,
-                        INITIAL_KEY_GENERATION,
-                        local_wrapped_master_key,
-                        &device_key,
-                    )
-                    .ok()
+        self.resolve_account_readiness().map(|_| ())
+    }
+
+    pub(crate) fn ensure_local_crypto_runtime_restored(&self) -> Result<(), ClientError> {
+        if !matches!(self.account_state()?.crypto, CryptoRuntimeState::Unloaded) {
+            return Ok(());
+        }
+        let resolved_crypto = self.load_crypto_runtime()?;
+        let mut account = self.account_state()?;
+        if matches!(account.crypto, CryptoRuntimeState::Unloaded) {
+            account.crypto = resolved_crypto;
+        }
+        Ok(())
+    }
+
+    pub(super) fn resolve_account_readiness(&self) -> Result<AccountReadiness, ClientError> {
+        let _session_lock = acquire_session_token_set_lock(&self.db_dir)?;
+        let mut credential = load_session_credential(&self.db_dir)?;
+        let expired = match credential.as_ref() {
+            Some(StoredSessionCredential::Active(tokens)) => {
+                tokens.refresh_expires_at_ms <= now_ms()?
+            }
+            Some(StoredSessionCredential::PendingDeviceCertification(_)) | None => false,
+        };
+        if expired {
+            delete_account_secret(&self.db_dir, AccountSecretKind::SessionTokens)
+                .map_err(ClientError::KeyStore)?;
+            credential = None;
+        }
+        let credential_generation = stored_credential_generation(credential.as_ref())?;
+        {
+            let account = self.account_state()?;
+            if account.session_restored
+                && account.loaded_credential_generation.as_deref()
+                    == Some(credential_generation.as_str())
+                && !matches!(account.crypto, CryptoRuntimeState::Unloaded)
+            {
+                return Ok(classify_account_readiness(
+                    credential_kind(credential.as_ref()),
+                    crypto_readiness(&account.crypto),
+                    account.session.is_some(),
+                ));
+            }
+        }
+
+        self.ensure_local_crypto_runtime_restored()?;
+        let crypto_readiness = crypto_readiness(&self.account_state()?.crypto);
+        let restored_session = match credential.as_ref() {
+            Some(StoredSessionCredential::Active(_)) => {
+                let email = self
+                    .non_empty_setting(ACCOUNT_EMAIL_SETTING_KEY)?
+                    .ok_or(ClientError::IncompleteAccountState)?;
+                let user_id = self
+                    .non_empty_setting(ACCOUNT_USER_ID_SETTING_KEY)?
+                    .ok_or(ClientError::IncompleteAccountState)?;
+                let tenant_id = self
+                    .non_empty_setting(ACCOUNT_TENANT_ID_SETTING_KEY)?
+                    .ok_or(ClientError::IncompleteAccountState)?;
+                let device_id = self
+                    .non_empty_setting(ACCOUNT_DEVICE_ID_SETTING_KEY)?
+                    .ok_or(ClientError::IncompleteAccountState)?;
+                let session_identity = LocalCryptoIdentity {
+                    user_id: parse_uuid(&user_id)?,
+                    tenant_id: parse_uuid(&tenant_id)?,
+                    device_id: parse_uuid(&device_id)?,
+                };
+                match crypto_readiness {
+                    CryptoReadiness::Ready(crypto_identity) => {
+                        if session_identity != crypto_identity {
+                            return Err(ClientError::ProfileIdentityMismatch);
+                        }
+                        Some(account_session_state(email, user_id, tenant_id, device_id))
+                    }
+                    CryptoReadiness::Anonymous | CryptoReadiness::Unavailable => None,
                 }
-                None => None,
-            };
-            let availability =
-                load_local_crypto_context(&self.db_path, &self.db_key(), master_key)?;
-            let crypto = match availability {
+            }
+            Some(StoredSessionCredential::PendingDeviceCertification(_)) | None => None,
+        };
+        let readiness = classify_account_readiness(
+            credential_kind(credential.as_ref()),
+            crypto_readiness,
+            restored_session.is_some(),
+        );
+
+        let mut account = self.account_state()?;
+        account.session = restored_session;
+        account.loaded_credential_generation = Some(credential_generation);
+        account.session_restored = true;
+        Ok(readiness)
+    }
+
+    fn load_crypto_runtime(&self) -> Result<CryptoRuntimeState, ClientError> {
+        let active_capsule = self.active_capsule()?;
+        let master_key = match active_capsule.wrapped_master_key() {
+            Some(local_wrapped_master_key) => {
+                let user_id = self
+                    .non_empty_setting(ACCOUNT_USER_ID_SETTING_KEY)?
+                    .ok_or(ClientError::IncompleteAccountState)
+                    .and_then(|value| parse_uuid(&value))?;
+                let device_key = Zeroizing::new(*active_capsule.device_key());
+                unwrap_master_key_with_device_key(
+                    user_id,
+                    INITIAL_KEY_GENERATION,
+                    local_wrapped_master_key,
+                    &device_key,
+                )
+                .ok()
+            }
+            None => None,
+        };
+        Ok(
+            match load_local_crypto_context(&self.db_path, &self.db_key(), master_key)? {
                 LocalCryptoAvailability::Ready(crypto) => CryptoRuntimeState::Ready(crypto),
                 LocalCryptoAvailability::AccountBoundUnavailable(reason) => {
                     CryptoRuntimeState::Unavailable(reason)
@@ -1138,50 +1231,8 @@ impl TaskveilClient {
                     CryptoRuntimeState::Unavailable(LocalCryptoUnavailable::MissingMasterKey)
                 }
                 LocalCryptoAvailability::Anonymous => CryptoRuntimeState::Anonymous,
-            };
-            self.account_state()?.crypto = crypto;
-        }
-
-        let _session_lock = acquire_session_token_set_lock(&self.db_dir)?;
-        let credential = load_session_credential(&self.db_dir)?;
-        let credential_generation = stored_credential_generation(credential.as_ref())?;
-        {
-            let mut account = self.account_state()?;
-            if account.session_restored
-                && account.loaded_credential_generation.as_deref()
-                    == Some(credential_generation.as_str())
-            {
-                return Ok(());
-            }
-            account.session = None;
-            account.session_restored = true;
-            account.loaded_credential_generation = Some(credential_generation);
-        }
-        let Some(StoredSessionCredential::Active(session_tokens)) = credential else {
-            return Ok(());
-        };
-        if session_tokens.refresh_expires_at_ms <= now_ms()? {
-            delete_account_secret(&self.db_dir, AccountSecretKind::SessionTokens)
-                .map_err(ClientError::KeyStore)?;
-            self.account_state()?.loaded_credential_generation =
-                Some(ABSENT_CREDENTIAL_GENERATION.to_string());
-            return Ok(());
-        }
-        let Some(email) = self.non_empty_setting(ACCOUNT_EMAIL_SETTING_KEY)? else {
-            return Ok(());
-        };
-        let Some(user_id) = self.non_empty_setting(ACCOUNT_USER_ID_SETTING_KEY)? else {
-            return Ok(());
-        };
-        let Some(tenant_id) = self.non_empty_setting(ACCOUNT_TENANT_ID_SETTING_KEY)? else {
-            return Ok(());
-        };
-        let Some(device_id) = self.non_empty_setting(ACCOUNT_DEVICE_ID_SETTING_KEY)? else {
-            return Ok(());
-        };
-        self.account_state()?.session =
-            Some(account_session_state(email, user_id, tenant_id, device_id));
-        Ok(())
+            },
+        )
     }
 
     pub(super) async fn access_token(
@@ -1207,11 +1258,12 @@ impl TaskveilClient {
     ) -> Result<OriginBoundAccessToken, ClientError> {
         self.ensure_account_runtime_restored()?;
         let _session_lock = acquire_session_token_set_lock(&self.db_dir)?;
-        let mut tokens = load_session_tokens(&self.db_dir)?.ok_or(ClientError::AccountRequest)?;
+        let mut tokens =
+            load_session_tokens(&self.db_dir)?.ok_or(ClientError::CredentialUnavailable)?;
         let now = now_ms()?;
         if tokens.refresh_expires_at_ms <= now {
             self.invalidate_remote_session_locked()?;
-            return Err(ClientError::AccountRequest);
+            return Err(ClientError::CredentialUnavailable);
         }
         if force_refresh
             || tokens.access_expires_at_ms <= now.saturating_add(ACCESS_TOKEN_REFRESH_SKEW_MS)
@@ -1226,7 +1278,7 @@ impl TaskveilClient {
                 Ok(refreshed) => refreshed,
                 Err(AccountClientError::InvalidGrant) => {
                     self.invalidate_remote_session_locked()?;
-                    return Err(ClientError::AccountRequest);
+                    return Err(ClientError::CredentialUnavailable);
                 }
                 Err(error) => return Err(map_account_client_error(error)),
             };
@@ -1896,6 +1948,66 @@ fn account_session_state(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CredentialKind {
+    Absent,
+    Active,
+    Pending,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CryptoReadiness {
+    Anonymous,
+    Ready(LocalCryptoIdentity),
+    Unavailable,
+}
+
+fn credential_kind(credential: Option<&StoredSessionCredential>) -> CredentialKind {
+    match credential {
+        Some(StoredSessionCredential::Active(_)) => CredentialKind::Active,
+        Some(StoredSessionCredential::PendingDeviceCertification(_)) => CredentialKind::Pending,
+        None => CredentialKind::Absent,
+    }
+}
+
+fn crypto_readiness(crypto: &CryptoRuntimeState) -> CryptoReadiness {
+    match crypto {
+        CryptoRuntimeState::Anonymous => CryptoReadiness::Anonymous,
+        CryptoRuntimeState::Ready(crypto) => CryptoReadiness::Ready(LocalCryptoIdentity {
+            tenant_id: crypto.tenant_id(),
+            user_id: crypto.user_id(),
+            device_id: crypto.device_id(),
+        }),
+        CryptoRuntimeState::Unavailable(_) | CryptoRuntimeState::Unloaded => {
+            CryptoReadiness::Unavailable
+        }
+    }
+}
+
+fn classify_account_readiness(
+    credential: CredentialKind,
+    crypto: CryptoReadiness,
+    has_validated_session: bool,
+) -> AccountReadiness {
+    if crypto == CryptoReadiness::Unavailable {
+        return AccountReadiness::AccountBoundUnavailable;
+    }
+    match credential {
+        CredentialKind::Absent => match crypto {
+            CryptoReadiness::Anonymous => AccountReadiness::LoggedOut,
+            CryptoReadiness::Ready(_) => AccountReadiness::CredentialUnavailable,
+            CryptoReadiness::Unavailable => AccountReadiness::AccountBoundUnavailable,
+        },
+        CredentialKind::Pending => AccountReadiness::CredentialUnavailable,
+        CredentialKind::Active
+            if matches!(crypto, CryptoReadiness::Ready(_)) && has_validated_session =>
+        {
+            AccountReadiness::Ready
+        }
+        CredentialKind::Active => AccountReadiness::AccountBoundUnavailable,
+    }
+}
+
 fn parse_session_id(value: Option<&str>) -> Result<Uuid, ClientError> {
     parse_uuid(value.ok_or(ClientError::IncompleteAccountState)?)
 }
@@ -2161,25 +2273,43 @@ mod tests {
 
     #[test]
     fn process_restart_restores_origin_bound_session() {
+        const DB_KEY: [u8; 32] = [0x33; 32];
+        const MASTER_KEY: [u8; KEY_LEN] = [0x34; KEY_LEN];
         let temp = TempDir::new().expect("temp profile");
-        let first = open_test_client(temp.path(), [0x33; 32]);
+        let first = open_test_client(temp.path(), DB_KEY);
+        let identity = LocalCryptoIdentity {
+            user_id: "00000000-0000-4000-8000-000000000001".parse().unwrap(),
+            tenant_id: "00000000-0000-4000-8000-000000000002".parse().unwrap(),
+            device_id: "00000000-0000-4000-8000-000000000003".parse().unwrap(),
+        };
         for (key, value) in [
-            (ACCOUNT_EMAIL_SETTING_KEY, "restart@example.com"),
-            (
-                ACCOUNT_USER_ID_SETTING_KEY,
-                "00000000-0000-4000-8000-000000000001",
-            ),
+            (ACCOUNT_EMAIL_SETTING_KEY, "restart@example.com".to_string()),
+            (ACCOUNT_USER_ID_SETTING_KEY, identity.user_id.to_string()),
             (
                 ACCOUNT_TENANT_ID_SETTING_KEY,
-                "00000000-0000-4000-8000-000000000002",
+                identity.tenant_id.to_string(),
             ),
             (
                 ACCOUNT_DEVICE_ID_SETTING_KEY,
-                "00000000-0000-4000-8000-000000000003",
+                identity.device_id.to_string(),
             ),
         ] {
-            first.set_setting_value(key, value).unwrap();
+            first.set_setting_value(key, &value).unwrap();
         }
+        let crypto = persist_local_crypto_context(
+            first.db_path(),
+            &DB_KEY,
+            identity,
+            &MASTER_KEY,
+            LocalSyncKeys {
+                tenant_id: identity.tenant_id,
+                tenant_root_dek: Some(Zeroizing::new([0x35; KEY_LEN])),
+                tenant_generation: 1,
+                historical_tenant_root_deks: Vec::new(),
+            },
+            1,
+        )
+        .unwrap();
         store_session_tokens(
             temp.path(),
             &StoredSessionTokens {
@@ -2195,7 +2325,16 @@ mod tests {
         .unwrap();
         drop(first);
 
-        let restarted = open_test_client(temp.path(), [0x33; 32]);
+        let restarted = open_test_client(temp.path(), DB_KEY);
+        let runtime = SqliteProfileCoordinationRepository::new(
+            open_encrypted(restarted.db_path(), &DB_KEY).unwrap(),
+        )
+        .load_runtime()
+        .unwrap();
+        restarted
+            .runtime_epoch
+            .store(runtime.runtime_epoch, std::sync::atomic::Ordering::Release);
+        restarted.account_state().unwrap().crypto = CryptoRuntimeState::Ready(Box::new(crypto));
         let session = restarted.account_session_state().unwrap();
         assert!(session.logged_in);
         assert_eq!(session.email.as_deref(), Some("restart@example.com"));
@@ -2208,25 +2347,54 @@ mod tests {
 
     #[test]
     fn live_profile_observes_authoritative_credential_replacement_and_deletion() {
+        const DB_KEY: [u8; 32] = [0x35; 32];
         let temp = TempDir::new().expect("temp profile");
-        let client = open_test_client(temp.path(), [0x35; 32]);
+        let client = open_test_client(temp.path(), DB_KEY);
+        let identity = LocalCryptoIdentity {
+            user_id: "00000000-0000-4000-8000-000000000011".parse().unwrap(),
+            tenant_id: "00000000-0000-4000-8000-000000000012".parse().unwrap(),
+            device_id: "00000000-0000-4000-8000-000000000013".parse().unwrap(),
+        };
         for (key, value) in [
-            (ACCOUNT_EMAIL_SETTING_KEY, "converge@example.com"),
             (
-                ACCOUNT_USER_ID_SETTING_KEY,
-                "00000000-0000-4000-8000-000000000011",
+                ACCOUNT_EMAIL_SETTING_KEY,
+                "converge@example.com".to_string(),
             ),
+            (ACCOUNT_USER_ID_SETTING_KEY, identity.user_id.to_string()),
             (
                 ACCOUNT_TENANT_ID_SETTING_KEY,
-                "00000000-0000-4000-8000-000000000012",
+                identity.tenant_id.to_string(),
             ),
             (
                 ACCOUNT_DEVICE_ID_SETTING_KEY,
-                "00000000-0000-4000-8000-000000000013",
+                identity.device_id.to_string(),
             ),
         ] {
-            client.set_setting_value(key, value).unwrap();
+            client.set_setting_value(key, &value).unwrap();
         }
+        let crypto = persist_local_crypto_context(
+            client.db_path(),
+            &DB_KEY,
+            identity,
+            &[0x36; KEY_LEN],
+            LocalSyncKeys {
+                tenant_id: identity.tenant_id,
+                tenant_root_dek: Some(Zeroizing::new([0x37; KEY_LEN])),
+                tenant_generation: 1,
+                historical_tenant_root_deks: Vec::new(),
+            },
+            1,
+        )
+        .unwrap();
+        let runtime = SqliteProfileCoordinationRepository::new(
+            open_encrypted(client.db_path(), &DB_KEY).unwrap(),
+        )
+        .load_runtime()
+        .unwrap();
+        client
+            .runtime_epoch
+            .store(runtime.runtime_epoch, std::sync::atomic::Ordering::Release);
+        client.account_state().unwrap().crypto = CryptoRuntimeState::Ready(Box::new(crypto));
         let token_set = |access_token: &str| StoredSessionTokens {
             version: SESSION_TOKEN_SET_VERSION,
             credential_generation: Some(Uuid::now_v7().to_string()),
@@ -2274,8 +2442,296 @@ mod tests {
         );
 
         delete_account_secret(temp.path(), AccountSecretKind::SessionTokens).unwrap();
-        assert!(!client.account_session_state().unwrap().logged_in);
+        assert!(matches!(
+            client.account_session_state(),
+            Err(ClientError::CredentialUnavailable)
+        ));
         assert!(client.current_access_token().unwrap().is_none());
+    }
+
+    #[test]
+    fn account_readiness_state_matrix_is_explicit_and_fail_closed() {
+        let identity = LocalCryptoIdentity {
+            tenant_id: Uuid::now_v7(),
+            user_id: Uuid::now_v7(),
+            device_id: Uuid::now_v7(),
+        };
+        for (credential, crypto, validated, expected) in [
+            (
+                CredentialKind::Absent,
+                CryptoReadiness::Anonymous,
+                false,
+                AccountReadiness::LoggedOut,
+            ),
+            (
+                CredentialKind::Absent,
+                CryptoReadiness::Ready(identity),
+                false,
+                AccountReadiness::CredentialUnavailable,
+            ),
+            (
+                CredentialKind::Absent,
+                CryptoReadiness::Unavailable,
+                false,
+                AccountReadiness::AccountBoundUnavailable,
+            ),
+            (
+                CredentialKind::Pending,
+                CryptoReadiness::Anonymous,
+                false,
+                AccountReadiness::CredentialUnavailable,
+            ),
+            (
+                CredentialKind::Pending,
+                CryptoReadiness::Ready(identity),
+                false,
+                AccountReadiness::CredentialUnavailable,
+            ),
+            (
+                CredentialKind::Pending,
+                CryptoReadiness::Unavailable,
+                false,
+                AccountReadiness::AccountBoundUnavailable,
+            ),
+            (
+                CredentialKind::Active,
+                CryptoReadiness::Anonymous,
+                false,
+                AccountReadiness::AccountBoundUnavailable,
+            ),
+            (
+                CredentialKind::Active,
+                CryptoReadiness::Ready(identity),
+                false,
+                AccountReadiness::AccountBoundUnavailable,
+            ),
+            (
+                CredentialKind::Active,
+                CryptoReadiness::Unavailable,
+                false,
+                AccountReadiness::AccountBoundUnavailable,
+            ),
+            (
+                CredentialKind::Active,
+                CryptoReadiness::Ready(identity),
+                true,
+                AccountReadiness::Ready,
+            ),
+        ] {
+            assert_eq!(
+                classify_account_readiness(credential, crypto, validated),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn corrupt_session_credential_is_not_reported_as_logged_out() {
+        let temp = TempDir::new().expect("temp profile");
+        let client = open_test_client(temp.path(), [0x38; 32]);
+        store_account_secret(temp.path(), AccountSecretKind::SessionTokens, b"not-json").unwrap();
+
+        let sync_status = client.sync_status();
+        assert!(
+            matches!(sync_status, Err(ClientError::IncompleteAccountState)),
+            "unexpected sync readiness result: {sync_status:?}"
+        );
+        let account = client.account_state().unwrap();
+        assert!(!account.session_restored);
+        assert!(account.loaded_credential_generation.is_none());
+        assert!(account.session.is_none());
+    }
+
+    #[test]
+    fn corrupt_remote_credential_does_not_block_account_bound_local_mutation() {
+        const DB_KEY: [u8; 32] = [0x41; 32];
+        let temp = TempDir::new().expect("temp profile");
+        let client = open_test_client(temp.path(), DB_KEY);
+        let list = new_list("Inbox".into(), "a0".into(), 100).unwrap();
+        SqliteListRepository::new(open_encrypted(client.db_path(), &DB_KEY).unwrap())
+            .insert(list.clone())
+            .unwrap();
+        let identity = LocalCryptoIdentity {
+            tenant_id: Uuid::now_v7(),
+            user_id: Uuid::now_v7(),
+            device_id: Uuid::now_v7(),
+        };
+        let crypto = persist_local_crypto_context(
+            client.db_path(),
+            &DB_KEY,
+            identity,
+            &[0x42; KEY_LEN],
+            LocalSyncKeys {
+                tenant_id: identity.tenant_id,
+                tenant_root_dek: Some(Zeroizing::new([0x43; KEY_LEN])),
+                tenant_generation: 1,
+                historical_tenant_root_deks: Vec::new(),
+            },
+            101,
+        )
+        .unwrap();
+        let runtime = SqliteProfileCoordinationRepository::new(
+            open_encrypted(client.db_path(), &DB_KEY).unwrap(),
+        )
+        .load_runtime()
+        .unwrap();
+        client
+            .runtime_epoch
+            .store(runtime.runtime_epoch, std::sync::atomic::Ordering::Release);
+        client.account_state().unwrap().crypto = CryptoRuntimeState::Ready(Box::new(crypto));
+        store_account_secret(temp.path(), AccountSecretKind::SessionTokens, b"not-json").unwrap();
+
+        let sync_status = client.sync_status();
+        assert!(
+            matches!(sync_status, Err(ClientError::IncompleteAccountState)),
+            "unexpected sync readiness result: {sync_status:?}"
+        );
+        let task = client
+            .create_task(super::super::CreateTaskCommand {
+                list_id: list.id,
+                title: "offline edit survives remote credential corruption".into(),
+                parent_task_id: None,
+                due: None,
+                note: None,
+                priority: 0,
+                scheduled_at: None,
+                estimated_minutes: None,
+            })
+            .unwrap();
+        assert_eq!(
+            task.content.title,
+            "offline edit survives remote credential corruption"
+        );
+        assert_eq!(
+            SqliteSyncStore::new(client.db_path().to_path_buf(), DB_KEY)
+                .list_outbox_heads(10)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn active_credential_with_missing_identity_is_not_reported_as_logged_out() {
+        let temp = TempDir::new().expect("temp profile");
+        let client = open_test_client(temp.path(), [0x40; 32]);
+        store_session_tokens(
+            temp.path(),
+            &StoredSessionTokens {
+                version: SESSION_TOKEN_SET_VERSION,
+                credential_generation: Some(Uuid::now_v7().to_string()),
+                issuer: "https://sync.example.com".to_string(),
+                access_token: "access-secret".to_string(),
+                access_expires_at_ms: 1_900_000_000_000,
+                refresh_token: "refresh-secret".to_string(),
+                refresh_expires_at_ms: 1_901_000_000_000,
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            client.sync_status(),
+            Err(ClientError::IncompleteAccountState)
+        ));
+        let account = client.account_state().unwrap();
+        assert!(!account.session_restored);
+        assert!(account.loaded_credential_generation.is_none());
+        assert!(account.session.is_none());
+    }
+
+    #[test]
+    fn mismatched_session_and_crypto_identity_is_rejected_without_partial_publish() {
+        const DB_KEY: [u8; 32] = [0x39; 32];
+        let temp = TempDir::new().expect("temp profile");
+        let client = open_test_client(temp.path(), DB_KEY);
+        let identity = LocalCryptoIdentity {
+            tenant_id: Uuid::now_v7(),
+            user_id: Uuid::now_v7(),
+            device_id: Uuid::now_v7(),
+        };
+        let crypto = persist_local_crypto_context(
+            client.db_path(),
+            &DB_KEY,
+            identity,
+            &[0x3a; KEY_LEN],
+            LocalSyncKeys {
+                tenant_id: identity.tenant_id,
+                tenant_root_dek: Some(Zeroizing::new([0x3b; KEY_LEN])),
+                tenant_generation: 1,
+                historical_tenant_root_deks: Vec::new(),
+            },
+            1,
+        )
+        .unwrap();
+        client.account_state().unwrap().crypto = CryptoRuntimeState::Ready(Box::new(crypto));
+        for (key, value) in [
+            (
+                ACCOUNT_EMAIL_SETTING_KEY,
+                "mismatch@example.com".to_string(),
+            ),
+            (ACCOUNT_USER_ID_SETTING_KEY, identity.user_id.to_string()),
+            (
+                ACCOUNT_TENANT_ID_SETTING_KEY,
+                identity.tenant_id.to_string(),
+            ),
+            (ACCOUNT_DEVICE_ID_SETTING_KEY, Uuid::now_v7().to_string()),
+        ] {
+            client.set_setting_value(key, &value).unwrap();
+        }
+        store_session_tokens(
+            temp.path(),
+            &StoredSessionTokens {
+                version: SESSION_TOKEN_SET_VERSION,
+                credential_generation: Some(Uuid::now_v7().to_string()),
+                issuer: "https://sync.example.com".to_string(),
+                access_token: "access-secret".to_string(),
+                access_expires_at_ms: 1_900_000_000_000,
+                refresh_token: "refresh-secret".to_string(),
+                refresh_expires_at_ms: 1_901_000_000_000,
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            client.resolve_account_readiness(),
+            Err(ClientError::ProfileIdentityMismatch)
+        ));
+        let account = client.account_state().unwrap();
+        assert!(!account.session_restored);
+        assert!(account.loaded_credential_generation.is_none());
+        assert!(account.session.is_none());
+    }
+
+    #[test]
+    fn stale_runtime_epoch_is_rejected_before_sync_readiness_uses_cached_session() {
+        const DB_KEY: [u8; 32] = [0x3c; 32];
+        let temp = TempDir::new().expect("temp profile");
+        let client = open_test_client(temp.path(), DB_KEY);
+        {
+            let mut account = client.account_state().unwrap();
+            account.session = Some(account_session_state(
+                "stale@example.com".to_string(),
+                Uuid::now_v7().to_string(),
+                Uuid::now_v7().to_string(),
+                Uuid::now_v7().to_string(),
+            ));
+            account.session_restored = true;
+            account.loaded_credential_generation = Some("stale".to_string());
+        }
+        SqliteProfileCoordinationRepository::new(
+            open_encrypted(client.db_path(), &DB_KEY).unwrap(),
+        )
+        .bump_runtime_epoch(1)
+        .unwrap();
+
+        assert!(matches!(
+            client.sync_status(),
+            Err(ClientError::LocalKeyState)
+        ));
+        let account = client.account_state().unwrap();
+        assert!(account.session.is_none());
+        assert!(!account.session_restored);
+        assert!(account.loaded_credential_generation.is_none());
     }
 
     #[test]
@@ -2356,11 +2812,54 @@ mod tests {
 
     #[tokio::test]
     async fn sync_token_refresh_checks_lease_immediately_before_http() {
+        const DB_KEY: [u8; 32] = [0x3a; 32];
         let listener = TcpListener::bind("127.0.0.1:0").expect("reserve issuer address");
         let issuer = format!("http://{}", listener.local_addr().unwrap());
         drop(listener);
         let temp = TempDir::new().expect("temp profile");
-        let client = open_test_client(temp.path(), [0x3a; 32]);
+        let client = open_test_client(temp.path(), DB_KEY);
+        let identity = LocalCryptoIdentity {
+            tenant_id: Uuid::now_v7(),
+            user_id: Uuid::now_v7(),
+            device_id: Uuid::now_v7(),
+        };
+        for (key, value) in [
+            (ACCOUNT_EMAIL_SETTING_KEY, "lease@example.com".to_string()),
+            (ACCOUNT_USER_ID_SETTING_KEY, identity.user_id.to_string()),
+            (
+                ACCOUNT_TENANT_ID_SETTING_KEY,
+                identity.tenant_id.to_string(),
+            ),
+            (
+                ACCOUNT_DEVICE_ID_SETTING_KEY,
+                identity.device_id.to_string(),
+            ),
+        ] {
+            client.set_setting_value(key, &value).unwrap();
+        }
+        let crypto = persist_local_crypto_context(
+            client.db_path(),
+            &DB_KEY,
+            identity,
+            &[0x3b; KEY_LEN],
+            LocalSyncKeys {
+                tenant_id: identity.tenant_id,
+                tenant_root_dek: Some(Zeroizing::new([0x3c; KEY_LEN])),
+                tenant_generation: 1,
+                historical_tenant_root_deks: Vec::new(),
+            },
+            1,
+        )
+        .unwrap();
+        client.account_state().unwrap().crypto = CryptoRuntimeState::Ready(Box::new(crypto));
+        let runtime = SqliteProfileCoordinationRepository::new(
+            open_encrypted(client.db_path(), &DB_KEY).unwrap(),
+        )
+        .load_runtime()
+        .unwrap();
+        client
+            .runtime_epoch
+            .store(runtime.runtime_epoch, std::sync::atomic::Ordering::Release);
         store_session_tokens(
             temp.path(),
             &StoredSessionTokens {
@@ -2375,7 +2874,7 @@ mod tests {
         )
         .unwrap();
         let mut gate = SqliteSyncStore::new_secret(client.db_path().to_path_buf(), client.db_key());
-        gate.acquire_sync_lease("sync-token-refresh", 1, 60_000)
+        gate.acquire_sync_lease("sync-token-refresh", client.loaded_runtime_epoch(), 60_000)
             .unwrap();
         open_encrypted(client.db_path(), &client.db_key())
             .unwrap()
@@ -2390,6 +2889,79 @@ mod tests {
             Err(ClientError::LeaseLost)
         ));
         delete_account_secret(temp.path(), AccountSecretKind::SessionTokens).unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_grant_deletes_the_credential_and_requires_reauthentication() {
+        const DB_KEY: [u8; 32] = [0x3d; 32];
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind refresh server");
+        let issuer = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept refresh request");
+            let mut request = [0u8; 2048];
+            let _ = stream.read(&mut request).expect("read refresh request");
+            write!(
+                stream,
+                "HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{{}}"
+            )
+            .expect("write invalid-grant response");
+        });
+        let temp = TempDir::new().expect("temp profile");
+        let client = open_test_client(temp.path(), DB_KEY);
+        let identity = LocalCryptoIdentity {
+            tenant_id: Uuid::now_v7(),
+            user_id: Uuid::now_v7(),
+            device_id: Uuid::now_v7(),
+        };
+        for (key, value) in [
+            (ACCOUNT_EMAIL_SETTING_KEY, "reauth@example.com".to_string()),
+            (ACCOUNT_USER_ID_SETTING_KEY, identity.user_id.to_string()),
+            (
+                ACCOUNT_TENANT_ID_SETTING_KEY,
+                identity.tenant_id.to_string(),
+            ),
+            (
+                ACCOUNT_DEVICE_ID_SETTING_KEY,
+                identity.device_id.to_string(),
+            ),
+        ] {
+            client.set_setting_value(key, &value).unwrap();
+        }
+        let crypto = persist_local_crypto_context(
+            client.db_path(),
+            &DB_KEY,
+            identity,
+            &[0x3e; KEY_LEN],
+            LocalSyncKeys {
+                tenant_id: identity.tenant_id,
+                tenant_root_dek: Some(Zeroizing::new([0x3f; KEY_LEN])),
+                tenant_generation: 1,
+                historical_tenant_root_deks: Vec::new(),
+            },
+            1,
+        )
+        .unwrap();
+        client.account_state().unwrap().crypto = CryptoRuntimeState::Ready(Box::new(crypto));
+        store_session_tokens(
+            temp.path(),
+            &StoredSessionTokens {
+                version: SESSION_TOKEN_SET_VERSION,
+                credential_generation: Some(Uuid::now_v7().to_string()),
+                issuer,
+                access_token: "expired-access".to_string(),
+                access_expires_at_ms: 1,
+                refresh_token: "invalid-refresh".to_string(),
+                refresh_expires_at_ms: i64::MAX,
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            client.access_token(true).await,
+            Err(ClientError::CredentialUnavailable)
+        ));
+        assert!(load_session_credential(temp.path()).unwrap().is_none());
+        server.join().expect("refresh server");
     }
 
     #[test]

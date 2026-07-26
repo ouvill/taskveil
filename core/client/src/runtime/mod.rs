@@ -100,6 +100,14 @@ pub(super) enum CryptoRuntimeState {
     Unavailable(LocalCryptoUnavailable),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AccountReadiness {
+    LoggedOut,
+    Ready,
+    CredentialUnavailable,
+    AccountBoundUnavailable,
+}
+
 #[derive(Default)]
 pub(super) struct SyncRuntimeState {
     pub(super) running: bool,
@@ -200,7 +208,7 @@ impl TaskveilClient {
 
     #[allow(dead_code)] // Consumed by the CRUD migration phase of task-92.
     pub(crate) fn local_mutation_state(&self) -> Result<LocalMutationState, ClientError> {
-        self.ensure_account_runtime_restored()?;
+        self.ensure_local_crypto_runtime_restored()?;
         let account = self.account_state()?;
         match &account.crypto {
             CryptoRuntimeState::Ready(crypto) => {
@@ -308,7 +316,7 @@ impl TaskveilClient {
             account.crypto = CryptoRuntimeState::Unloaded;
         }
         self.publish_runtime_generation(runtime.runtime_epoch, capsule.generation());
-        self.ensure_account_runtime_restored()
+        self.ensure_local_crypto_runtime_restored()
     }
 
     fn begin_operation_with_profile(
@@ -368,7 +376,7 @@ impl TaskveilClient {
                 .store(runtime.runtime_epoch, Ordering::Release);
             self.capsule_generation
                 .store(capsule.generation(), Ordering::Release);
-            self.ensure_account_runtime_restored()?;
+            self.ensure_local_crypto_runtime_restored()?;
         } else if self.capsule_generation.load(Ordering::Acquire) != capsule.generation() {
             self.capsule_generation
                 .store(capsule.generation(), Ordering::Release);
