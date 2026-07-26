@@ -263,3 +263,39 @@ FRB 2.12.0が提供するtyped `Result<T, E>`を使用し、新規error transpor
     10k performanceはHome median 242 ms、Calendar median 137 msでpass。
   - Account/email typed error対象Flutter 33、boundary正例 / 4負例、
     hardcoded strings、`git diff --check`: pass。
+
+### 最終独立レビューP1修正とDB時刻精度修正の統合
+
+- Draft head `edef9380af55ea30aeef8812c255a1a6d2617a41`に対する最終独立レビューで
+  P1 2件を検出した。
+  - `FrbBridgeService`の登録取消とRecovery Key確認がnative Futureを
+    return / awaitせず、`BridgeErrorDto`をUIへ伝播しない。
+  - sync開始前にthrowされたtyped readiness errorを`SyncStatusNotifier`が破棄し、
+    status recoveryも失敗すると古いsnapshotまたは`lastError == null`だけが残る。
+- 対応:
+  - 2つのregistration adapterはFRB Futureを直接返す。実release bridgeを使い、
+    pending registrationなしの`busy`とcredentialなしの
+    `credentialUnavailable`が`FrbBridgeService`を通過する回帰testを追加した。
+  - sync失敗時のstatus recoveryをbest-effortに限定し、その成否にかかわらず
+    元のexceptionとstack traceを`AsyncError`へ保持する。直前または回復した
+    `SyncStatusDto`は`running: false`のprevious valueとして残し、自動syncの
+    Futureへは再throwしない。`credentialUnavailable` + recovery成功と
+    `accountBoundUnavailable` + recovery失敗の両経路をprovider testで固定した。
+- Issue #81のemail verification timestamp precision failureを修正したPR #82の
+  merge後、public `main`
+  `62e3ada5cb56aed6c1d3fc48bf0c7797afc05679`へ7 commitを競合なくrebaseした。
+- rebase後検証:
+  - canonical FRB codegen: pass、生成差分なし。
+  - `cargo fmt --all -- --check`、
+    `cargo clippy --workspace --all-targets -- -D warnings`: pass。
+  - `cargo test --workspace`: client 140、crypto 54 + real Keychain 2 ignored、
+    domain 62、server unit 53 / auth 17 / billing 9 / migrations 3 / realtime 2 /
+    RLS 1 / sync-v2 27、storage 96 + manual perf 1 ignored、sync 101、bridge 4、
+    client doc test 4を含む全機能 / Docker統合testがpass。SQLCipher 10k性能testも
+    同じfull run内でpass。
+  - bridge release build、`flutter analyze`: pass。
+  - `flutter test`: 336 pass、visual QA harness 1 intentional skip。実SQLCipher
+    10k performanceはHome median 258 ms、Calendar median 131 msでpass。
+  - real FRB adapter 3、sync provider 6、hardcoded strings、boundary正例 / 4負例、
+    `git diff --check`: pass。
+- Draftを維持し、修正後headの独立再レビューとGitHub CI成功をmerge条件とする。
