@@ -444,17 +444,19 @@ mod tests {
 
     #[test]
     fn recovery_key_rejects_wrong_checksum_and_word_count() {
-        let recovery_key = generate_recovery_key();
-        let mut words = recovery_key.split_whitespace().collect::<Vec<_>>();
-        words[23] = if words[23] == "abandon" {
-            "ability"
-        } else {
-            "abandon"
-        };
+        // For a 24-word BIP-39 mnemonic, replacing the last word of a random
+        // mnemonic still has a 1/256 chance of producing a valid checksum.
+        // Twenty-four zero-index words encode an all-zero checksum, while the
+        // checksum for 256 bits of zero entropy is non-zero, so this vector is
+        // deterministically invalid.
+        let wrong_checksum = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon";
         assert_eq!(
-            derive_recovery_wrap_key(&words.join(" ")),
+            derive_recovery_wrap_key(wrong_checksum),
             Err(KeyHierarchyError::InvalidRecoveryKey)
         );
+
+        let recovery_key = generate_recovery_key();
+        let words = recovery_key.split_whitespace().collect::<Vec<_>>();
         assert_eq!(
             derive_recovery_wrap_key(&words[..12].join(" ")),
             Err(KeyHierarchyError::InvalidRecoveryKey)
