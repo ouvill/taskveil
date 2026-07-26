@@ -3,7 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'package:taskveil/src/core/bridge_service.dart';
+import 'package:taskveil/src/core/bridge_ports.dart';
 import 'package:taskveil/src/rust/api.dart';
 import 'package:timezone/data/latest_all.dart' as tz_data;
 import 'package:timezone/timezone.dart' as tz;
@@ -301,7 +301,7 @@ class FlutterLocalReminderNotificationGateway
 
 class ReminderNotificationService {
   ReminderNotificationService({
-    required this.bridge,
+    required this.reminderBridge,
     required this.gateway,
     List<Duration> retryDelays = _defaultRetryDelays,
     this.retryTimerFactory = _systemRetryTimerFactory,
@@ -311,7 +311,7 @@ class ReminderNotificationService {
              retryDelays.every((delay) => delay > Duration.zero),
        );
 
-  final BridgeService bridge;
+  final ReminderBridgePort reminderBridge;
   final ReminderNotificationGateway gateway;
   final ReminderRetryTimerFactory retryTimerFactory;
   final List<Duration> _retryDelays;
@@ -479,8 +479,10 @@ class ReminderNotificationService {
     }
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     final initialCommands = rebuild
-        ? await bridge.prepareReminderNotificationReconciliation(nowMs: nowMs)
-        : await bridge.listReminderNotificationCommands(
+        ? await reminderBridge.prepareReminderNotificationReconciliation(
+            nowMs: nowMs,
+          )
+        : await reminderBridge.listReminderNotificationCommands(
             nowMs: nowMs,
             limit: _commandBatchSize,
           );
@@ -500,10 +502,11 @@ class ReminderNotificationService {
         }
         try {
           await _applyCommand(command, content);
-          final acknowledged = await bridge.ackReminderNotificationCommand(
-            reminderId: command.reminderId,
-            revision: command.revision,
-          );
+          final acknowledged = await reminderBridge
+              .ackReminderNotificationCommand(
+                reminderId: command.reminderId,
+                revision: command.revision,
+              );
           staleAckObserved = staleAckObserved || !acknowledged;
         } catch (_) {
           failedCount += 1;
@@ -522,7 +525,7 @@ class ReminderNotificationService {
             ? const _ReconciliationOutcome.complete()
             : const _ReconciliationOutcome.retry(requiresRebuild: true);
       }
-      commands = await bridge.listReminderNotificationCommands(
+      commands = await reminderBridge.listReminderNotificationCommands(
         nowMs: DateTime.now().millisecondsSinceEpoch,
         limit: _commandBatchSize,
       );
@@ -626,7 +629,7 @@ class ReminderNotificationService {
         .add(reminderSnoozeDuration)
         .millisecondsSinceEpoch;
     try {
-      await bridge.snoozeReminder(
+      await reminderBridge.snoozeReminder(
         reminderId: payload.reminderId,
         snoozedUntil: snoozedUntil,
       );

@@ -44,7 +44,7 @@ Future<void> main() async {
     );
     final localNotificationsPlugin = FlutterLocalNotificationsPlugin();
     final notificationService = ReminderNotificationService(
-      bridge: const FrbBridgeService(),
+      reminderBridge: const FrbBridgeService(),
       gateway: FlutterLocalReminderNotificationGateway(
         plugin: localNotificationsPlugin,
       ),

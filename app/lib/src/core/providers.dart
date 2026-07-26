@@ -750,7 +750,7 @@ final reminderNotificationGatewayProvider =
 final reminderNotificationServiceProvider =
     Provider<ReminderNotificationService>((ref) {
       final service = ReminderNotificationService(
-        bridge: ref.watch(bridgeServiceProvider),
+        reminderBridge: ref.watch(reminderBridgeProvider),
         gateway: ref.watch(reminderNotificationGatewayProvider),
       );
       ref.onDispose(service.dispose);

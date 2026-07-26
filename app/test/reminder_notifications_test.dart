@@ -99,7 +99,7 @@ void main() {
       remindAt: _futureMs(hours: 1),
     );
     final first = ReminderNotificationService(
-      bridge: fakeBridge,
+      reminderBridge: fakeBridge,
       gateway: gateway,
       retryDelays: const [Duration(seconds: 1)],
       retryTimerFactory: timers.create,
@@ -117,7 +117,7 @@ void main() {
     );
 
     final restarted = ReminderNotificationService(
-      bridge: fakeBridge,
+      reminderBridge: fakeBridge,
       gateway: gateway,
     );
     first.dispose();
@@ -142,7 +142,7 @@ void main() {
       final (_, task) = await _createListAndTask(fakeBridge);
       final timers = _ManualRetryTimers();
       final service = ReminderNotificationService(
-        bridge: fakeBridge,
+        reminderBridge: fakeBridge,
         gateway: gateway,
         retryDelays: const [Duration(seconds: 1)],
         retryTimerFactory: timers.create,
@@ -165,7 +165,7 @@ void main() {
       expect(gateway.scheduled.single.notificationId, platformId);
 
       final restarted = ReminderNotificationService(
-        bridge: fakeBridge,
+        reminderBridge: fakeBridge,
         gateway: gateway,
       );
       service.dispose();
@@ -237,7 +237,7 @@ void main() {
         remindAt: _futureMs(hours: 2),
       );
       final first = ReminderNotificationService(
-        bridge: fakeBridge,
+        reminderBridge: fakeBridge,
         gateway: gateway,
       );
       await first.initialize(_content);
@@ -259,7 +259,7 @@ void main() {
       );
 
       final restarted = ReminderNotificationService(
-        bridge: fakeBridge,
+        reminderBridge: fakeBridge,
         gateway: gateway,
       );
       await restarted.initialize(_content);
@@ -281,7 +281,7 @@ void main() {
         remindAt: _futureMs(hours: 1),
       );
       final service = ReminderNotificationService(
-        bridge: fakeBridge,
+        reminderBridge: fakeBridge,
         gateway: gateway,
       );
       await service.initialize(_content);
@@ -323,7 +323,7 @@ void main() {
         remindAt: _futureMs(hours: 1),
       );
       final service = ReminderNotificationService(
-        bridge: fakeBridge,
+        reminderBridge: fakeBridge,
         gateway: gateway,
       );
       await service.initialize(_content);
@@ -362,7 +362,7 @@ void main() {
         remindAt: _futureMs(hours: 1),
       );
       final service = ReminderNotificationService(
-        bridge: fakeBridge,
+        reminderBridge: fakeBridge,
         gateway: gateway,
         retryDelays: const [Duration(seconds: 1), Duration(seconds: 2)],
         retryTimerFactory: timers.create,
@@ -395,7 +395,7 @@ void main() {
         remindAt: _futureMs(hours: 1),
       );
       final service = ReminderNotificationService(
-        bridge: fakeBridge,
+        reminderBridge: fakeBridge,
         gateway: gateway,
         retryDelays: const [Duration(seconds: 1)],
         retryTimerFactory: timers.create,
@@ -431,7 +431,7 @@ void main() {
         remindAt: _futureMs(hours: 2),
       );
       final service = ReminderNotificationService(
-        bridge: fakeBridge,
+        reminderBridge: fakeBridge,
         gateway: gateway,
         retryDelays: const [Duration(seconds: 1)],
         retryTimerFactory: timers.create,
@@ -484,7 +484,7 @@ void main() {
         remindAt: _futureMs(hours: 1),
       );
       final service = ReminderNotificationService(
-        bridge: fakeBridge,
+        reminderBridge: fakeBridge,
         gateway: gateway,
         retryDelays: const [Duration(seconds: 1), Duration(seconds: 2)],
         retryTimerFactory: timers.create,
@@ -540,7 +540,7 @@ void main() {
       remindAt: _futureMs(hours: 1),
     );
     final service = ReminderNotificationService(
-      bridge: fakeBridge,
+      reminderBridge: fakeBridge,
       gateway: gateway,
       retryDelays: const [Duration(seconds: 1)],
       retryTimerFactory: timers.create,
