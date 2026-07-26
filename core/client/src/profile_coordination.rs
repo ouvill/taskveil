@@ -677,7 +677,7 @@ fn validate_windows_object_security(
     if status != ERROR_SUCCESS || (entry_count != 0 && entries.is_null()) {
         return Err(windows_security_failure("acl_entries"));
     }
-    let _entries = LocalAllocation(entries.cast());
+    let _entries_allocation = LocalAllocation(entries.cast());
     let dangerous = FILE_WRITE_DATA
         | FILE_APPEND_DATA
         | FILE_WRITE_EA
@@ -697,7 +697,13 @@ fn validate_windows_object_security(
         dangerous,
         inspect_child_inheritance,
     )?;
-    for entry in unsafe { std::slice::from_raw_parts(entries, entry_count as usize) } {
+    let entries = if entry_count == 0 {
+        &[]
+    } else {
+        // GetExplicitEntriesFromAclW returned a non-null LocalAlloc buffer above.
+        unsafe { std::slice::from_raw_parts(entries, entry_count as usize) }
+    };
+    for entry in entries {
         if !entry.Trustee.pMultipleTrustee.is_null() {
             return Err(windows_security_failure("multiple_trustee"));
         }
