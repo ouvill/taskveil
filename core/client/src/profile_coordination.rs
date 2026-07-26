@@ -492,7 +492,7 @@ fn open_windows_lock_file(path: &Path) -> Result<File, ClientError> {
                 let opened = windows_handle_info(&file)?;
                 validate_windows_lock_info(opened)?;
                 if inspected.identity != opened.identity {
-                    return Err(ClientError::ProfileLockUnsupported);
+                    return Err(profile_coordination_failure("existing_lock_identity"));
                 }
                 validate_windows_file_security(&file)?;
                 return Ok(file);
@@ -506,7 +506,7 @@ fn open_windows_lock_file(path: &Path) -> Result<File, ClientError> {
                         let verified = windows_handle_info(&verifier)?;
                         validate_windows_lock_info(verified)?;
                         if opened.identity != verified.identity {
-                            return Err(ClientError::ProfileLockUnsupported);
+                            return Err(profile_coordination_failure("created_lock_identity"));
                         }
                         validate_windows_file_security(&file)?;
                         return Ok(file);
@@ -522,7 +522,7 @@ fn open_windows_lock_file(path: &Path) -> Result<File, ClientError> {
             Err(error) => return Err(error),
         }
     }
-    Err(ClientError::ProfileLockUnsupported)
+    Err(profile_coordination_failure("lock_open_retries"))
 }
 
 #[cfg(windows)]
@@ -846,7 +846,7 @@ fn open_current_process_token() -> Result<OwnedWindowsHandle, ClientError> {
         )
     } == 0
     {
-        return Err(ClientError::ProfileLockUnsupported);
+        return Err(profile_coordination_failure("open_process_token"));
     }
     Ok(OwnedWindowsHandle(token))
 }
@@ -860,7 +860,7 @@ fn token_user_buffer(token: HANDLE) -> Result<Vec<usize>, ClientError> {
     if needed == 0
         || std::io::Error::last_os_error().raw_os_error() != Some(ERROR_INSUFFICIENT_BUFFER as i32)
     {
-        return Err(ClientError::ProfileLockUnsupported);
+        return Err(profile_coordination_failure("token_user_size"));
     }
     let words = (needed as usize).div_ceil(std::mem::size_of::<usize>());
     let mut buffer = vec![0usize; words];
@@ -874,15 +874,15 @@ fn token_user_buffer(token: HANDLE) -> Result<Vec<usize>, ClientError> {
         )
     } == 0
     {
-        return Err(ClientError::ProfileLockUnsupported);
+        return Err(profile_coordination_failure("token_user_read"));
     }
     let sid = unsafe { (*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid };
     if sid.is_null() {
-        return Err(ClientError::ProfileLockUnsupported);
+        return Err(profile_coordination_failure("token_user_sid"));
     }
     let sid_length = unsafe { windows_sys::Win32::Security::GetLengthSid(sid) };
     if sid_length == 0 || sid_length > SECURITY_MAX_SID_SIZE {
-        return Err(ClientError::ProfileLockUnsupported);
+        return Err(profile_coordination_failure("token_user_sid_size"));
     }
     Ok(buffer)
 }
@@ -900,7 +900,7 @@ fn well_known_sid(kind: i32) -> Result<Vec<u8>, ClientError> {
         )
     } == 0
     {
-        return Err(ClientError::ProfileLockUnsupported);
+        return Err(profile_coordination_failure("well_known_sid"));
     }
     sid.truncate(size as usize);
     Ok(sid)
@@ -921,7 +921,7 @@ fn verify_current_token_access(
         )
     } == 0
     {
-        return Err(ClientError::ProfileLockUnsupported);
+        return Err(profile_coordination_failure("duplicate_token"));
     }
     let impersonation_token = OwnedWindowsHandle(impersonation_token);
     let mapping = GENERIC_MAPPING {
@@ -949,7 +949,7 @@ fn verify_current_token_access(
         || allowed == 0
         || granted & desired != desired
     {
-        return Err(ClientError::ProfileLockUnsupported);
+        return Err(profile_coordination_failure("access_check"));
     }
     Ok(())
 }
@@ -997,7 +997,7 @@ fn validate_windows_lock_info(info: WindowsHandleInfo) -> Result<(), ClientError
 #[cfg(windows)]
 fn map_windows_open_error(error: std::io::Error) -> ClientError {
     if is_unsupported_lock_error(&error) {
-        ClientError::ProfileLockUnsupported
+        profile_coordination_failure("open_unsupported")
     } else {
         ClientError::Io(error)
     }
