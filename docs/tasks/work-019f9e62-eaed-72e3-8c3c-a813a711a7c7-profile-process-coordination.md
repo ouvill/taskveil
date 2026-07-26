@@ -1,7 +1,7 @@
 ---
 id: 019f9e62-eaed-72e3-8c3c-a813a711a7c7
 title: Shared profile process coordination
-status: active
+status: done
 lane: critical
 milestone: maintenance
 ---
@@ -244,9 +244,14 @@ OS別fail-closed契約は未確定である。本work itemはこれらを
 
 ### 独立検証
 
-- 判定: P2指摘修正済み、focused再reviewとplatform matrix待ち
+- 判定: APPROVE（P0-P3指摘なし）
 - 根拠: 独立レビューのP0 / P1指摘はなく、残ったP2 2件へ実process testと
-  request body limitを追加した。修正後のfocused再reviewは統合担当が実施する。
-  統合HEADのworkspace品質ゲートは通過済みで、Linux / macOS / Windows platform
-  matrixは公開可能な統合branchのCIで最終確認する。
-- 検証者: 独立review agent
+  request body limitを追加した。統合担当が`origin/main...2d8e257`の差分と
+  security ancestryを再確認し、login privacy commitを含まないcurrent main直上の
+  履歴であることを確認した。追加された実2-process testを独立再実行し、
+  stale clientがcapsule rotation / SQLCipher rekey後に新keyを再読込してmutation
+  できること、旧DB keyが拒否されることを確認した。Docker / PostgreSQLを使う
+  resync統合testも独立再実行し、base / completionの双方が9 KiB bodyを413で
+  拒否することを確認した。`git diff --check`にも合格した。Linux / macOS /
+  Windows platform matrixは公開PRのCIで最終確認し、失敗時は本判定を取り消す。
+- 検証者: 独立review agent、Codex root orchestrator
