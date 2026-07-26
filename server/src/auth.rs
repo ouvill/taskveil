@@ -7,6 +7,7 @@ use opaque_ke::{
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use sqlx::Row;
 use sqlx_postgres::{PgPool, PgTransaction};
 use taskveil_crypto::{
     key_hierarchy::INITIAL_KEY_GENERATION,
@@ -48,13 +49,21 @@ pub struct OpaqueStartRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct OpaqueStartResponse {
+pub struct RegistrationStartResponse {
     pub state_id: Uuid,
     pub opaque_suite_id: u16,
     pub user_id: Uuid,
     pub tenant_id: Uuid,
     pub device_id: Uuid,
     pub device_challenge: String,
+    pub message: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LoginStartResponse {
+    pub state_id: Uuid,
+    pub opaque_suite_id: u16,
     pub message: String,
     pub expires_at: DateTime<Utc>,
 }
@@ -144,7 +153,7 @@ pub struct AuthContext {
 pub async fn register_start(
     pool: &PgPool,
     request: OpaqueStartRequest,
-) -> Result<OpaqueStartResponse, AppError> {
+) -> Result<RegistrationStartResponse, AppError> {
     validate_opaque_suite(request.opaque_suite_id)?;
     let email = normalize_email(&request.email)?;
     let device_name = normalize_device_name(request.device_name);
@@ -182,7 +191,7 @@ pub async fn register_start(
     .execute(pool)
     .await?;
 
-    Ok(OpaqueStartResponse {
+    Ok(RegistrationStartResponse {
         state_id,
         opaque_suite_id: CRYPTO_SUITE_ID,
         user_id,
@@ -283,7 +292,7 @@ pub async fn register_finish(
 pub async fn login_start(
     pool: &PgPool,
     request: OpaqueStartRequest,
-) -> Result<OpaqueStartResponse, AppError> {
+) -> Result<LoginStartResponse, AppError> {
     validate_opaque_suite(request.opaque_suite_id)?;
     let email = normalize_email(&request.email)?;
     let device_name = normalize_device_name(request.device_name);
@@ -292,38 +301,48 @@ pub async fn login_start(
         .map_err(|_| AppError::bad_request("invalid opaque message"))?;
     cleanup_expired_auth_state(pool).await?;
 
-    let row = sqlx::query!(
+    let account = sqlx::query!(
         "SELECT u.id, u.opaque_record, u.opaque_suite_id
              FROM users u WHERE lower(u.email) = lower($1)",
         &email,
     )
     .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| AppError::not_found("account not found"))?;
-    let user_id = row.id;
-    let stored_suite = row.opaque_suite_id;
-    if stored_suite != i16::try_from(CRYPTO_SUITE_ID).map_err(|_| AppError::internal())? {
-        return Err(AppError::bad_request("unsupported opaque suite"));
-    }
+    .await?;
+    // Run the same membership lookup for known and unknown accounts. A random
+    // user context gives the RLS-protected query the same database shape
+    // without introducing a persistent decoy identity.
+    let lookup_user_id = account.as_ref().map_or_else(Uuid::now_v7, |row| row.id);
     let mut membership_tx = pool.begin().await?;
-    db::set_user_context(&mut membership_tx, user_id).await?;
+    db::set_user_context(&mut membership_tx, lookup_user_id).await?;
     let tenant_id = sqlx::query_scalar!(
         "SELECT tenant_id FROM tenant_members
          WHERE user_id = $1 ORDER BY joined_at ASC LIMIT 1",
-        user_id,
+        lookup_user_id,
     )
-    .fetch_one(&mut *membership_tx)
+    .fetch_optional(&mut *membership_tx)
     .await?;
     membership_tx.commit().await?;
-    let record_bytes = row.opaque_record;
-    let server_record =
-        TaskveilServerRegistration::deserialize(&record_bytes).map_err(|_| AppError::internal())?;
+
+    let expected_suite = i16::try_from(CRYPTO_SUITE_ID).map_err(|_| AppError::internal())?;
+    let identity = account
+        .and_then(|row| {
+            (row.opaque_suite_id == expected_suite)
+                .then(|| TaskveilServerRegistration::deserialize(&row.opaque_record).ok())
+                .flatten()
+                .map(|record| (row.id, record))
+        })
+        .zip(tenant_id)
+        .map(|((user_id, record), tenant_id)| (user_id, tenant_id, record));
+    let (user_id, tenant_id, server_record) = match identity {
+        Some((user_id, tenant_id, record)) => (Some(user_id), Some(tenant_id), Some(record)),
+        None => (None, None, None),
+    };
     let server_setup = get_or_create_server_setup(pool).await?;
     let mut rng = OsRng;
     let login_start = ServerLogin::start(
         &mut rng,
         &server_setup,
-        Some(server_record),
+        server_record,
         credential_request,
         email.as_bytes(),
         ServerLoginParameters::default(),
@@ -334,31 +353,27 @@ pub async fn login_start(
     let device_id = Uuid::now_v7();
     let device_challenge = random_device_challenge();
     let expires_at = Utc::now() + Duration::minutes(OPAQUE_STATE_TTL_MINUTES);
-    sqlx::query!(
+    sqlx::query(
         "INSERT INTO opaque_login_states
             (id, user_id, tenant_id, device_id, device_challenge, device_name,
              opaque_suite_id, server_login_state, expires_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
-        state_id,
-        user_id,
-        tenant_id,
-        device_id,
-        device_challenge.as_slice(),
-        &device_name,
-        i16::try_from(CRYPTO_SUITE_ID).map_err(|_| AppError::internal())?,
-        login_start.state.serialize().to_vec(),
-        expires_at,
     )
+    .bind(state_id)
+    .bind(user_id)
+    .bind(tenant_id)
+    .bind(device_id)
+    .bind(device_challenge.as_slice())
+    .bind(&device_name)
+    .bind(i16::try_from(CRYPTO_SUITE_ID).map_err(|_| AppError::internal())?)
+    .bind(login_start.state.serialize().to_vec())
+    .bind(expires_at)
     .execute(pool)
     .await?;
 
-    Ok(OpaqueStartResponse {
+    Ok(LoginStartResponse {
         state_id,
         opaque_suite_id: CRYPTO_SUITE_ID,
-        user_id,
-        tenant_id,
-        device_id,
-        device_challenge: STANDARD.encode(device_challenge),
         message: STANDARD.encode(login_start.message.serialize()),
         expires_at,
     })
@@ -368,39 +383,43 @@ pub async fn login_finish(
     pool: &PgPool,
     request: LoginFinishRequest,
 ) -> Result<LoginSessionResponse, AppError> {
+    // DELETE ... RETURNING is committed before parsing or verifying the proof
+    // so every finish attempt consumes its state exactly once.
+    let state = consume_login_state(pool, request.state_id).await?;
     let finalization = decode_opaque_message(&request.message)?;
     let credential_finalization =
         CredentialFinalization::<TaskveilCipherSuite>::deserialize(&finalization)
             .map_err(|_| AppError::bad_request("invalid opaque message"))?;
 
-    let mut tx = pool.begin().await?;
-    let state = consume_login_state(&mut tx, request.state_id).await?;
     let server_login = TaskveilServerLogin::deserialize(&state.server_login_state)
         .map_err(|_| AppError::internal())?;
     server_login
         .finish(credential_finalization, ServerLoginParameters::default())
         .map_err(|_| AppError::unauthorized())?;
 
-    db::set_user_context(&mut tx, state.user_id).await?;
+    let (Some(user_id), Some(tenant_id)) = (state.user_id, state.tenant_id) else {
+        return Err(AppError::unauthorized());
+    };
 
-    let tenant_id = state.tenant_id;
+    let mut tx = pool.begin().await?;
+    db::set_user_context(&mut tx, user_id).await?;
     db::set_tenant_context(&mut tx, tenant_id).await?;
-    let key_bundle = load_account_key_bundle(&mut tx, state.user_id, tenant_id).await?;
+    let key_bundle = load_account_key_bundle(&mut tx, user_id, tenant_id).await?;
     let device_id = state.device_id;
     let device_challenge_expires_at = insert_pending_device(
         &mut tx,
         device_id,
-        state.user_id,
+        user_id,
         &state.device_name,
         &state.device_challenge,
     )
     .await?;
-    let tokens = create_session(&mut tx, state.user_id, device_id).await?;
+    let tokens = create_session(&mut tx, user_id, device_id).await?;
     tx.commit().await?;
 
     Ok(LoginSessionResponse {
         session: SessionResponse {
-            user_id: state.user_id,
+            user_id,
             tenant_id,
             device_id,
             tokens,
@@ -1069,42 +1088,39 @@ async fn consume_registration_state(
 }
 
 struct LoginState {
-    user_id: Uuid,
-    tenant_id: Uuid,
+    user_id: Option<Uuid>,
+    tenant_id: Option<Uuid>,
     device_id: Uuid,
     device_challenge: [u8; DEVICE_CHALLENGE_LEN],
     device_name: String,
     server_login_state: Vec<u8>,
 }
 
-async fn consume_login_state(
-    tx: &mut PgTransaction<'_>,
-    state_id: Uuid,
-) -> Result<LoginState, AppError> {
-    let row = sqlx::query!(
+async fn consume_login_state(pool: &PgPool, state_id: Uuid) -> Result<LoginState, AppError> {
+    let row = sqlx::query(
         "DELETE FROM opaque_login_states
          WHERE id = $1 AND expires_at > now()
          RETURNING user_id, tenant_id, device_id, device_challenge, device_name,
                    opaque_suite_id, server_login_state",
-        state_id,
     )
-    .fetch_optional(&mut **tx)
+    .bind(state_id)
+    .fetch_optional(pool)
     .await?
-    .ok_or_else(|| AppError::bad_request("invalid or expired opaque state"))?;
-    let suite_id = row.opaque_suite_id;
+    .ok_or_else(AppError::unauthorized)?;
+    let suite_id: i16 = row.try_get("opaque_suite_id")?;
     if suite_id != i16::try_from(CRYPTO_SUITE_ID).map_err(|_| AppError::internal())? {
-        return Err(AppError::bad_request("unsupported opaque suite"));
+        return Err(AppError::unauthorized());
     }
     Ok(LoginState {
-        user_id: row.user_id,
-        tenant_id: row.tenant_id,
-        device_id: row.device_id,
+        user_id: row.try_get("user_id")?,
+        tenant_id: row.try_get("tenant_id")?,
+        device_id: row.try_get("device_id")?,
         device_challenge: row
-            .device_challenge
+            .try_get::<Vec<u8>, _>("device_challenge")?
             .try_into()
             .map_err(|_| AppError::internal())?,
-        device_name: row.device_name,
-        server_login_state: row.server_login_state,
+        device_name: row.try_get("device_name")?,
+        server_login_state: row.try_get("server_login_state")?,
     })
 }
 

@@ -5,9 +5,12 @@ use axum::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::Utc;
+use opaque_ke::{ClientLogin, CredentialResponse};
+use rand::rngs::OsRng;
 use serde_json::Value;
 use sqlx_core::{query::query, raw_sql::raw_sql, row::Row};
 use sqlx_postgres::{PgPool, Postgres};
+use taskveil_crypto::{opaque_login_parameters, TaskveilCipherSuite, CRYPTO_SUITE_ID};
 use taskveil_server::{
     auth,
     billing::{BillingEnvironment, BillingService},
@@ -560,6 +563,266 @@ async fn account_register_login_refresh_reuse_and_revocation_are_enforced() {
     .try_get("count")
     .unwrap();
     assert_eq!(obsolete_public_key_columns, 0);
+}
+
+#[tokio::test]
+async fn opaque_login_hides_account_existence_and_consumes_every_state_once() {
+    let test = setup().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server_url = format!("http://{}", listener.local_addr().unwrap());
+    let app = test.app.clone();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = AccountClient::new(&server_url).unwrap();
+    client
+        .register(
+            "privacy@example.com",
+            "correct horse battery staple",
+            Some("registration device"),
+            &[0x61; 32],
+        )
+        .await
+        .unwrap();
+
+    let known = begin_raw_login(
+        &server_url,
+        "privacy@example.com",
+        "correct horse battery staple",
+    )
+    .await;
+    let unknown = begin_raw_login(
+        &server_url,
+        "unknown@example.com",
+        "correct horse battery staple",
+    )
+    .await;
+
+    assert_eq!(known.status, StatusCode::OK);
+    assert_eq!(unknown.status, StatusCode::OK);
+    let known_fields = response_fields(&known.start_body);
+    let unknown_fields = response_fields(&unknown.start_body);
+    assert_eq!(known_fields, unknown_fields);
+    assert_eq!(
+        known_fields,
+        vec!["expires_at", "message", "opaque_suite_id", "state_id"]
+    );
+    assert_eq!(
+        STANDARD
+            .decode(known.start_body["message"].as_str().unwrap())
+            .unwrap()
+            .len(),
+        STANDARD
+            .decode(unknown.start_body["message"].as_str().unwrap())
+            .unwrap()
+            .len()
+    );
+
+    let unknown_identity =
+        query::<Postgres>("SELECT user_id, tenant_id FROM opaque_login_states WHERE id = $1")
+            .bind(unknown.state_id)
+            .fetch_one(&test.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        unknown_identity
+            .try_get::<Option<Uuid>, _>("user_id")
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        unknown_identity
+            .try_get::<Option<Uuid>, _>("tenant_id")
+            .unwrap(),
+        None
+    );
+
+    let successful = finish_raw_login(&server_url, &known).await;
+    assert_eq!(successful.0, StatusCode::OK);
+    assert!(successful.1.get("user_id").is_some());
+    assert!(successful.1.get("tenant_id").is_some());
+    assert!(successful.1.get("key_bundle").is_some());
+
+    let replayed = finish_raw_login(&server_url, &known).await;
+
+    let wrong_password =
+        begin_raw_login(&server_url, "privacy@example.com", "wrong password").await;
+    assert!(wrong_password.finalization.is_none());
+    let wrong_password = finish_raw_login_with_message(
+        &server_url,
+        wrong_password.state_id,
+        known.finalization.as_deref().unwrap(),
+    )
+    .await;
+
+    assert!(unknown.finalization.is_none());
+    let unknown = finish_raw_login_with_message(
+        &server_url,
+        unknown.state_id,
+        known.finalization.as_deref().unwrap(),
+    )
+    .await;
+
+    let expired = begin_raw_login(
+        &server_url,
+        "privacy@example.com",
+        "correct horse battery staple",
+    )
+    .await;
+    query::<Postgres>(
+        "UPDATE opaque_login_states SET expires_at = now() - interval '1 second' WHERE id = $1",
+    )
+    .bind(expired.state_id)
+    .execute(&test.pool)
+    .await
+    .unwrap();
+    let expired = finish_raw_login(&server_url, &expired).await;
+
+    let malformed = begin_raw_login(
+        &server_url,
+        "privacy@example.com",
+        "correct horse battery staple",
+    )
+    .await;
+    let malformed_attempt =
+        finish_raw_login_with_message(&server_url, malformed.state_id, "not-base64").await;
+    assert_eq!(malformed_attempt.0, StatusCode::BAD_REQUEST);
+    let malformed_replayed = finish_raw_login(&server_url, &malformed).await;
+
+    for failure in [
+        &replayed,
+        &wrong_password,
+        &unknown,
+        &expired,
+        &malformed_replayed,
+    ] {
+        assert_eq!(failure.0, StatusCode::UNAUTHORIZED);
+        assert_eq!(failure.1, serde_json::json!({"error": "unauthorized"}));
+    }
+
+    assert!(matches!(
+        client
+            .begin_login(
+                "privacy@example.com",
+                "wrong password",
+                Some("wrong-password device"),
+                &[0x62; 32],
+            )
+            .await,
+        Err(AccountClientError::Opaque)
+    ));
+    assert!(matches!(
+        client
+            .begin_login(
+                "unknown@example.com",
+                "correct horse battery staple",
+                Some("unknown-account device"),
+                &[0x63; 32],
+            )
+            .await,
+        Err(AccountClientError::Opaque)
+    ));
+
+    let regular_login = client
+        .begin_login(
+            "privacy@example.com",
+            "correct horse battery staple",
+            Some("normal login device"),
+            &[0x64; 32],
+        )
+        .await
+        .unwrap();
+    client.certify_login(&regular_login).await.unwrap();
+}
+
+struct RawLogin {
+    status: StatusCode,
+    start_body: Value,
+    state_id: Uuid,
+    finalization: Option<String>,
+}
+
+async fn begin_raw_login(server_url: &str, email: &str, password: &str) -> RawLogin {
+    let mut rng = OsRng;
+    let client_start =
+        ClientLogin::<TaskveilCipherSuite>::start(&mut rng, password.as_bytes()).unwrap();
+    let response = reqwest::Client::new()
+        .post(format!("{server_url}/v1/auth/login/start"))
+        .json(&serde_json::json!({
+            "email": email,
+            "device_name": "privacy test device",
+            "opaque_suite_id": CRYPTO_SUITE_ID,
+            "message": STANDARD.encode(client_start.message.serialize())
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let start_body: Value = response.json().await.unwrap();
+    let state_id = Uuid::parse_str(start_body["state_id"].as_str().unwrap()).unwrap();
+    let server_message = CredentialResponse::<TaskveilCipherSuite>::deserialize(
+        &STANDARD
+            .decode(start_body["message"].as_str().unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    let finalization = client_start
+        .state
+        .finish(
+            &mut rng,
+            password.as_bytes(),
+            server_message,
+            opaque_login_parameters(),
+        )
+        .ok()
+        .map(|finish| STANDARD.encode(finish.message.serialize()));
+
+    RawLogin {
+        status,
+        start_body,
+        state_id,
+        finalization,
+    }
+}
+
+async fn finish_raw_login(server_url: &str, login: &RawLogin) -> (StatusCode, Value) {
+    finish_raw_login_with_message(
+        server_url,
+        login.state_id,
+        login.finalization.as_deref().unwrap(),
+    )
+    .await
+}
+
+async fn finish_raw_login_with_message(
+    server_url: &str,
+    state_id: Uuid,
+    finalization: &str,
+) -> (StatusCode, Value) {
+    let response = reqwest::Client::new()
+        .post(format!("{server_url}/v1/auth/login/finish"))
+        .json(&serde_json::json!({
+            "state_id": state_id,
+            "message": finalization
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.json().await.unwrap();
+    (status, body)
+}
+
+fn response_fields(value: &Value) -> Vec<&str> {
+    let mut fields: Vec<_> = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    fields.sort_unstable();
+    fields
 }
 
 async fn request_status(

@@ -8,8 +8,8 @@ use axum::{
 use crate::{
     auth::{
         self, AuthorizationServerMetadata, LoginFinishRequest, LoginSessionResponse,
-        LogoutResponse, OpaqueStartRequest, OpaqueStartResponse, RegisterFinishRequest,
-        RevocationRequest, SessionResponse, TokenRequest, TokenResponse,
+        LoginStartResponse, LogoutResponse, OpaqueStartRequest, RegisterFinishRequest,
+        RegistrationStartResponse, RevocationRequest, SessionResponse, TokenRequest, TokenResponse,
     },
     AppError, SharedState,
 };
@@ -57,7 +57,7 @@ async fn update_key_wrappers(
 async fn register_start(
     State(state): State<SharedState>,
     Json(request): Json<OpaqueStartRequest>,
-) -> Result<Json<OpaqueStartResponse>, AppError> {
+) -> Result<Json<RegistrationStartResponse>, AppError> {
     auth::register_start(&state.pool, request).await.map(Json)
 }
 
@@ -73,7 +73,7 @@ async fn register_finish(
 async fn login_start(
     State(state): State<SharedState>,
     Json(request): Json<OpaqueStartRequest>,
-) -> Result<Json<OpaqueStartResponse>, AppError> {
+) -> Result<Json<LoginStartResponse>, AppError> {
     auth::login_start(&state.pool, request).await.map(Json)
 }
 

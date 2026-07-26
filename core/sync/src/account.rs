@@ -310,7 +310,7 @@ impl AccountClient {
         let client_start = ClientRegistration::<TaskveilCipherSuite>::start(&mut rng, &password)
             .map_err(|_| AccountClientError::Opaque)?;
         let start = self
-            .post_json::<OpaqueStartResponse>(
+            .post_json::<RegistrationStartResponse>(
                 "/v1/auth/register/start",
                 &OpaqueStartRequest {
                     email: email.to_string(),
@@ -321,7 +321,7 @@ impl AccountClient {
                 None,
             )
             .await?;
-        validate_opaque_start(&start)?;
+        validate_registration_start(&start)?;
         let server_message = RegistrationResponse::<TaskveilCipherSuite>::deserialize(
             &decode_base64(&start.message)?,
         )
@@ -390,7 +390,7 @@ impl AccountClient {
         let client_start = ClientLogin::<TaskveilCipherSuite>::start(&mut rng, &password)
             .map_err(|_| AccountClientError::Opaque)?;
         let start = self
-            .post_json::<OpaqueStartResponse>(
+            .post_json::<LoginStartResponse>(
                 "/v1/auth/login/start",
                 &OpaqueStartRequest {
                     email: email.to_string(),
@@ -401,7 +401,7 @@ impl AccountClient {
                 None,
             )
             .await?;
-        validate_opaque_start(&start)?;
+        validate_login_start(&start)?;
         let server_message =
             CredentialResponse::<TaskveilCipherSuite>::deserialize(&decode_base64(&start.message)?)
                 .map_err(|_| AccountClientError::Opaque)?;
@@ -1269,11 +1269,20 @@ fn device_enrollment_dto(
     })
 }
 
-fn validate_opaque_start(start: &OpaqueStartResponse) -> Result<(), AccountClientError> {
+fn validate_registration_start(
+    start: &RegistrationStartResponse,
+) -> Result<(), AccountClientError> {
     if start.opaque_suite_id != CRYPTO_SUITE_ID
         || start.device_id.is_nil()
         || decode_fixed_array::<DEVICE_CHALLENGE_LEN>(&start.device_challenge).is_err()
     {
+        return Err(AccountClientError::Opaque);
+    }
+    Ok(())
+}
+
+fn validate_login_start(start: &LoginStartResponse) -> Result<(), AccountClientError> {
+    if start.opaque_suite_id != CRYPTO_SUITE_ID {
         return Err(AccountClientError::Opaque);
     }
     Ok(())
@@ -1306,13 +1315,22 @@ struct OpaqueStartRequest {
 }
 
 #[derive(Debug, Deserialize)]
-struct OpaqueStartResponse {
+struct RegistrationStartResponse {
     state_id: Uuid,
     opaque_suite_id: u16,
     user_id: Uuid,
     tenant_id: Uuid,
     device_id: Uuid,
     device_challenge: String,
+    message: String,
+    #[allow(dead_code)]
+    expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LoginStartResponse {
+    state_id: Uuid,
+    opaque_suite_id: u16,
     message: String,
     #[allow(dead_code)]
     expires_at: DateTime<Utc>,
@@ -1525,19 +1543,15 @@ mod tests {
 
     #[test]
     fn client_rejects_unknown_opaque_suite_before_deserializing_protocol_state() {
-        let response = OpaqueStartResponse {
+        let response = LoginStartResponse {
             state_id: Uuid::now_v7(),
             opaque_suite_id: CRYPTO_SUITE_ID - 1,
-            user_id: Uuid::now_v7(),
-            tenant_id: Uuid::now_v7(),
-            device_id: Uuid::now_v7(),
-            device_challenge: STANDARD.encode([0u8; DEVICE_CHALLENGE_LEN]),
             message: String::new(),
             expires_at: Utc::now(),
         };
 
         assert!(matches!(
-            validate_opaque_start(&response),
+            validate_login_start(&response),
             Err(AccountClientError::Opaque)
         ));
     }
