@@ -8,8 +8,8 @@ use taskveil_sync::{
 };
 
 use super::{
-    now_ms, AccountReadiness, CryptoRuntimeState, NetworkOperationContext, SyncRuntimeState,
-    TaskveilClient, INITIAL_BACKFILL_CURSOR_NAME,
+    account::map_account_client_error, now_ms, AccountReadiness, CryptoRuntimeState,
+    NetworkOperationContext, SyncRuntimeState, TaskveilClient, INITIAL_BACKFILL_CURSOR_NAME,
 };
 use crate::{ClientError, RealtimeTicket, SqliteSyncStore, SyncStatus};
 
@@ -95,10 +95,7 @@ impl TaskveilClient {
             }
             result => result,
         }
-        .map_err(|error| match error {
-            AccountClientError::EntitlementRequired => ClientError::EntitlementRequired,
-            _ => ClientError::AccountRequest,
-        })?;
+        .map_err(map_account_client_error)?;
         Ok(RealtimeTicket {
             websocket_url: response.websocket_url,
             ticket: response.ticket,
@@ -433,7 +430,7 @@ fn sync_status(logged_in: bool, state: &SyncRuntimeState) -> SyncStatus {
         running: state.running,
         last_success_at: state.last_success_at,
         last_failure_at: state.last_failure_at,
-        last_error: state.last_error.clone(),
+        last_error: state.last_error,
         pushed_count: state.last_summary.pushed_count,
         push_acked_count: state.last_summary.push_acked_count,
         push_superseded_count: state.last_summary.push_superseded_count,
@@ -445,7 +442,7 @@ fn sync_status(logged_in: bool, state: &SyncRuntimeState) -> SyncStatus {
         missing_key_quarantined_count: state.last_summary.missing_key_quarantined_count,
         corruption_quarantined_count: state.last_summary.corruption_quarantined_count,
         resolved_quarantine_count: state.last_summary.resolved_quarantine_count,
-        upgrade_required: state.last_error.as_deref() == Some("upgrade required"),
+        upgrade_required: state.last_error == Some(crate::SyncFailure::UpgradeRequired),
     }
 }
 
@@ -465,56 +462,61 @@ fn finish_sync_run(
         }
         Err(ClientError::UpgradeRequired) => {
             state.last_failure_at = Some(timestamp);
-            state.last_error = Some("upgrade required".to_string());
+            state.last_error = Some(crate::SyncFailure::UpgradeRequired);
+        }
+        Err(error @ ClientError::Unauthorized) => {
+            state.last_failure_at = Some(timestamp);
+            state.last_error = Some(crate::SyncFailure::Unauthorized);
+            surfaced_error = Some(error);
         }
         Err(ClientError::EntitlementRequired) => {
             state.last_failure_at = Some(timestamp);
-            state.last_error = Some("entitlement required".to_string());
+            state.last_error = Some(crate::SyncFailure::EntitlementRequired);
             surfaced_error = Some(ClientError::EntitlementRequired);
         }
         Err(ClientError::SyncLeaseBusy) => {
             state.last_failure_at = Some(timestamp);
-            state.last_error = Some("sync lease busy".to_string());
+            state.last_error = Some(crate::SyncFailure::SyncLeaseBusy);
             surfaced_error = Some(ClientError::SyncLeaseBusy);
         }
         Err(ClientError::LeaseLost) => {
             state.last_failure_at = Some(timestamp);
-            state.last_error = Some("sync lease lost".to_string());
+            state.last_error = Some(crate::SyncFailure::LeaseLost);
             surfaced_error = Some(ClientError::LeaseLost);
         }
         Err(ClientError::DatabaseBusy) => {
             state.last_failure_at = Some(timestamp);
-            state.last_error = Some("database busy".to_string());
+            state.last_error = Some(crate::SyncFailure::DatabaseBusy);
             surfaced_error = Some(ClientError::DatabaseBusy);
         }
         Err(error @ ClientError::ClockSkewRetryable) => {
             state.last_failure_at = Some(timestamp);
-            state.last_error = Some("clock skew retryable".to_string());
+            state.last_error = Some(crate::SyncFailure::ClockSkewRetryable);
             surfaced_error = Some(error);
         }
         Err(error @ ClientError::CredentialUnavailable) => {
             state.last_failure_at = Some(timestamp);
-            state.last_error = Some("credential unavailable".to_string());
+            state.last_error = Some(crate::SyncFailure::CredentialUnavailable);
             surfaced_error = Some(error);
         }
         Err(error @ ClientError::AccountBoundUnavailable) => {
             state.last_failure_at = Some(timestamp);
-            state.last_error = Some("account-bound unavailable".to_string());
+            state.last_error = Some(crate::SyncFailure::AccountBoundUnavailable);
             surfaced_error = Some(error);
         }
         Err(error @ ClientError::ProfileBusy) => {
             state.last_failure_at = Some(timestamp);
-            state.last_error = Some("profile busy".to_string());
+            state.last_error = Some(crate::SyncFailure::ProfileBusy);
             surfaced_error = Some(error);
         }
         Err(error @ ClientError::Busy) => {
             state.last_failure_at = Some(timestamp);
-            state.last_error = Some("credential busy".to_string());
+            state.last_error = Some(crate::SyncFailure::CredentialBusy);
             surfaced_error = Some(error);
         }
         Err(error) => {
             state.last_failure_at = Some(timestamp);
-            state.last_error = Some("sync failed".to_string());
+            state.last_error = Some(crate::SyncFailure::SyncFailed);
             surfaced_error = Some(error);
         }
     }
@@ -535,19 +537,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn invalidated_session_is_reported_logged_out_after_failed_sync() {
+    fn unauthorized_session_is_reported_logged_out_after_failed_sync() {
         let mut state = SyncRuntimeState {
             running: true,
             ..SyncRuntimeState::default()
         };
 
         let (status, surfaced_error) =
-            finish_sync_run(false, &mut state, Err(ClientError::AccountRequest), 42);
+            finish_sync_run(false, &mut state, Err(ClientError::Unauthorized), 42);
 
         assert!(!status.logged_in);
         assert!(!status.running);
         assert_eq!(status.last_failure_at, Some(42));
-        assert_eq!(status.last_error.as_deref(), Some("sync failed"));
+        assert_eq!(status.last_error, Some(crate::SyncFailure::Unauthorized));
+        assert!(matches!(surfaced_error, Some(ClientError::Unauthorized)));
+    }
+
+    #[test]
+    fn generic_account_failure_is_not_reported_as_unauthorized() {
+        let mut state = SyncRuntimeState {
+            running: true,
+            ..SyncRuntimeState::default()
+        };
+
+        let (status, surfaced_error) =
+            finish_sync_run(true, &mut state, Err(ClientError::AccountRequest), 42);
+
+        assert_eq!(status.last_error, Some(crate::SyncFailure::SyncFailed));
         assert!(matches!(surfaced_error, Some(ClientError::AccountRequest)));
     }
 

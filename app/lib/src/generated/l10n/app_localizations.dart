@@ -2737,6 +2737,96 @@ abstract class AppLocalizations {
   /// **'Template saved.'**
   String get templateSavedMessage;
 
+  /// No description provided for @bridgeErrorInvalidInput.
+  ///
+  /// In en, this message translates to:
+  /// **'Check the information you entered.'**
+  String get bridgeErrorInvalidInput;
+
+  /// No description provided for @bridgeErrorNotFound.
+  ///
+  /// In en, this message translates to:
+  /// **'That item is no longer available.'**
+  String get bridgeErrorNotFound;
+
+  /// No description provided for @bridgeErrorConflict.
+  ///
+  /// In en, this message translates to:
+  /// **'The item changed. Reload it and try again.'**
+  String get bridgeErrorConflict;
+
+  /// No description provided for @bridgeErrorUnauthorized.
+  ///
+  /// In en, this message translates to:
+  /// **'Sign in again to continue.'**
+  String get bridgeErrorUnauthorized;
+
+  /// No description provided for @bridgeErrorCredentialUnavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Your sign-in credentials are unavailable. Sign in again.'**
+  String get bridgeErrorCredentialUnavailable;
+
+  /// No description provided for @bridgeErrorAccountBoundUnavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'This device cannot access the account encryption keys. Sign in again.'**
+  String get bridgeErrorAccountBoundUnavailable;
+
+  /// No description provided for @bridgeErrorEntitlementRequired.
+  ///
+  /// In en, this message translates to:
+  /// **'This action requires a Pro subscription.'**
+  String get bridgeErrorEntitlementRequired;
+
+  /// No description provided for @bridgeErrorUpgradeRequired.
+  ///
+  /// In en, this message translates to:
+  /// **'Update Taskveil before syncing again.'**
+  String get bridgeErrorUpgradeRequired;
+
+  /// No description provided for @bridgeErrorBusy.
+  ///
+  /// In en, this message translates to:
+  /// **'Taskveil is busy with another operation. Try again shortly.'**
+  String get bridgeErrorBusy;
+
+  /// No description provided for @bridgeErrorLeaseLost.
+  ///
+  /// In en, this message translates to:
+  /// **'Sync ownership changed. Try syncing again.'**
+  String get bridgeErrorLeaseLost;
+
+  /// No description provided for @bridgeErrorClockSkew.
+  ///
+  /// In en, this message translates to:
+  /// **'This device\'s clock is ahead. Check the time and try again.'**
+  String get bridgeErrorClockSkew;
+
+  /// No description provided for @bridgeErrorCryptoUnavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Secure local data is unavailable on this device.'**
+  String get bridgeErrorCryptoUnavailable;
+
+  /// No description provided for @bridgeErrorStorageFailure.
+  ///
+  /// In en, this message translates to:
+  /// **'Taskveil could not access its local data.'**
+  String get bridgeErrorStorageFailure;
+
+  /// No description provided for @bridgeErrorSyncFailure.
+  ///
+  /// In en, this message translates to:
+  /// **'Taskveil could not sync. Try again.'**
+  String get bridgeErrorSyncFailure;
+
+  /// No description provided for @bridgeErrorInternal.
+  ///
+  /// In en, this message translates to:
+  /// **'Taskveil could not complete the operation.'**
+  String get bridgeErrorInternal;
+
   /// No description provided for @failedToStartTaskveil.
   ///
   /// In en, this message translates to:

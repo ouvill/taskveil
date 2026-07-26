@@ -18,6 +18,7 @@ import 'package:taskveil/src/rust/frb_generated.dart';
 import 'package:taskveil/src/screens/onboarding_screen.dart';
 import 'package:taskveil/src/timer/timer_notifications.dart';
 import 'package:taskveil/src/ui/theme.dart';
+import 'package:taskveil/src/ui/bridge_error_messages.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -152,9 +153,9 @@ class TaskveilApp extends StatelessWidget {
               padding: const EdgeInsets.all(24),
               child: Builder(
                 builder: (context) => Text(
-                  AppLocalizations.of(
-                    context,
-                  )!.failedToStartTaskveil(error.toString()),
+                  AppLocalizations.of(context)!.failedToStartTaskveil(
+                    bridgeErrorMessage(AppLocalizations.of(context)!, error),
+                  ),
                 ),
               ),
             ),

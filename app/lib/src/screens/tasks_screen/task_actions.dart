@@ -272,7 +272,7 @@ Future<void> _applyUndo(
       SnackBar(
         duration: const Duration(seconds: 4),
         persist: false,
-        content: Text(l10n.undoFailedMessage(error.toString())),
+        content: Text(l10n.undoFailedMessage(bridgeErrorMessage(l10n, error))),
         margin: const EdgeInsets.all(AppSpacing.md),
       ),
     );

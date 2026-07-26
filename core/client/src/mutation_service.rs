@@ -36,6 +36,8 @@ pub enum ClientError {
     KeyStore(#[source] taskveil_crypto::KeyStoreError),
     #[error("account request failed")]
     AccountRequest,
+    #[error("remote authentication is required")]
+    Unauthorized,
     #[error("remote account credential is unavailable")]
     CredentialUnavailable,
     #[error("a Pro entitlement is required")]
@@ -87,6 +89,98 @@ pub enum ClientError {
     InvalidCalendarRange,
     #[error("frontend setting value is invalid")]
     InvalidFrontendSetting,
+}
+
+/// Stable classification for frontend and automation boundaries.
+///
+/// Unlike [`ClientError`], this enum is deliberately free of identifiers,
+/// paths, database details, server bodies, and user-controlled strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientErrorKind {
+    InvalidInput,
+    NotFound,
+    Conflict,
+    Unauthorized,
+    CredentialUnavailable,
+    AccountBoundUnavailable,
+    EntitlementRequired,
+    UpgradeRequired,
+    Busy,
+    LeaseLost,
+    ClockSkew,
+    CryptoUnavailable,
+    StorageFailure,
+    SyncFailure,
+    Internal,
+}
+
+impl ClientError {
+    pub fn kind(&self) -> ClientErrorKind {
+        match self {
+            Self::Storage(StorageError::NotFound(_)) => ClientErrorKind::NotFound,
+            Self::Storage(
+                StorageError::DuplicateReminderTime
+                | StorageError::ReminderLimitReached { .. }
+                | StorageError::ActiveTimerConflict(_)
+                | StorageError::UndoConsumed(_)
+                | StorageError::UndoConflict(_)
+                | StorageError::DefaultListProtected { .. },
+            )
+            | Self::ProfileAlreadyBound
+            | Self::ProfileIdentityMismatch
+            | Self::ActiveTimerConflict(_) => ClientErrorKind::Conflict,
+            Self::Storage(
+                StorageError::ReminderTimeNotFuture
+                | StorageError::ReminderTaskClosed
+                | StorageError::InvalidActiveTimerUpdate(_)
+                | StorageError::CompletedTimerDurationMismatch { .. },
+            )
+            | Self::Domain(_)
+            | Self::Recurrence(_)
+            | Self::InvalidPriority
+            | Self::InvalidEstimatedMinutes
+            | Self::InvalidCalendarRange
+            | Self::InvalidFrontendSetting => ClientErrorKind::InvalidInput,
+            Self::Storage(StorageError::InvalidDatabaseKey)
+            | Self::KeyStore(_)
+            | Self::LocalKeyState
+            | Self::LocalKeyRecoveryFailed => ClientErrorKind::CryptoUnavailable,
+            Self::Storage(StorageError::SyncLeaseBusy) => ClientErrorKind::Busy,
+            Self::Storage(
+                StorageError::SyncLeaseLost | StorageError::ProfileRuntimeEpochChanged { .. },
+            ) => ClientErrorKind::LeaseLost,
+            Self::Storage(_) | Self::Io(_) => ClientErrorKind::StorageFailure,
+            Self::Unauthorized => ClientErrorKind::Unauthorized,
+            Self::CredentialUnavailable => ClientErrorKind::CredentialUnavailable,
+            Self::AccountBoundUnavailable | Self::IncompleteAccountState => {
+                ClientErrorKind::AccountBoundUnavailable
+            }
+            Self::EntitlementRequired => ClientErrorKind::EntitlementRequired,
+            Self::UpgradeRequired => ClientErrorKind::UpgradeRequired,
+            Self::ClockSkewRetryable => ClientErrorKind::ClockSkew,
+            Self::Busy | Self::ProfileBusy | Self::SyncLeaseBusy | Self::DatabaseBusy => {
+                ClientErrorKind::Busy
+            }
+            Self::LeaseLost => ClientErrorKind::LeaseLost,
+            Self::Sync | Self::SyncRun => ClientErrorKind::SyncFailure,
+            Self::AccountRequest
+            | Self::RuntimeState
+            | Self::ProfileLockUnsupported
+            | Self::LocalTimeZoneUnavailable => ClientErrorKind::Internal,
+            #[cfg(test)]
+            Self::InjectedDeviceKeyRotationFailure => ClientErrorKind::Internal,
+        }
+    }
+
+    pub fn retryable(&self) -> bool {
+        matches!(
+            self.kind(),
+            ClientErrorKind::Busy
+                | ClientErrorKind::LeaseLost
+                | ClientErrorKind::ClockSkew
+                | ClientErrorKind::SyncFailure
+        )
+    }
 }
 
 impl From<StorageError> for ClientError {
@@ -476,6 +570,31 @@ mod tests {
             map_mutation_sync_error("sync failed".to_string()),
             ClientError::Sync
         ));
+    }
+
+    #[test]
+    fn frontend_error_classification_preserves_retry_semantics_without_details() {
+        let lease_busy = ClientError::Storage(StorageError::SyncLeaseBusy);
+        assert_eq!(lease_busy.kind(), ClientErrorKind::Busy);
+        assert!(lease_busy.retryable());
+
+        let lease_lost = ClientError::Storage(StorageError::SyncLeaseLost);
+        assert_eq!(lease_lost.kind(), ClientErrorKind::LeaseLost);
+        assert!(lease_lost.retryable());
+
+        assert_eq!(
+            ClientError::ProfileLockUnsupported.kind(),
+            ClientErrorKind::Internal
+        );
+        assert!(!ClientError::ProfileLockUnsupported.retryable());
+        assert_eq!(
+            ClientError::Unauthorized.kind(),
+            ClientErrorKind::Unauthorized
+        );
+        assert_eq!(
+            ClientError::AccountRequest.kind(),
+            ClientErrorKind::Internal
+        );
     }
 
     struct Fixture {

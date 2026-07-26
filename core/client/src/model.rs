@@ -85,7 +85,7 @@ pub struct SyncStatus {
     pub running: bool,
     pub last_success_at: Option<i64>,
     pub last_failure_at: Option<i64>,
-    pub last_error: Option<String>,
+    pub last_error: Option<SyncFailure>,
     pub pushed_count: usize,
     pub push_acked_count: usize,
     pub push_superseded_count: usize,
@@ -98,4 +98,24 @@ pub struct SyncStatus {
     pub corruption_quarantined_count: usize,
     pub resolved_quarantine_count: usize,
     pub upgrade_required: bool,
+}
+
+/// Stable, frontend-neutral classification of the most recent sync failure.
+///
+/// This intentionally contains no server response, database detail, path,
+/// identifier, or user input. Frontends can safely map it to localized copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncFailure {
+    Unauthorized,
+    UpgradeRequired,
+    EntitlementRequired,
+    SyncLeaseBusy,
+    LeaseLost,
+    DatabaseBusy,
+    ClockSkewRetryable,
+    CredentialUnavailable,
+    AccountBoundUnavailable,
+    ProfileBusy,
+    CredentialBusy,
+    SyncFailed,
 }

@@ -3,15 +3,16 @@ use taskveil_client::{
     pomodoro_target_reached_at as domain_pomodoro_target_reached_at, AccountAuthResult,
     AccountRegistrationPending, AccountRegistrationPhase, AccountRegistrationState,
     AccountSessionState, ActiveTimerSession, BillingState, CalendarOccurrenceKind,
-    CalendarOccurrenceView, CalendarRange, CivilDate, ClientError, CompletedTimerSession,
-    CreateTaskCommand, CreateTaskSeriesFromTaskCommand, CreateTaskSeriesFromTemplateCommand,
-    CreateTemplateCommand, FrontendSettingKey, HomeTaskView, List, OrganizationSafetyState,
-    RealtimeTicket, ReminderNotificationActionView, ReminderNotificationCommandView, ReminderView,
-    ReorderTaskCommand, ReplaceTaskBlueprintCommand, SaveTemplateCommand, SetTaskStatusCommand,
-    SettlementSummary, Streak, SyncStatus, Task, TaskBlueprint, TaskBlueprintNode, TaskContent,
-    TaskDue, TaskSeries, TaskStatus, TaskTemplate, TaskUndoKind, TaskUndoView, TimerFinishKind,
-    TimerMode, TimerPhase, TimerRunState, UpdateTaskCommand, UpdateTaskSeriesCommand,
-    UpdateTemplateCommand, UtcInstant, Uuid,
+    CalendarOccurrenceView, CalendarRange, CivilDate, ClientError, ClientErrorKind,
+    CompletedTimerSession, CreateTaskCommand, CreateTaskSeriesFromTaskCommand,
+    CreateTaskSeriesFromTemplateCommand, CreateTemplateCommand, FrontendSettingKey, HomeTaskView,
+    List, OrganizationSafetyState, RealtimeTicket, ReminderNotificationActionView,
+    ReminderNotificationCommandView, ReminderView, ReorderTaskCommand, ReplaceTaskBlueprintCommand,
+    SaveTemplateCommand, SetTaskStatusCommand, SettlementSummary, Streak, SyncFailure, SyncStatus,
+    Task, TaskBlueprint, TaskBlueprintNode, TaskContent, TaskDue, TaskSeries, TaskStatus,
+    TaskTemplate, TaskUndoKind, TaskUndoView, TimerFinishKind, TimerMode, TimerPhase,
+    TimerRunState, UpdateTaskCommand, UpdateTaskSeriesCommand, UpdateTemplateCommand, UtcInstant,
+    Uuid,
 };
 
 use crate::client_handle::{client, init_client};
@@ -19,6 +20,112 @@ use crate::client_handle::{client, init_client};
 mod conversions;
 
 use conversions::*;
+
+/// Closed, stable error codes exported to Flutter.
+///
+/// Variants are intentionally coarser than internal errors so implementation
+/// details cannot become part of the UI or telemetry contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BridgeErrorCodeDto {
+    InvalidInput,
+    NotFound,
+    Conflict,
+    Unauthorized,
+    CredentialUnavailable,
+    AccountBoundUnavailable,
+    EntitlementRequired,
+    UpgradeRequired,
+    Busy,
+    LeaseLost,
+    ClockSkew,
+    CryptoUnavailable,
+    StorageFailure,
+    SyncFailure,
+    Internal,
+}
+
+/// Closed localization argument keys. No free-form internal string can cross
+/// the bridge. Current errors need no arguments; this type reserves a safe,
+/// reviewable extension point for future bounded values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BridgeErrorArgumentKeyDto {
+    Limit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgeErrorArgumentDto {
+    pub key: BridgeErrorArgumentKeyDto,
+    pub value: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgeErrorDto {
+    pub code: BridgeErrorCodeDto,
+    pub arguments: Vec<BridgeErrorArgumentDto>,
+    pub retryable: bool,
+}
+
+impl BridgeErrorDto {
+    fn new(code: BridgeErrorCodeDto, retryable: bool) -> Self {
+        Self {
+            code,
+            arguments: Vec::new(),
+            retryable,
+        }
+    }
+
+    fn invalid_input() -> Self {
+        Self::new(BridgeErrorCodeDto::InvalidInput, false)
+    }
+}
+
+impl From<ClientError> for BridgeErrorDto {
+    fn from(error: ClientError) -> Self {
+        let code = match error.kind() {
+            ClientErrorKind::InvalidInput => BridgeErrorCodeDto::InvalidInput,
+            ClientErrorKind::NotFound => BridgeErrorCodeDto::NotFound,
+            ClientErrorKind::Conflict => BridgeErrorCodeDto::Conflict,
+            ClientErrorKind::Unauthorized => BridgeErrorCodeDto::Unauthorized,
+            ClientErrorKind::CredentialUnavailable => BridgeErrorCodeDto::CredentialUnavailable,
+            ClientErrorKind::AccountBoundUnavailable => BridgeErrorCodeDto::AccountBoundUnavailable,
+            ClientErrorKind::EntitlementRequired => BridgeErrorCodeDto::EntitlementRequired,
+            ClientErrorKind::UpgradeRequired => BridgeErrorCodeDto::UpgradeRequired,
+            ClientErrorKind::Busy => BridgeErrorCodeDto::Busy,
+            ClientErrorKind::LeaseLost => BridgeErrorCodeDto::LeaseLost,
+            ClientErrorKind::ClockSkew => BridgeErrorCodeDto::ClockSkew,
+            ClientErrorKind::CryptoUnavailable => BridgeErrorCodeDto::CryptoUnavailable,
+            ClientErrorKind::StorageFailure => BridgeErrorCodeDto::StorageFailure,
+            ClientErrorKind::SyncFailure => BridgeErrorCodeDto::SyncFailure,
+            ClientErrorKind::Internal => BridgeErrorCodeDto::Internal,
+        };
+        Self::new(code, error.retryable())
+    }
+}
+
+impl From<SyncFailure> for BridgeErrorDto {
+    fn from(error: SyncFailure) -> Self {
+        match error {
+            SyncFailure::Unauthorized => Self::new(BridgeErrorCodeDto::Unauthorized, false),
+            SyncFailure::UpgradeRequired => Self::new(BridgeErrorCodeDto::UpgradeRequired, false),
+            SyncFailure::EntitlementRequired => {
+                Self::new(BridgeErrorCodeDto::EntitlementRequired, false)
+            }
+            SyncFailure::SyncLeaseBusy
+            | SyncFailure::DatabaseBusy
+            | SyncFailure::ProfileBusy
+            | SyncFailure::CredentialBusy => Self::new(BridgeErrorCodeDto::Busy, true),
+            SyncFailure::LeaseLost => Self::new(BridgeErrorCodeDto::LeaseLost, true),
+            SyncFailure::ClockSkewRetryable => Self::new(BridgeErrorCodeDto::ClockSkew, true),
+            SyncFailure::CredentialUnavailable => {
+                Self::new(BridgeErrorCodeDto::CredentialUnavailable, false)
+            }
+            SyncFailure::AccountBoundUnavailable => {
+                Self::new(BridgeErrorCodeDto::AccountBoundUnavailable, false)
+            }
+            SyncFailure::SyncFailed => Self::new(BridgeErrorCodeDto::SyncFailure, true),
+        }
+    }
+}
 
 pub struct ListDto {
     pub id: String,
@@ -327,7 +434,7 @@ pub struct SyncStatusDto {
     pub running: bool,
     pub last_success_at: Option<i64>,
     pub last_failure_at: Option<i64>,
-    pub last_error: Option<String>,
+    pub last_error: Option<BridgeErrorDto>,
     pub pushed_count: i32,
     pub push_acked_count: i32,
     pub push_superseded_count: i32,
@@ -342,29 +449,8 @@ pub struct SyncStatusDto {
     pub upgrade_required: bool,
 }
 
-pub fn greet(name: String) -> String {
-    format!("Hello {name} from taskveil-core")
-}
-
-pub fn get_local_time_zone() -> Result<String, String> {
+pub fn get_local_time_zone() -> Result<String, BridgeErrorDto> {
     client_result(client()?.local_time_zone())
-}
-
-pub fn create_draft_task(title: String) -> String {
-    let id = Uuid::now_v7();
-    let list_id = Uuid::now_v7();
-    format!(
-        concat!(
-            "{{\"id\":\"{}\",\"list_id\":\"{}\",\"parent_task_id\":null,",
-            "\"title\":{},\"note\":\"\",\"status\":\"todo\",\"priority\":0,",
-            "\"due\":null,\"scheduled_at\":null,\"estimated_minutes\":null,",
-            "\"sort_order\":\"a0\",\"completed_at\":null,\"closed_reason\":null,",
-            "\"deleted_at\":null,\"assignee\":null,\"created_at\":0,\"updated_at\":0}}"
-        ),
-        id,
-        list_id,
-        json_string(&title),
-    )
 }
 
 /// Initializes Taskveil core for the process using `db_dir`.
@@ -373,28 +459,28 @@ pub fn create_draft_task(title: String) -> String {
 /// initializes `<db_dir>/taskveil.db`, and stores the process-global client
 /// profile. Reinitializing with the same DB path succeeds idempotently;
 /// reinitializing with a different DB path returns an error.
-pub fn init_core(db_dir: String, default_inbox_name: String) -> Result<(), String> {
-    init_client(db_dir, default_inbox_name)
+pub fn init_core(db_dir: String, default_inbox_name: String) -> Result<(), BridgeErrorDto> {
+    init_client(db_dir, default_inbox_name).map_err(Into::into)
 }
 
 /// Rotates the local Device Key and SQLCipher key using the crash-recovery
 /// capsule protocol. No key material crosses the Flutter bridge.
-pub fn rotate_device_key() -> Result<i64, String> {
+pub fn rotate_device_key() -> Result<i64, BridgeErrorDto> {
     client()?
         .rotate_device_key()
         .and_then(|generation| i64::try_from(generation).map_err(|_| ClientError::LocalKeyState))
-        .map_err(|error| error.to_string())
+        .map_err(Into::into)
 }
 
-pub fn get_sync_server_url() -> Result<String, String> {
+pub fn get_sync_server_url() -> Result<String, BridgeErrorDto> {
     client_result(client()?.sync_server_url())
 }
 
-pub fn set_sync_server_url(server_url: String) -> Result<(), String> {
+pub fn set_sync_server_url(server_url: String) -> Result<(), BridgeErrorDto> {
     client_result(client()?.set_sync_server_url(server_url))
 }
 
-pub fn get_account_session_state() -> Result<AccountSessionStateDto, String> {
+pub fn get_account_session_state() -> Result<AccountSessionStateDto, BridgeErrorDto> {
     client_result(client()?.account_session_state()).map(account_session_to_dto)
 }
 
@@ -425,63 +511,64 @@ fn account_registration_state_to_dto(
     }
 }
 
-pub fn account_registration_state() -> Result<Option<AccountRegistrationStateDto>, String> {
+pub fn account_registration_state() -> Result<Option<AccountRegistrationStateDto>, BridgeErrorDto> {
     client_result(client()?.account_registration_state())
         .map(|state| state.map(account_registration_state_to_dto))
 }
 
-pub fn account_registration_cancel() -> Result<(), String> {
+pub fn account_registration_cancel() -> Result<(), BridgeErrorDto> {
     client_result(client()?.account_registration_cancel())
 }
 
 pub async fn account_registration_begin(
     email: String,
     server_url: Option<String>,
-) -> Result<AccountRegistrationPendingDto, String> {
+) -> Result<AccountRegistrationPendingDto, BridgeErrorDto> {
     let client = client()?;
     if let Some(server_url) = server_url {
         client
             .set_sync_server_url(server_url)
-            .map_err(|error| error.to_string())?;
+            .map_err(BridgeErrorDto::from)?;
     }
     client
         .account_registration_begin(email)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(BridgeErrorDto::from)
         .map(account_registration_pending_to_dto)
 }
 
-pub async fn account_registration_resend() -> Result<AccountRegistrationPendingDto, String> {
+pub async fn account_registration_resend(
+) -> Result<AccountRegistrationPendingDto, BridgeErrorDto> {
     client()?
         .account_registration_resend()
         .await
-        .map_err(|error| error.to_string())
+        .map_err(BridgeErrorDto::from)
         .map(account_registration_pending_to_dto)
 }
 
-pub async fn account_registration_verify_otp(otp: String) -> Result<(), String> {
+pub async fn account_registration_verify_otp(otp: String) -> Result<(), BridgeErrorDto> {
     client()?
         .account_registration_verify_otp(otp)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(BridgeErrorDto::from)
 }
 
 pub async fn account_registration_complete(
     password: String,
     device_name: Option<String>,
-) -> Result<AccountAuthResultDto, String> {
+) -> Result<AccountAuthResultDto, BridgeErrorDto> {
     client()?
         .account_registration_complete(password, device_name)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(Into::into)
         .map(account_auth_to_dto)
 }
 
-pub fn account_registration_ack_recovery_key() -> Result<(), String> {
+pub fn account_registration_ack_recovery_key() -> Result<(), BridgeErrorDto> {
     client_result(client()?.account_registration_ack_recovery_key())
 }
 
-pub fn account_registration_recovery_key() -> Result<Option<String>, String> {
+pub fn account_registration_recovery_key() -> Result<Option<String>, BridgeErrorDto> {
     client_result(client()?.account_registration_recovery_key())
 }
 
@@ -490,29 +577,26 @@ pub async fn account_login(
     password: String,
     server_url: Option<String>,
     device_name: Option<String>,
-) -> Result<AccountAuthResultDto, String> {
+) -> Result<AccountAuthResultDto, BridgeErrorDto> {
     client()?
         .account_login(email, password, server_url, device_name)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(Into::into)
         .map(account_auth_to_dto)
 }
 
-pub async fn account_logout() -> Result<(), String> {
-    client()?
-        .account_logout()
-        .await
-        .map_err(|error| error.to_string())
+pub async fn account_logout() -> Result<(), BridgeErrorDto> {
+    client()?.account_logout().await.map_err(Into::into)
 }
 
 pub async fn organization_safety_number(
     tenant_id: String,
     member_user_id: String,
-) -> Result<OrganizationSafetyStateDto, String> {
+) -> Result<OrganizationSafetyStateDto, BridgeErrorDto> {
     client()?
         .organization_safety_number(tenant_id, member_user_id)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(Into::into)
         .map(organization_safety_to_dto)
 }
 
@@ -520,61 +604,61 @@ pub async fn confirm_organization_safety_number(
     tenant_id: String,
     member_user_id: String,
     digest: String,
-) -> Result<OrganizationSafetyStateDto, String> {
+) -> Result<OrganizationSafetyStateDto, BridgeErrorDto> {
     client()?
         .confirm_organization_safety_number(tenant_id, member_user_id, digest)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(Into::into)
         .map(organization_safety_to_dto)
 }
 
-pub fn get_sync_status() -> Result<SyncStatusDto, String> {
+pub fn get_sync_status() -> Result<SyncStatusDto, BridgeErrorDto> {
     client_result(client()?.sync_status()).map(sync_status_to_dto)
 }
 
-pub async fn sync_now() -> Result<SyncStatusDto, String> {
+pub async fn sync_now() -> Result<SyncStatusDto, BridgeErrorDto> {
     client()?
         .sync_now()
         .await
-        .map_err(|error| error.to_string())
+        .map_err(Into::into)
         .map(sync_status_to_dto)
 }
 
-pub async fn sync_now_outcome() -> Result<SyncNowOutcomeDto, String> {
+pub async fn sync_now_outcome() -> Result<SyncNowOutcomeDto, BridgeErrorDto> {
     match client()?.sync_now().await {
         Ok(status) => Ok(SyncNowOutcomeDto::Synced {
             status: sync_status_to_dto(status),
         }),
         Err(ClientError::EntitlementRequired) => Ok(SyncNowOutcomeDto::BillingRequired),
-        Err(error) => Err(error.to_string()),
+        Err(error) => Err(error.into()),
     }
 }
 
-pub async fn billing_bootstrap() -> Result<BillingStateDto, String> {
+pub async fn billing_bootstrap() -> Result<BillingStateDto, BridgeErrorDto> {
     client()?
         .billing_bootstrap()
         .await
         .map(billing_state_to_dto)
-        .map_err(|error| error.to_string())
+        .map_err(Into::into)
 }
 
-pub async fn refresh_billing() -> Result<BillingStateDto, String> {
+pub async fn refresh_billing() -> Result<BillingStateDto, BridgeErrorDto> {
     client()?
         .refresh_billing()
         .await
         .map(billing_state_to_dto)
-        .map_err(|error| error.to_string())
+        .map_err(Into::into)
 }
 
-pub fn get_cached_billing() -> Result<Option<BillingStateDto>, String> {
+pub fn get_cached_billing() -> Result<Option<BillingStateDto>, BridgeErrorDto> {
     client_result(client()?.cached_billing()).map(|state| state.map(billing_state_to_dto))
 }
 
-pub async fn get_realtime_ticket() -> Result<RealtimeTicketDto, String> {
+pub async fn get_realtime_ticket() -> Result<RealtimeTicketDto, BridgeErrorDto> {
     client()?
         .realtime_ticket()
         .await
-        .map_err(|error| error.to_string())
+        .map_err(Into::into)
         .map(realtime_ticket_to_dto)
 }
 
@@ -582,26 +666,26 @@ pub async fn get_realtime_ticket() -> Result<RealtimeTicketDto, String> {
 ///
 /// `sort_order` remains in the FRB contract for compatibility, but rank
 /// generation and rebalance are owned by `TaskveilClient`.
-pub fn create_list(name: String, sort_order: String) -> Result<ListDto, String> {
+pub fn create_list(name: String, sort_order: String) -> Result<ListDto, BridgeErrorDto> {
     let _legacy_caller_rank = sort_order;
     client_result(client()?.create_list(name)).map(list_to_dto)
 }
 
-pub fn get_lists() -> Result<Vec<ListDto>, String> {
+pub fn get_lists() -> Result<Vec<ListDto>, BridgeErrorDto> {
     client_result(client()?.get_lists()).map(|lists| lists.into_iter().map(list_to_dto).collect())
 }
 
-pub fn get_archived_lists() -> Result<Vec<ListDto>, String> {
+pub fn get_archived_lists() -> Result<Vec<ListDto>, BridgeErrorDto> {
     client_result(client()?.get_archived_lists())
         .map(|lists| lists.into_iter().map(list_to_dto).collect())
 }
 
-pub fn get_templates() -> Result<Vec<TemplateDto>, String> {
+pub fn get_templates() -> Result<Vec<TemplateDto>, BridgeErrorDto> {
     client_result(client()?.get_templates())
         .map(|templates| templates.into_iter().map(template_to_dto).collect())
 }
 
-pub fn get_task_series() -> Result<Vec<TaskSeriesDto>, String> {
+pub fn get_task_series() -> Result<Vec<TaskSeriesDto>, BridgeErrorDto> {
     client_result(client()?.get_task_series())
         .map(|series| series.into_iter().map(task_series_to_dto).collect())
 }
@@ -610,7 +694,7 @@ pub fn validate_recurrence_rule(
     rrule: String,
     starts_at: i64,
     time_zone: String,
-) -> Result<String, String> {
+) -> Result<String, BridgeErrorDto> {
     client_result(client()?.validate_recurrence_rule(rrule, starts_at, time_zone))
 }
 
@@ -618,7 +702,7 @@ pub fn save_task_as_template(
     task_id: String,
     name: String,
     default_list_id: Option<String>,
-) -> Result<TemplateDto, String> {
+) -> Result<TemplateDto, BridgeErrorDto> {
     let command = SaveTemplateCommand {
         task_id: parse_uuid(&task_id)?,
         name,
@@ -631,7 +715,7 @@ pub fn create_template(
     name: String,
     default_list_id: Option<String>,
     nodes: Vec<TaskBlueprintNodeDto>,
-) -> Result<TemplateDto, String> {
+) -> Result<TemplateDto, BridgeErrorDto> {
     let command = CreateTemplateCommand {
         name,
         default_list_id: default_list_id.as_deref().map(parse_uuid).transpose()?,
@@ -645,7 +729,7 @@ pub fn update_template(
     name: String,
     default_list_id: Option<String>,
     nodes: Vec<TaskBlueprintNodeDto>,
-) -> Result<TemplateDto, String> {
+) -> Result<TemplateDto, BridgeErrorDto> {
     let command = UpdateTemplateCommand {
         template_id: parse_uuid(&template_id)?,
         name,
@@ -658,7 +742,7 @@ pub fn update_template(
 pub fn replace_template_blueprint(
     template_id: String,
     task_id: String,
-) -> Result<TemplateDto, String> {
+) -> Result<TemplateDto, BridgeErrorDto> {
     let command = ReplaceTaskBlueprintCommand {
         template_id: parse_uuid(&template_id)?,
         task_id: parse_uuid(&task_id)?,
@@ -666,7 +750,7 @@ pub fn replace_template_blueprint(
     client_result(client()?.replace_template_blueprint(command)).map(template_to_dto)
 }
 
-pub fn instantiate_template(template_id: String) -> Result<Vec<TaskDto>, String> {
+pub fn instantiate_template(template_id: String) -> Result<Vec<TaskDto>, BridgeErrorDto> {
     client_result(client()?.instantiate_template(parse_uuid(&template_id)?))
         .map(|tasks| tasks.into_iter().map(task_to_dto).collect())
 }
@@ -676,7 +760,7 @@ pub fn create_task_series_from_template(
     rrule: String,
     starts_at: i64,
     time_zone: String,
-) -> Result<TaskSeriesDto, String> {
+) -> Result<TaskSeriesDto, BridgeErrorDto> {
     let command = CreateTaskSeriesFromTemplateCommand {
         template_id: parse_uuid(&template_id)?,
         rrule,
@@ -692,7 +776,7 @@ pub fn create_task_series_from_task(
     rrule: String,
     starts_at: i64,
     time_zone: String,
-) -> Result<TaskSeriesDto, String> {
+) -> Result<TaskSeriesDto, BridgeErrorDto> {
     let command = CreateTaskSeriesFromTaskCommand {
         task_id: parse_uuid(&task_id)?,
         target_list_id: target_list_id.as_deref().map(parse_uuid).transpose()?,
@@ -712,7 +796,7 @@ pub fn update_task_series(
     starts_at: i64,
     time_zone: String,
     enabled: bool,
-) -> Result<TaskSeriesDto, String> {
+) -> Result<TaskSeriesDto, BridgeErrorDto> {
     let command = UpdateTaskSeriesCommand {
         series_id: parse_uuid(&series_id)?,
         blueprint: blueprint_from_dtos(nodes)?,
@@ -725,33 +809,33 @@ pub fn update_task_series(
     client_result(client()?.update_task_series(command)).map(task_series_to_dto)
 }
 
-pub fn delete_task_series(series_id: String) -> Result<(), String> {
+pub fn delete_task_series(series_id: String) -> Result<(), BridgeErrorDto> {
     client_result(client()?.delete_series(parse_uuid(&series_id)?))
 }
 
-pub fn delete_template(template_id: String) -> Result<(), String> {
+pub fn delete_template(template_id: String) -> Result<(), BridgeErrorDto> {
     client_result(client()?.delete_template(parse_uuid(&template_id)?))
 }
 
-pub fn settle_due_series(at_ms: i64) -> Result<SettlementSummaryDto, String> {
+pub fn settle_due_series(at_ms: i64) -> Result<SettlementSummaryDto, BridgeErrorDto> {
     client_result(client()?.settle_due_series(at_ms)).map(settlement_to_dto)
 }
 
-pub fn get_task_series_streak(series_id: String, at_ms: i64) -> Result<StreakDto, String> {
+pub fn get_task_series_streak(series_id: String, at_ms: i64) -> Result<StreakDto, BridgeErrorDto> {
     client_result(client()?.get_series_streak(parse_uuid(&series_id)?, at_ms)).map(streak_to_dto)
 }
 
-pub fn rename_list(list_id: String, name: String) -> Result<ListDto, String> {
+pub fn rename_list(list_id: String, name: String) -> Result<ListDto, BridgeErrorDto> {
     let list_id = parse_uuid(&list_id)?;
     client_result(client()?.rename_list(list_id, name)).map(list_to_dto)
 }
 
-pub fn archive_list(list_id: String) -> Result<ListDto, String> {
+pub fn archive_list(list_id: String) -> Result<ListDto, BridgeErrorDto> {
     let list_id = parse_uuid(&list_id)?;
     client_result(client()?.archive_list(list_id)).map(list_to_dto)
 }
 
-pub fn unarchive_list(list_id: String) -> Result<ListDto, String> {
+pub fn unarchive_list(list_id: String) -> Result<ListDto, BridgeErrorDto> {
     let list_id = parse_uuid(&list_id)?;
     client_result(client()?.unarchive_list(list_id)).map(list_to_dto)
 }
@@ -768,7 +852,7 @@ pub fn create_task(
     priority: Option<i32>,
     scheduled_at: Option<i64>,
     estimated_minutes: Option<i32>,
-) -> Result<TaskDto, String> {
+) -> Result<TaskDto, BridgeErrorDto> {
     let command = CreateTaskCommand {
         list_id: parse_uuid(&list_id)?,
         title,
@@ -786,7 +870,7 @@ pub fn reorder_task(
     task_id: String,
     previous_task_id: Option<String>,
     next_task_id: Option<String>,
-) -> Result<TaskDto, String> {
+) -> Result<TaskDto, BridgeErrorDto> {
     let command = ReorderTaskCommand {
         task_id: parse_uuid(&task_id)?,
         previous_task_id: previous_task_id.as_deref().map(parse_uuid).transpose()?,
@@ -795,54 +879,57 @@ pub fn reorder_task(
     client_result(client()?.reorder_task(command)).map(task_to_dto)
 }
 
-pub fn get_tasks(list_id: String) -> Result<Vec<TaskDto>, String> {
+pub fn get_tasks(list_id: String) -> Result<Vec<TaskDto>, BridgeErrorDto> {
     let list_id = parse_uuid(&list_id)?;
     client_result(client()?.get_tasks(list_id))
         .map(|tasks| tasks.into_iter().map(task_to_dto).collect())
 }
 
-pub fn get_active_timer_session() -> Result<Option<ActiveTimerSessionDto>, String> {
+pub fn get_active_timer_session() -> Result<Option<ActiveTimerSessionDto>, BridgeErrorDto> {
     client_result(client()?.get_active_timer_session())
         .map(|session| session.map(active_timer_to_dto))
 }
 
 pub fn start_active_timer_session(
     session: ActiveTimerSessionDto,
-) -> Result<ActiveTimerStartOutcomeDto, String> {
+) -> Result<ActiveTimerStartOutcomeDto, BridgeErrorDto> {
     match client()?.start_active_timer_session(parse_active_timer(session)?) {
         Ok(()) => Ok(ActiveTimerStartOutcomeDto::Started),
         Err(ClientError::ActiveTimerConflict(_)) => Ok(ActiveTimerStartOutcomeDto::Conflict),
-        Err(error) => Err(error.to_string()),
+        Err(error) => Err(error.into()),
     }
 }
 
-pub fn update_active_timer_session(session: ActiveTimerSessionDto) -> Result<(), String> {
+pub fn update_active_timer_session(session: ActiveTimerSessionDto) -> Result<(), BridgeErrorDto> {
     client_result(client()?.update_active_timer_session(parse_active_timer(session)?))
 }
 
-pub fn pomodoro_target_reached_at(session: ActiveTimerSessionDto) -> Result<DateTime<Utc>, String> {
+pub fn pomodoro_target_reached_at(
+    session: ActiveTimerSessionDto,
+) -> Result<DateTime<Utc>, BridgeErrorDto> {
     let reached_at = domain_pomodoro_target_reached_at(&parse_active_timer(session)?)
-        .map_err(|error| error.to_string())?;
-    DateTime::<Utc>::from_timestamp_millis(reached_at)
-        .ok_or_else(|| "timer target instant is out of range".to_string())
+        .map_err(|_| BridgeErrorDto::invalid_input())?;
+    DateTime::<Utc>::from_timestamp_millis(reached_at).ok_or_else(BridgeErrorDto::invalid_input)
 }
 
-pub fn discard_active_timer_session(expected_session_id: String) -> Result<bool, String> {
+pub fn discard_active_timer_session(expected_session_id: String) -> Result<bool, BridgeErrorDto> {
     client_result(client()?.discard_active_timer_session(parse_uuid(&expected_session_id)?))
 }
 
-pub fn finish_active_timer_session(session: CompletedTimerSessionDto) -> Result<bool, String> {
+pub fn finish_active_timer_session(
+    session: CompletedTimerSessionDto,
+) -> Result<bool, BridgeErrorDto> {
     client_result(client()?.finish_active_timer_session(parse_completed_timer(session)?))
 }
 
 pub fn get_completed_timer_sessions(
     task_id: String,
-) -> Result<Vec<CompletedTimerSessionDto>, String> {
+) -> Result<Vec<CompletedTimerSessionDto>, BridgeErrorDto> {
     client_result(client()?.get_completed_timer_sessions(parse_uuid(&task_id)?))
         .map(|sessions| sessions.into_iter().map(completed_timer_to_dto).collect())
 }
 
-pub fn search_tasks(query: String) -> Result<Vec<TaskDto>, String> {
+pub fn search_tasks(query: String) -> Result<Vec<TaskDto>, BridgeErrorDto> {
     client_result(client()?.search_tasks(&query))
         .map(|tasks| tasks.into_iter().map(task_to_dto).collect())
 }
@@ -850,23 +937,23 @@ pub fn search_tasks(query: String) -> Result<Vec<TaskDto>, String> {
 pub fn get_home_tasks(
     today_start_ms: i64,
     tomorrow_start_ms: i64,
-) -> Result<Vec<HomeTaskDto>, String> {
+) -> Result<Vec<HomeTaskDto>, BridgeErrorDto> {
     client_result(client()?.get_home_tasks(today_start_ms, tomorrow_start_ms))
         .map(|tasks| tasks.into_iter().map(home_task_to_dto).collect())
 }
 
 pub fn get_calendar_occurrences(
     range: CalendarRangeInput,
-) -> Result<Vec<CalendarOccurrenceDto>, String> {
+) -> Result<Vec<CalendarOccurrenceDto>, BridgeErrorDto> {
     let range = CalendarRange::new(
-        CivilDate::parse(range.start_on).map_err(|error| error.to_string())?,
-        CivilDate::parse(range.end_on).map_err(|error| error.to_string())?,
+        CivilDate::parse(range.start_on).map_err(|_| BridgeErrorDto::invalid_input())?,
+        CivilDate::parse(range.end_on).map_err(|_| BridgeErrorDto::invalid_input())?,
         UtcInstant::from_millis(range.start_at.timestamp_millis())
-            .map_err(|error| error.to_string())?,
+            .map_err(|_| BridgeErrorDto::invalid_input())?,
         UtcInstant::from_millis(range.end_at.timestamp_millis())
-            .map_err(|error| error.to_string())?,
+            .map_err(|_| BridgeErrorDto::invalid_input())?,
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(|_| BridgeErrorDto::invalid_input())?;
     client_result(client()?.get_calendar_occurrences(range)).map(|occurrences| {
         occurrences
             .into_iter()
@@ -875,12 +962,12 @@ pub fn get_calendar_occurrences(
     })
 }
 
-pub fn count_task_descendants(task_id: String) -> Result<i32, String> {
+pub fn count_task_descendants(task_id: String) -> Result<i32, BridgeErrorDto> {
     let task_id = parse_uuid(&task_id)?;
     client_result(client()?.count_task_descendants(task_id)).and_then(count_to_i32)
 }
 
-pub fn count_tasks_in_list(list_id: String) -> Result<i32, String> {
+pub fn count_tasks_in_list(list_id: String) -> Result<i32, BridgeErrorDto> {
     let list_id = parse_uuid(&list_id)?;
     client_result(client()?.count_tasks_in_list(list_id)).and_then(count_to_i32)
 }
@@ -893,7 +980,7 @@ pub fn update_task(
     due: Option<TaskDueInput>,
     scheduled_at: Option<i64>,
     estimated_minutes: Option<i32>,
-) -> Result<TaskDto, String> {
+) -> Result<TaskDto, BridgeErrorDto> {
     let command = UpdateTaskCommand {
         task_id: parse_uuid(&task_id)?,
         title,
@@ -910,7 +997,7 @@ pub fn set_task_status(
     task_id: String,
     status: String,
     closed_reason: Option<String>,
-) -> Result<TaskDto, String> {
+) -> Result<TaskDto, BridgeErrorDto> {
     let command = SetTaskStatusCommand {
         task_id: parse_uuid(&task_id)?,
         status: parse_status(&status)?,
@@ -919,85 +1006,94 @@ pub fn set_task_status(
     client_result(client()?.set_task_status(command)).map(task_to_dto)
 }
 
-pub fn delete_task(task_id: String) -> Result<(), String> {
+pub fn delete_task(task_id: String) -> Result<(), BridgeErrorDto> {
     let task_id = parse_uuid(&task_id)?;
     client_result(client()?.delete_task(task_id))
 }
 
-pub fn delete_list(list_id: String) -> Result<(), String> {
+pub fn delete_list(list_id: String) -> Result<(), BridgeErrorDto> {
     let list_id = parse_uuid(&list_id)?;
     client_result(client()?.delete_list(list_id))
 }
 
-pub fn get_latest_task_undo() -> Result<Option<TaskUndoDto>, String> {
+pub fn get_latest_task_undo() -> Result<Option<TaskUndoDto>, BridgeErrorDto> {
     client_result(client()?.get_latest_task_undo()).map(|entry| entry.map(task_undo_to_dto))
 }
 
-pub fn undo_task_operation(undo_id: String) -> Result<TaskDto, String> {
+pub fn undo_task_operation(undo_id: String) -> Result<TaskDto, BridgeErrorDto> {
     let undo_id = parse_uuid(&undo_id)?;
     client_result(client()?.undo_task_operation(undo_id)).map(task_to_dto)
 }
 
-pub fn get_frontend_setting(key: FrontendSettingKeyDto) -> Result<Option<String>, String> {
+pub fn get_frontend_setting(key: FrontendSettingKeyDto) -> Result<Option<String>, BridgeErrorDto> {
     client_result(client()?.get_frontend_setting(key.into()))
 }
 
-pub fn set_frontend_setting(key: FrontendSettingKeyDto, value: String) -> Result<(), String> {
+pub fn set_frontend_setting(
+    key: FrontendSettingKeyDto,
+    value: String,
+) -> Result<(), BridgeErrorDto> {
     client_result(client()?.set_frontend_setting(key.into(), &value))
 }
 
-pub fn create_task_reminder(task_id: String, remind_at: i64) -> Result<ReminderDto, String> {
+pub fn create_task_reminder(
+    task_id: String,
+    remind_at: i64,
+) -> Result<ReminderDto, BridgeErrorDto> {
     let task_id = parse_uuid(&task_id)?;
     client_result(client()?.create_task_reminder(task_id, remind_at)).map(reminder_to_dto)
 }
 
-pub fn update_reminder(reminder_id: String, remind_at: i64) -> Result<ReminderDto, String> {
+pub fn update_reminder(reminder_id: String, remind_at: i64) -> Result<ReminderDto, BridgeErrorDto> {
     let reminder_id = parse_uuid(&reminder_id)?;
     client_result(client()?.update_reminder(reminder_id, remind_at)).map(reminder_to_dto)
 }
 
-pub fn delete_reminder(reminder_id: String) -> Result<ReminderDto, String> {
+pub fn delete_reminder(reminder_id: String) -> Result<ReminderDto, BridgeErrorDto> {
     let reminder_id = parse_uuid(&reminder_id)?;
     client_result(client()?.delete_reminder(reminder_id)).map(reminder_to_dto)
 }
 
-pub fn clear_task_reminders(task_id: String) -> Result<Vec<ReminderDto>, String> {
+pub fn clear_task_reminders(task_id: String) -> Result<Vec<ReminderDto>, BridgeErrorDto> {
     let task_id = parse_uuid(&task_id)?;
     client_result(client()?.clear_task_reminders(task_id))
         .map(|reminders| reminders.into_iter().map(reminder_to_dto).collect())
 }
 
-pub fn get_task_reminders(task_id: String) -> Result<Vec<ReminderDto>, String> {
+pub fn get_task_reminders(task_id: String) -> Result<Vec<ReminderDto>, BridgeErrorDto> {
     let task_id = parse_uuid(&task_id)?;
     client_result(client()?.get_task_reminders(task_id))
         .map(|reminders| reminders.into_iter().map(reminder_to_dto).collect())
 }
 
-pub fn get_task_subtree_reminders(task_id: String) -> Result<Vec<ReminderDto>, String> {
+pub fn get_task_subtree_reminders(task_id: String) -> Result<Vec<ReminderDto>, BridgeErrorDto> {
     let task_id = parse_uuid(&task_id)?;
     client_result(client()?.get_task_subtree_reminders(task_id))
         .map(|reminders| reminders.into_iter().map(reminder_to_dto).collect())
 }
 
-pub fn get_list_reminders(list_id: String) -> Result<Vec<ReminderDto>, String> {
+pub fn get_list_reminders(list_id: String) -> Result<Vec<ReminderDto>, BridgeErrorDto> {
     let list_id = parse_uuid(&list_id)?;
     client_result(client()?.get_list_reminders(list_id))
         .map(|reminders| reminders.into_iter().map(reminder_to_dto).collect())
 }
 
-pub fn list_pending_reminders(now_ms: i64) -> Result<Vec<ReminderDto>, String> {
+pub fn list_pending_reminders(now_ms: i64) -> Result<Vec<ReminderDto>, BridgeErrorDto> {
     client_result(client()?.list_pending_reminders(now_ms))
         .map(|reminders| reminders.into_iter().map(reminder_to_dto).collect())
 }
 
-pub fn snooze_reminder(reminder_id: String, snoozed_until: i64) -> Result<ReminderDto, String> {
+pub fn snooze_reminder(
+    reminder_id: String,
+    snoozed_until: i64,
+) -> Result<ReminderDto, BridgeErrorDto> {
     let reminder_id = parse_uuid(&reminder_id)?;
     client_result(client()?.snooze_reminder(reminder_id, snoozed_until)).map(reminder_to_dto)
 }
 
 pub fn prepare_reminder_notification_reconciliation(
     now_ms: i64,
-) -> Result<Vec<ReminderNotificationCommandDto>, String> {
+) -> Result<Vec<ReminderNotificationCommandDto>, BridgeErrorDto> {
     client_result(client()?.prepare_reminder_notification_reconciliation(now_ms)).map(|commands| {
         commands
             .into_iter()
@@ -1009,8 +1105,8 @@ pub fn prepare_reminder_notification_reconciliation(
 pub fn list_reminder_notification_commands(
     now_ms: i64,
     limit: u32,
-) -> Result<Vec<ReminderNotificationCommandDto>, String> {
-    let limit = usize::try_from(limit).map_err(|_| "invalid command limit".to_string())?;
+) -> Result<Vec<ReminderNotificationCommandDto>, BridgeErrorDto> {
+    let limit = usize::try_from(limit).map_err(|_| BridgeErrorDto::invalid_input())?;
     client_result(client()?.list_reminder_notification_commands(now_ms, limit)).map(|commands| {
         commands
             .into_iter()
@@ -1022,7 +1118,7 @@ pub fn list_reminder_notification_commands(
 pub fn ack_reminder_notification_command(
     reminder_id: String,
     revision: i64,
-) -> Result<bool, String> {
+) -> Result<bool, BridgeErrorDto> {
     let reminder_id = parse_uuid(&reminder_id)?;
     client_result(client()?.ack_reminder_notification_command(reminder_id, revision))
 }
@@ -1046,156 +1142,51 @@ fn reminder_notification_command_to_dto(
 
 #[cfg(test)]
 mod tests {
-    use std::future::Future;
-
     use super::*;
 
-    fn assert_result_future<T>(future: impl Future<Output = Result<T, String>>) {
-        drop(future);
-    }
-
     #[test]
-    #[allow(clippy::type_complexity)]
-    fn all_public_function_signatures_remain_stable() {
-        let _: fn(String) -> String = greet;
-        let _: fn() -> Result<String, String> = get_local_time_zone;
-        let _: fn(String) -> String = create_draft_task;
-        let _: fn(String, String) -> Result<(), String> = init_core;
-        let _: fn() -> Result<i64, String> = rotate_device_key;
-        let _: fn() -> Result<String, String> = get_sync_server_url;
-        let _: fn(String) -> Result<(), String> = set_sync_server_url;
-        let _: fn() -> Result<AccountSessionStateDto, String> = get_account_session_state;
-        assert_result_future(account_registration_begin(String::new(), None));
-        let _: fn() -> Result<Option<AccountRegistrationStateDto>, String> =
-            account_registration_state;
-        let _: fn() -> Result<(), String> = account_registration_cancel;
-        assert_result_future(account_registration_resend());
-        assert_result_future(account_registration_verify_otp(String::new()));
-        assert_result_future(account_registration_complete(String::new(), None));
-        let _: fn() -> Result<(), String> = account_registration_ack_recovery_key;
-        let _: fn() -> Result<Option<String>, String> = account_registration_recovery_key;
-        assert_result_future(account_login(String::new(), String::new(), None, None));
-        assert_result_future(account_logout());
-        assert_result_future(organization_safety_number(String::new(), String::new()));
-        assert_result_future(confirm_organization_safety_number(
-            String::new(),
-            String::new(),
-            String::new(),
-        ));
-        let _: fn() -> Result<SyncStatusDto, String> = get_sync_status;
-        assert_result_future(sync_now());
-        assert_result_future(sync_now_outcome());
-        assert_result_future(billing_bootstrap());
-        assert_result_future(refresh_billing());
-        let _: fn() -> Result<Option<BillingStateDto>, String> = get_cached_billing;
-        assert_result_future(get_realtime_ticket());
-        let _: fn(String, String) -> Result<ListDto, String> = create_list;
-        let _: fn() -> Result<Vec<ListDto>, String> = get_lists;
-        let _: fn() -> Result<Vec<ListDto>, String> = get_archived_lists;
-        let _: fn() -> Result<Vec<TemplateDto>, String> = get_templates;
-        let _: fn() -> Result<Vec<TaskSeriesDto>, String> = get_task_series;
-        let _: fn(String, i64, String) -> Result<String, String> = validate_recurrence_rule;
-        let _: fn(String, String, Option<String>) -> Result<TemplateDto, String> =
-            save_task_as_template;
-        let _: fn(
-            String,
-            Option<String>,
-            Vec<TaskBlueprintNodeDto>,
-        ) -> Result<TemplateDto, String> = create_template;
-        let _: fn(
-            String,
-            String,
-            Option<String>,
-            Vec<TaskBlueprintNodeDto>,
-        ) -> Result<TemplateDto, String> = update_template;
-        let _: fn(String, String) -> Result<TemplateDto, String> = replace_template_blueprint;
-        let _: fn(String) -> Result<Vec<TaskDto>, String> = instantiate_template;
-        let _: fn(String, String, i64, String) -> Result<TaskSeriesDto, String> =
-            create_task_series_from_template;
-        let _: fn(String, Option<String>, String, i64, String) -> Result<TaskSeriesDto, String> =
-            create_task_series_from_task;
-        let _: fn(
-            String,
-            Option<String>,
-            Vec<TaskBlueprintNodeDto>,
-            String,
-            i64,
-            String,
-            bool,
-        ) -> Result<TaskSeriesDto, String> = update_task_series;
-        let _: fn(String) -> Result<(), String> = delete_task_series;
-        let _: fn(String) -> Result<(), String> = delete_template;
-        let _: fn(i64) -> Result<SettlementSummaryDto, String> = settle_due_series;
-        let _: fn(String, i64) -> Result<StreakDto, String> = get_task_series_streak;
-        let _: fn(String, String) -> Result<ListDto, String> = rename_list;
-        let _: fn(String) -> Result<ListDto, String> = archive_list;
-        let _: fn(String) -> Result<ListDto, String> = unarchive_list;
-        let _: fn(
-            String,
-            String,
-            Option<String>,
-            Option<TaskDueInput>,
-            Option<String>,
-            Option<i32>,
-            Option<i64>,
-            Option<i32>,
-        ) -> Result<TaskDto, String> = create_task;
-        let _: fn(String, Option<String>, Option<String>) -> Result<TaskDto, String> = reorder_task;
-        let _: fn(String) -> Result<Vec<TaskDto>, String> = get_tasks;
-        let _: fn() -> Result<Option<ActiveTimerSessionDto>, String> = get_active_timer_session;
-        let _: fn(ActiveTimerSessionDto) -> Result<ActiveTimerStartOutcomeDto, String> =
-            start_active_timer_session;
-        let _: fn(ActiveTimerSessionDto) -> Result<(), String> = update_active_timer_session;
-        let _: fn(ActiveTimerSessionDto) -> Result<DateTime<Utc>, String> =
-            pomodoro_target_reached_at;
-        let _: fn(String) -> Result<bool, String> = discard_active_timer_session;
-        let _: fn(CompletedTimerSessionDto) -> Result<bool, String> = finish_active_timer_session;
-        let _: fn(String) -> Result<Vec<CompletedTimerSessionDto>, String> =
-            get_completed_timer_sessions;
-        let _: fn(String) -> Result<Vec<TaskDto>, String> = search_tasks;
-        let _: fn(i64, i64) -> Result<Vec<HomeTaskDto>, String> = get_home_tasks;
-        let _: fn(CalendarRangeInput) -> Result<Vec<CalendarOccurrenceDto>, String> =
-            get_calendar_occurrences;
-        let _: fn(String) -> Result<i32, String> = count_task_descendants;
-        let _: fn(String) -> Result<i32, String> = count_tasks_in_list;
-        let _: fn(
-            String,
-            String,
-            String,
-            i32,
-            Option<TaskDueInput>,
-            Option<i64>,
-            Option<i32>,
-        ) -> Result<TaskDto, String> = update_task;
-        let _: fn(String, String, Option<String>) -> Result<TaskDto, String> = set_task_status;
-        let _: fn(String) -> Result<(), String> = delete_task;
-        let _: fn(String) -> Result<(), String> = delete_list;
-        let _: fn() -> Result<Option<TaskUndoDto>, String> = get_latest_task_undo;
-        let _: fn(String) -> Result<TaskDto, String> = undo_task_operation;
-        let _: fn(FrontendSettingKeyDto) -> Result<Option<String>, String> = get_frontend_setting;
-        let _: fn(FrontendSettingKeyDto, String) -> Result<(), String> = set_frontend_setting;
-        let _: fn(String, i64) -> Result<ReminderDto, String> = create_task_reminder;
-        let _: fn(String, i64) -> Result<ReminderDto, String> = update_reminder;
-        let _: fn(String) -> Result<ReminderDto, String> = delete_reminder;
-        let _: fn(String) -> Result<Vec<ReminderDto>, String> = clear_task_reminders;
-        let _: fn(String) -> Result<Vec<ReminderDto>, String> = get_task_reminders;
-        let _: fn(String) -> Result<Vec<ReminderDto>, String> = get_task_subtree_reminders;
-        let _: fn(String) -> Result<Vec<ReminderDto>, String> = get_list_reminders;
-        let _: fn(i64) -> Result<Vec<ReminderDto>, String> = list_pending_reminders;
-        let _: fn(String, i64) -> Result<ReminderDto, String> = snooze_reminder;
-        let _: fn(i64) -> Result<Vec<ReminderNotificationCommandDto>, String> =
-            prepare_reminder_notification_reconciliation;
-        let _: fn(i64, u32) -> Result<Vec<ReminderNotificationCommandDto>, String> =
-            list_reminder_notification_commands;
-        let _: fn(String, i64) -> Result<bool, String> = ack_reminder_notification_command;
-    }
-
-    #[test]
-    fn draft_task_json_escapes_title_without_lower_layer_dependencies() {
-        let json = create_draft_task("quote \" slash \\ line\n牛乳".to_string());
-        assert!(json.contains("\"title\":\"quote \\\" slash \\\\ line\\n牛乳\""));
-        assert!(json.contains("\"status\":\"todo\""));
-        assert!(json.ends_with("\"updated_at\":0}"));
+    fn internal_error_details_are_reduced_to_allowlisted_codes() {
+        let cases = [
+            (
+                ClientError::Unauthorized,
+                BridgeErrorCodeDto::Unauthorized,
+                false,
+            ),
+            (
+                ClientError::AccountRequest,
+                BridgeErrorCodeDto::Internal,
+                false,
+            ),
+            (
+                ClientError::CredentialUnavailable,
+                BridgeErrorCodeDto::CredentialUnavailable,
+                false,
+            ),
+            (
+                ClientError::UpgradeRequired,
+                BridgeErrorCodeDto::UpgradeRequired,
+                false,
+            ),
+            (ClientError::ProfileBusy, BridgeErrorCodeDto::Busy, true),
+            (
+                ClientError::LocalKeyState,
+                BridgeErrorCodeDto::CryptoUnavailable,
+                false,
+            ),
+            (
+                ClientError::Io(std::io::Error::other(
+                    "/private/profile/path must remain secret",
+                )),
+                BridgeErrorCodeDto::StorageFailure,
+                false,
+            ),
+        ];
+        for (source, code, retryable) in cases {
+            let mapped = BridgeErrorDto::from(source);
+            assert_eq!(mapped.code, code);
+            assert_eq!(mapped.retryable, retryable);
+            assert!(mapped.arguments.is_empty());
+        }
     }
 
     #[test]
@@ -1211,7 +1202,11 @@ mod tests {
         });
         assert!(matches!(
             invalid_date,
-            Err(error) if error.contains("invalid civil date")
+            Err(BridgeErrorDto {
+                code: BridgeErrorCodeDto::InvalidInput,
+                arguments,
+                retryable: false,
+            }) if arguments.is_empty()
         ));
 
         let reversed = get_calendar_occurrences(CalendarRangeInput {
@@ -1222,7 +1217,11 @@ mod tests {
         });
         assert!(matches!(
             reversed,
-            Err(error) if error.contains("calendar range")
+            Err(BridgeErrorDto {
+                code: BridgeErrorCodeDto::InvalidInput,
+                arguments,
+                retryable: false,
+            }) if arguments.is_empty()
         ));
     }
 }

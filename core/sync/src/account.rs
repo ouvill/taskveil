@@ -45,8 +45,10 @@ pub enum AccountClientError {
     EmptyServerUrl,
     #[error("server URL is not a secure origin")]
     InvalidServerOrigin,
-    #[error("HTTP request failed")]
-    Http(#[from] reqwest::Error),
+    #[error("HTTP transport failed")]
+    Transport(#[from] reqwest::Error),
+    #[error("server response could not be decoded")]
+    ProtocolDecode(#[source] reqwest::Error),
     #[error("server returned account error with HTTP status {0}")]
     Server(u16),
     #[error("remote session is no longer refreshable")]
@@ -57,6 +59,8 @@ pub enum AccountClientError {
     Base64,
     #[error("OPAQUE protocol error")]
     Opaque,
+    #[error("authentication was rejected")]
+    AuthRejected,
     #[error("key hierarchy error")]
     KeyHierarchy(#[from] KeyHierarchyError),
     #[error("key manifest error")]
@@ -1017,7 +1021,7 @@ impl AccountClient {
                 server_message,
                 opaque_login_parameters(),
             )
-            .map_err(|_| AccountClientError::Opaque)?;
+            .map_err(|_| AccountClientError::AuthRejected)?;
         let mut export_key = Zeroizing::new(client_finish.export_key.to_vec());
         let response = self
             .post_json::<LoginFinishResponse>(
@@ -1133,7 +1137,7 @@ impl AccountClient {
             .json::<TokenResponse>()
             .await
             .map(TokenResponse::into_account_token_set)
-            .map_err(AccountClientError::Http)
+            .map_err(AccountClientError::ProtocolDecode)
     }
 
     pub async fn logout(&self, refresh_token: &str) -> Result<(), AccountClientError> {
@@ -1384,7 +1388,10 @@ impl AccountClient {
         if !response.status().is_success() {
             return Err(account_response_error(response.status()));
         }
-        response.json().await.map_err(AccountClientError::Http)
+        response
+            .json()
+            .await
+            .map_err(AccountClientError::ProtocolDecode)
     }
 
     pub async fn acknowledge_key_generation(
@@ -1476,7 +1483,10 @@ impl AccountClient {
         if !response.status().is_success() {
             return Err(account_response_error(response.status()));
         }
-        response.json::<T>().await.map_err(AccountClientError::Http)
+        response
+            .json::<T>()
+            .await
+            .map_err(AccountClientError::ProtocolDecode)
     }
 
     async fn get_protocol_json<T: for<'de> Deserialize<'de>>(
@@ -1497,7 +1507,10 @@ impl AccountClient {
         if !response.status().is_success() {
             return Err(account_response_error(response.status()));
         }
-        response.json().await.map_err(AccountClientError::Http)
+        response
+            .json()
+            .await
+            .map_err(AccountClientError::ProtocolDecode)
     }
 
     async fn post_protocol_json<T: for<'de> Deserialize<'de>>(
@@ -1520,7 +1533,10 @@ impl AccountClient {
         if !response.status().is_success() {
             return Err(account_response_error(response.status()));
         }
-        response.json().await.map_err(AccountClientError::Http)
+        response
+            .json()
+            .await
+            .map_err(AccountClientError::ProtocolDecode)
     }
 
     async fn delete_protocol(
@@ -1561,7 +1577,10 @@ impl AccountClient {
         if !response.status().is_success() {
             return Err(account_response_error(response.status()));
         }
-        response.json::<T>().await.map_err(AccountClientError::Http)
+        response
+            .json::<T>()
+            .await
+            .map_err(AccountClientError::ProtocolDecode)
     }
 
     async fn post_json_bytes_with_idempotency<T: for<'de> Deserialize<'de>>(

@@ -59,6 +59,29 @@ if grep -En 'pub[[:space:]]+fn[[:space:]]+(get_setting|set_setting)[[:space:]]*\
   fail 'app/rust/src/api.rs: raw string-key settings APIs must not cross the frontend boundary'
 fi
 
+if grep -En 'Result<[^>]*(>|[[:space:]]),[[:space:]]*String>|map_err\([^)]*to_string' \
+  "$root/app/rust/src/api.rs" "$root/app/rust/src/api/conversions.rs" >/dev/null; then
+  fail 'app/rust/src: public FRB failures must use BridgeErrorDto, not internal strings'
+fi
+
+if grep -En 'pub[[:space:]]+fn[[:space:]]+(greet|create_draft_task)[[:space:]]*\(' \
+  "$root/app/rust/src/api.rs" >/dev/null; then
+  fail 'app/rust/src/api.rs: toy functions must not be exposed in the production FRB surface'
+fi
+
+if grep -ERin --include='*.dart' \
+  '(^|[^A-Za-z0-9_])(error|_error)[.]toString[(][)]' "$root/app/lib" >/dev/null; then
+  fail 'app/lib: user-facing failures must localize BridgeErrorDto codes, not raw error strings'
+fi
+
+if find "$root/app/lib/src" \
+  -type d -path '*/generated' -prune -o \
+  -type f -name '*.dart' \
+  -exec grep -En '[$][{]?(_?error|exception)([}]|[^A-Za-z0-9_])' {} + \
+  >/dev/null; then
+  fail 'app/lib/src: raw error interpolation must not reach user-facing strings'
+fi
+
 if find "$root" -type d \( -name .git -o -name target -o -name build \) -prune -o \
   -type f -name 'Cargo.toml' -exec grep -En '^name[[:space:]]*=[[:space:]]*"core"' {} + \
   >/dev/null; then

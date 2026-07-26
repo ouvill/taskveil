@@ -2210,7 +2210,7 @@ SyncStatusDto _copySyncStatus(
   bool? running,
   int? lastSuccessAt,
   int? lastFailureAt,
-  String? lastError,
+  BridgeErrorDto? lastError,
 }) {
   return SyncStatusDto(
     loggedIn: loggedIn ?? status.loggedIn,

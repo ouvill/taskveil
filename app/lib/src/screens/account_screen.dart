@@ -1347,8 +1347,7 @@ class _SyncStatusSection extends StatelessWidget {
       null => l10n.accountSyncIdle,
       SyncStatusDto(loggedIn: false) => l10n.accountSyncNotSignedIn,
       SyncStatusDto(running: true) => l10n.accountSyncRunning,
-      SyncStatusDto(lastError: final error?) when error.isNotEmpty =>
-        l10n.accountSyncFailed,
+      SyncStatusDto(lastError: _?) => l10n.accountSyncFailed,
       _ => l10n.accountSyncIdle,
     };
     return Column(
@@ -1369,7 +1368,7 @@ class _SyncStatusSection extends StatelessWidget {
                         height: 8,
                         decoration: BoxDecoration(
                           shape: BoxShape.circle,
-                          color: status?.lastError?.isNotEmpty == true
+                          color: status?.lastError != null
                               ? Theme.of(context).colorScheme.error
                               : Theme.of(context).colorScheme.primary,
                         ),

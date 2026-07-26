@@ -14,6 +14,7 @@ import 'package:taskveil/src/rust/api.dart';
 import 'package:taskveil/src/screens/templates_screen.dart'
     show showTaskSeriesDialog;
 import 'package:taskveil/src/ui/dialogs.dart';
+import 'package:taskveil/src/ui/bridge_error_messages.dart';
 import 'package:taskveil/src/ui/states.dart';
 import 'package:taskveil/src/ui/task_components.dart';
 import 'package:taskveil/src/ui/theme.dart';
@@ -78,8 +79,9 @@ class TaskDetailScreen extends ConsumerWidget {
       ),
       body: tasksAsync.when(
         loading: () => const AppLoadingState(),
-        error: (error, stackTrace) =>
-            AppErrorState(message: l10n.failedToLoadTask(error.toString())),
+        error: (error, stackTrace) => AppErrorState(
+          message: l10n.failedToLoadTask(bridgeErrorMessage(l10n, error)),
+        ),
         data: (tasks) {
           final task = _findTaskById(tasks, taskId);
           if (task == null) {
@@ -447,7 +449,9 @@ class TaskDetailScreen extends ConsumerWidget {
         final l10n = AppLocalizations.of(context)!;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(l10n.failedToSaveTask(error.toString())),
+            content: Text(
+              l10n.failedToSaveTask(bridgeErrorMessage(l10n, error)),
+            ),
             margin: const EdgeInsets.all(AppSpacing.md),
           ),
         );
@@ -941,7 +945,7 @@ class TaskDetailScreen extends ConsumerWidget {
       if (context.mounted) {
         _showReminderMessage(
           context,
-          l10n.failedToSaveReminder(error.toString()),
+          l10n.failedToSaveReminder(bridgeErrorMessage(l10n, error)),
         );
       }
       return null;
@@ -964,7 +968,7 @@ class TaskDetailScreen extends ConsumerWidget {
       if (context.mounted) {
         _showReminderMessage(
           context,
-          l10n.failedToSaveReminder(error.toString()),
+          l10n.failedToSaveReminder(bridgeErrorMessage(l10n, error)),
         );
       }
       return false;
@@ -1229,7 +1233,7 @@ Future<void> _applyUndo(
       SnackBar(
         duration: const Duration(seconds: 4),
         persist: false,
-        content: Text(l10n.undoFailedMessage(error.toString())),
+        content: Text(l10n.undoFailedMessage(bridgeErrorMessage(l10n, error))),
         margin: const EdgeInsets.all(AppSpacing.md),
       ),
     );
