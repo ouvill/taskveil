@@ -176,6 +176,18 @@ jobs:
         with:
           toolchain: 1.97.0
 
+      - name: Restore profile coordination build cache
+        id: profile-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-profile-rust-1.97.0-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-profile-rust-1.97.0-
+
       - name: Prepare owner-only Windows test profiles
         if: runner.os == 'Windows'
         shell: pwsh
@@ -211,6 +223,16 @@ jobs:
           cargo test -p taskveil-client windows_existing_lockfiles_reject_explicit_untrusted_write_access -- --nocapture
           cargo test -p taskveil-client windows_existing_database_rejects_explicit_untrusted_write_access -- --nocapture
           cargo test -p taskveil-client windows_junction_alias_shares_the_same_real_process_lock -- --nocapture
+
+      - name: Save profile coordination build cache
+        if: always() && steps.profile-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.profile-cache.outputs.cache-primary-key }}
 
   sqlx-metadata:
     name: SQLx metadata freshness
