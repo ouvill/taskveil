@@ -51,6 +51,12 @@ do
       fail "$source: registered handler $handler has no async function declaration"
     elif ! printf '%s\n' "$signature" | grep -q 'AuthorizedSyncRequest'; then
       fail "$source: registered handler $handler bypasses AuthorizedSyncRequest"
+    else
+      before_authorization="${signature%%AuthorizedSyncRequest*}"
+      if printf '%s\n' "$before_authorization" |
+        grep -E 'Query<|Path<|Json<|Extension<' >/dev/null; then
+        fail "$source: registered handler $handler validates request input before authorization"
+      fi
     fi
   done
 

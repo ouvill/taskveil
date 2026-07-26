@@ -34,6 +34,21 @@ expect_failure missing-extractor
 cp "$repo_root/server/src/routes/sync.rs" "$fixture/server/src/routes/sync.rs"
 
 awk '
+  !changed && /authorized: AuthorizedSyncRequest/ {
+    authorization = $0
+    getline
+    print
+    print authorization
+    changed = 1
+    next
+  }
+  { print }
+' "$fixture/server/src/routes/sync.rs" > "$fixture/server/src/routes/sync.rs.next"
+mv "$fixture/server/src/routes/sync.rs.next" "$fixture/server/src/routes/sync.rs"
+expect_failure input-before-authorization
+cp "$repo_root/server/src/routes/sync.rs" "$fixture/server/src/routes/sync.rs"
+
+awk '
   !changed && /Router::new\(\)/ {
     sub(/Router::new\(\)/, "Router::new().route(\"\\/probe\", post(unprotected_probe))")
     changed = 1
