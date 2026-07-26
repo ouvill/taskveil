@@ -8,6 +8,8 @@ trap 'rm -rf "$fixture"' EXIT
 mkdir -p "$fixture/server/src/routes"
 cp "$repo_root/server/src/routes/sync.rs" "$fixture/server/src/routes/sync.rs"
 cp "$repo_root/server/src/routes/realtime.rs" "$fixture/server/src/routes/realtime.rs"
+mkdir -p "$fixture/server/tests"
+cp "$repo_root/server/tests/billing_foundation.rs" "$fixture/server/tests/billing_foundation.rs"
 
 check="$repo_root/tool/ci/check_authorized_sync_routes.sh"
 TASKVEIL_AUTHORIZED_SYNC_ROOT="$fixture" sh "$check"

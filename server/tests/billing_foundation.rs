@@ -26,6 +26,8 @@ use testcontainers_modules::{
 use tower::ServiceExt;
 use uuid::Uuid;
 
+const AUTHORIZATION_MATRIX_ROUTE_COUNT: usize = 14;
+
 #[derive(Clone)]
 struct FakeProvider {
     snapshot: Arc<Mutex<Result<ProviderSnapshot, ProviderError>>>,
@@ -408,6 +410,7 @@ async fn negative_authorization_matrix_covers_every_sync_and_realtime_route() {
             json!(null),
         ),
     ];
+    assert_eq!(cases.len(), AUTHORIZATION_MATRIX_ROUTE_COUNT);
 
     let stale_protocol = SYNC_PROTOCOL_VERSION.checked_add(1).unwrap();
     assert_route_matrix(
@@ -420,6 +423,7 @@ async fn negative_authorization_matrix_covers_every_sync_and_realtime_route() {
         "session",
     )
     .await;
+    assert_policy_precedes_request_validation(&fixture).await;
 
     query("UPDATE access_tokens SET revoked_at = now() WHERE family_id = $1")
         .bind(fixture.family_id)
@@ -511,6 +515,55 @@ async fn negative_authorization_matrix_covers_every_sync_and_realtime_route() {
         "protocol",
     )
     .await;
+}
+
+async fn assert_policy_precedes_request_validation(fixture: &Fixture) {
+    let tenant = fixture.tenant_id;
+    let malformed_cases = [
+        (
+            Method::GET,
+            format!("/v2/tenants/{tenant}/preflight?since=not-an-integer"),
+            Body::empty(),
+        ),
+        (
+            Method::GET,
+            format!("/v2/tenants/{tenant}/pull?since=not-an-integer"),
+            Body::empty(),
+        ),
+        (
+            Method::GET,
+            format!("/v2/tenants/{tenant}/resync/base?generation=not-an-integer"),
+            Body::empty(),
+        ),
+        (
+            Method::POST,
+            format!("/v2/tenants/{tenant}/push"),
+            Body::from("{not-json"),
+        ),
+        (
+            Method::POST,
+            format!("/v2/tenants/{tenant}/devices/not-a-uuid/key-expiry"),
+            Body::from("{not-json"),
+        ),
+    ];
+
+    for (method, path, body) in malformed_cases {
+        let (status, response) = fixture
+            .request_with_policy_headers(
+                method,
+                &path,
+                body,
+                Some("not-a-session"),
+                Some(SYNC_PROTOCOL_VERSION.checked_add(1).unwrap()),
+            )
+            .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "validation order: {path}");
+        assert_eq!(
+            response,
+            json!({"error": "unauthorized"}),
+            "validation order: {path}"
+        );
+    }
 }
 
 async fn assert_route_matrix(

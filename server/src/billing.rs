@@ -621,8 +621,20 @@ pub async fn authenticate_sync_request(
     bearer_token: &str,
     tenant_id: Uuid,
 ) -> Result<auth::AuthContext, AppError> {
-    let context = auth::authenticate(pool, bearer_token, tenant_id).await?;
-    require_sync_entitlement(pool, billing.environment(), tenant_id, context.user_id).await?;
+    let mut tx = pool.begin().await?;
+    let context = auth::authenticate_in_transaction(&mut tx, bearer_token, tenant_id).await?;
+    let entitlement = require_sync_entitlement_in_transaction(
+        &mut tx,
+        billing.environment(),
+        tenant_id,
+        context.user_id,
+    )
+    .await;
+    // Preserve the existing authenticated-request last_seen semantics even
+    // when entitlement denies the request. The authorization gates still
+    // share one transaction and its user/tenant RLS context.
+    tx.commit().await?;
+    entitlement?;
     Ok(context)
 }
 
@@ -633,13 +645,24 @@ pub async fn require_sync_entitlement(
     user_id: Uuid,
 ) -> Result<(), AppError> {
     let mut tx = pool.begin().await?;
-    db::set_user_context(&mut tx, user_id).await?;
-    db::set_tenant_context(&mut tx, tenant_id).await?;
+    require_sync_entitlement_in_transaction(&mut tx, environment, tenant_id, user_id).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn require_sync_entitlement_in_transaction(
+    tx: &mut PgTransaction<'_>,
+    environment: BillingEnvironment,
+    tenant_id: Uuid,
+    user_id: Uuid,
+) -> Result<(), AppError> {
+    db::set_user_context(tx, user_id).await?;
+    db::set_tenant_context(tx, tenant_id).await?;
     let tenant = sqlx::query!(
         "SELECT kind, owner_user_id FROM tenants WHERE id = $1",
         tenant_id
     )
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?
     .ok_or_else(AppError::invalid_bearer_token)?;
     if tenant.kind != "personal" {
@@ -657,9 +680,8 @@ pub async fn require_sync_entitlement(
         user_id,
         environment.as_str()
     )
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?;
-    tx.commit().await?;
     let Some(row) = row else {
         return Err(AppError::payment_required("entitlement_required"));
     };

@@ -11,8 +11,8 @@ pub fn router() -> Router<SharedState> {
 }
 
 async fn ticket(
-    Extension(realtime): Extension<RealtimeGateway>,
     authorized: AuthorizedSyncRequest,
+    Extension(realtime): Extension<RealtimeGateway>,
 ) -> Result<Json<RealtimeTicketResponse>, AppError> {
     let Some(response) =
         realtime.issue_ticket(authorized.tenant_id, authorized.auth_context.device_id)

@@ -141,8 +141,8 @@ async fn active_key_bundle(
 
 async fn preflight(
     State(state): State<SharedState>,
-    Query(query): Query<PreflightQuery>,
     authorized: AuthorizedSyncRequest,
+    Query(query): Query<PreflightQuery>,
 ) -> Result<Response, AppError> {
     let capabilities = sync::preflight(
         &state.pool,
@@ -190,8 +190,8 @@ async fn begin_full_resync(
 
 async fn scan_base(
     State(state): State<SharedState>,
-    Query(query): Query<BaseScanQuery>,
     authorized: AuthorizedSyncRequest,
+    Query(query): Query<BaseScanQuery>,
 ) -> Result<Json<BaseScanResponse>, AppError> {
     let cursor = match (query.after_collection, query.after_record_id) {
         (None, None) => None,
@@ -215,8 +215,8 @@ async fn scan_base(
 
 async fn push(
     State(state): State<SharedState>,
-    Extension(realtime): Extension<crate::realtime::RealtimeGateway>,
     authorized: AuthorizedSyncRequest,
+    Extension(realtime): Extension<crate::realtime::RealtimeGateway>,
     Json(request): Json<PushRequest>,
 ) -> Result<Json<PushResponse>, AppError> {
     let tenant_id = authorized.tenant_id;
@@ -237,8 +237,8 @@ fn should_publish(response: &PushResponse) -> bool {
 
 async fn pull(
     State(state): State<SharedState>,
-    Query(query): Query<PullQuery>,
     authorized: AuthorizedSyncRequest,
+    Query(query): Query<PullQuery>,
 ) -> Result<Json<PullResponse>, AppError> {
     sync::pull(
         &state.pool,

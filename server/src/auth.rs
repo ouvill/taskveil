@@ -578,8 +578,18 @@ pub async fn authenticate(
     bearer_token: &str,
     tenant_id: Uuid,
 ) -> Result<AuthContext, AppError> {
-    let token_hash = hash_token(bearer_token);
     let mut tx = pool.begin().await?;
+    let context = authenticate_in_transaction(&mut tx, bearer_token, tenant_id).await?;
+    tx.commit().await?;
+    Ok(context)
+}
+
+pub(crate) async fn authenticate_in_transaction(
+    tx: &mut PgTransaction<'_>,
+    bearer_token: &str,
+    tenant_id: Uuid,
+) -> Result<AuthContext, AppError> {
+    let token_hash = hash_token(bearer_token);
     let row = sqlx::query!(
         "SELECT sf.user_id, sf.device_id, sf.id AS family_id
          FROM access_tokens at
@@ -595,13 +605,13 @@ pub async fn authenticate(
            AND (d.key_expires_at IS NULL OR d.key_expires_at > now())",
         token_hash.as_slice(),
     )
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?
     .ok_or_else(AppError::invalid_bearer_token)?;
 
     let user_id = row.user_id;
     let device_id = row.device_id;
-    db::set_user_context(&mut tx, user_id).await?;
+    db::set_user_context(tx, user_id).await?;
     let membership = sqlx::query_scalar!(
         "SELECT 1
          FROM tenant_members
@@ -609,25 +619,24 @@ pub async fn authenticate(
         tenant_id,
         user_id,
     )
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?;
     if membership.is_none() {
         return Err(AppError::invalid_bearer_token());
     }
-    db::set_tenant_context(&mut tx, tenant_id).await?;
+    db::set_tenant_context(tx, tenant_id).await?;
     sqlx::query!(
         "UPDATE access_tokens SET last_seen_at = now() WHERE token_hash = $1",
         token_hash.as_slice(),
     )
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
     sqlx::query!(
         "UPDATE session_families SET last_seen_at = now() WHERE id = $1",
         row.family_id,
     )
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
-    tx.commit().await?;
 
     Ok(AuthContext { user_id, device_id })
 }

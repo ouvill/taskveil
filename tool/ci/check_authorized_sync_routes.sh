@@ -3,6 +3,7 @@ set -eu
 
 status=0
 root="${TASKVEIL_AUTHORIZED_SYNC_ROOT:-.}"
+registered_route_count=0
 
 fail() {
   printf '%s\n' "$1" >&2
@@ -30,6 +31,7 @@ do
   if [ "$method_count" -ne "$handler_count" ]; then
     fail "$source: every route method must use a named handler"
   fi
+  registered_route_count=$((registered_route_count + handler_count))
 
   for handler in $handlers; do
     signature="$(
@@ -58,5 +60,21 @@ do
     fail "$source: route handlers must not reimplement the shared authorization policy"
   fi
 done
+
+matrix_test="$root/server/tests/billing_foundation.rs"
+if [ ! -f "$matrix_test" ]; then
+  fail "$matrix_test: negative authorization matrix is missing"
+else
+  matrix_route_count="$(
+    sed -n \
+      's/^const AUTHORIZATION_MATRIX_ROUTE_COUNT: usize = \([0-9][0-9]*\);$/\1/p' \
+      "$matrix_test"
+  )"
+  if [ -z "$matrix_route_count" ]; then
+    fail "$matrix_test: AUTHORIZATION_MATRIX_ROUTE_COUNT is missing"
+  elif [ "$registered_route_count" -ne "$matrix_route_count" ]; then
+    fail "$matrix_test: matrix declares $matrix_route_count routes but $registered_route_count are registered"
+  fi
+fi
 
 exit "$status"
