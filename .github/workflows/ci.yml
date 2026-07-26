@@ -133,6 +133,11 @@ jobs:
       - name: Rust test
         run: cargo test --workspace
 
+      - name: Release frontend stubs fail closed
+        run: |
+          cargo build --release -p taskveil-cli -p taskveil-mcp-server
+          sh tool/ci/check_stub_frontends.sh
+
       - name: Save Cargo dependencies and targets
         if: success() && github.event_name != 'pull_request' && steps.rust-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
