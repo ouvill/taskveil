@@ -260,5 +260,9 @@ OS別fail-closed契約は未確定である。本work itemはこれらを
   新規child objectのownerを`TokenUser`ではなく`BUILTIN\Administrators`へ設定する
   Windows標準動作を、製品側が誤って拒否した。owner許可は`TokenUser`、
   `LOCAL SYSTEM`、`BUILTIN\Administrators`だけに限定し、handleから取得したDACLの
-  untrusted writer拒否は維持した。修正後のWindows platform matrixを再検証する。
+  untrusted writer拒否は維持した。さらに、effective access確認へ渡すsecurity
+  descriptorをowner + DACLだけで取得していたため、必須のgroup SIDがなく
+  `AccessCheck`が`ERROR_INVALID_SECURITY_DESCR`を返す原因を特定した。
+  `GROUP_SECURITY_INFORMATION`を含む完全なdescriptorへ修正し、Windows platform
+  matrixを再検証する。
 - 検証者: 独立review agent、Codex root orchestrator

@@ -31,9 +31,9 @@ use windows_sys::Win32::{
         CreateWellKnownSid, DuplicateToken, EqualSid, GetAce, GetLengthSid, GetTokenInformation,
         IsValidSid, SecurityImpersonation, TokenUser, WinBuiltinAdministratorsSid,
         WinCreatorOwnerRightsSid, WinCreatorOwnerSid, WinLocalSystemSid, CONTAINER_INHERIT_ACE,
-        DACL_SECURITY_INFORMATION, GENERIC_MAPPING, INHERIT_ONLY_ACE, OBJECT_INHERIT_ACE,
-        OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_MAX_SID_SIZE,
-        TOKEN_DUPLICATE, TOKEN_QUERY, TOKEN_USER,
+        DACL_SECURITY_INFORMATION, GENERIC_MAPPING, GROUP_SECURITY_INFORMATION, INHERIT_ONLY_ACE,
+        OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+        SECURITY_MAX_SID_SIZE, TOKEN_DUPLICATE, TOKEN_QUERY, TOKEN_USER,
     },
     Storage::FileSystem::{
         GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ADD_FILE,
@@ -617,21 +617,27 @@ fn validate_windows_object_security(
     use windows_sys::Win32::Security::Authorization::{OBJECTS_AND_SID, TRUSTEE_W};
 
     let mut owner: PSID = std::ptr::null_mut();
+    let mut group: PSID = std::ptr::null_mut();
     let mut dacl = std::ptr::null_mut();
     let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
     let status = unsafe {
         GetSecurityInfo(
             object.as_raw_handle() as HANDLE,
             SE_FILE_OBJECT,
-            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
             std::ptr::addr_of_mut!(owner),
-            std::ptr::null_mut(),
+            std::ptr::addr_of_mut!(group),
             std::ptr::addr_of_mut!(dacl),
             std::ptr::null_mut(),
             std::ptr::addr_of_mut!(descriptor),
         )
     };
-    if status != ERROR_SUCCESS || descriptor.is_null() || owner.is_null() || dacl.is_null() {
+    if status != ERROR_SUCCESS
+        || descriptor.is_null()
+        || owner.is_null()
+        || group.is_null()
+        || dacl.is_null()
+    {
         return Err(windows_security_failure("security_descriptor"));
     }
     let _descriptor = LocalAllocation(descriptor);
