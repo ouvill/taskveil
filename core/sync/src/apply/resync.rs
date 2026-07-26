@@ -19,19 +19,20 @@ where
     loop {
         if store
             .load_full_resync()
-            .map_err(|_| "sync failed".to_string())?
+            .map_err(normalize_local_sync_error)?
             .is_none()
         {
+            store.preflight_network_request()?;
             let start = engine
                 .begin_full_resync()
                 .await
                 .map_err(sync_engine_error_to_string)?;
             let mut transaction = store
                 .begin_write_transaction()
-                .map_err(|_| "sync failed".to_string())?;
+                .map_err(normalize_local_sync_error)?;
             transaction
                 .start_full_resync(Uuid::now_v7(), start.generation, start.base_seq, now_ms()?)
-                .map_err(|_| "sync failed".to_string())?;
+                .map_err(normalize_local_sync_error)?;
             transaction.set_setting(
                 SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY,
                 &start.page_token,
@@ -42,13 +43,11 @@ where
                 "",
                 now_ms()?,
             )?;
-            transaction
-                .commit()
-                .map_err(|_| "sync failed".to_string())?;
+            transaction.commit().map_err(normalize_local_sync_error)?;
         }
         let progress = store
             .load_full_resync()
-            .map_err(|_| "sync failed".to_string())?
+            .map_err(normalize_local_sync_error)?
             .ok_or_else(|| "sync failed".to_string())?;
         match progress.phase {
             LocalFullResyncPhase::Base => {
@@ -56,6 +55,7 @@ where
                     .get_setting(SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY)?
                     .filter(|token| !token.is_empty())
                     .ok_or_else(|| "sync failed".to_string())?;
+                store.preflight_network_request()?;
                 let page = match engine
                     .scan_base_page(
                         &page_token,
@@ -115,6 +115,7 @@ where
                 let page_summary = match apply {
                     Ok(summary) => summary,
                     Err(PageApplyError::MissingKey) => {
+                        store.preflight_network_request()?;
                         context.keys = key_refresher.refresh().await?;
                         refreshed_keys = true;
                         match apply_full_resync_page(
@@ -174,6 +175,7 @@ where
                     .get_setting(SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY)?
                     .filter(|token| !token.is_empty())
                     .ok_or_else(|| "sync failed".to_string())?;
+                store.preflight_network_request()?;
                 match engine.complete_resync_base(&completion_token).await {
                     Ok(()) => {}
                     Err(SyncEngineError::ResyncRestartRequired) => {
@@ -191,6 +193,7 @@ where
                 transaction.commit()?;
             }
             LocalFullResyncPhase::Delta => {
+                store.preflight_network_request()?;
                 let page = engine
                     .pull_page_for_generation(
                         progress.delta_cursor,
@@ -226,6 +229,7 @@ where
                 let page_summary = match apply {
                     Ok(summary) => summary,
                     Err(PageApplyError::MissingKey) => {
+                        store.preflight_network_request()?;
                         context.keys = key_refresher.refresh().await?;
                         refreshed_keys = true;
                         match apply_full_resync_page(
@@ -269,17 +273,15 @@ where
             LocalFullResyncPhase::Sweep => {
                 let mut transaction = store
                     .begin_write_transaction()
-                    .map_err(|_| "sync failed".to_string())?;
+                    .map_err(normalize_local_sync_error)?;
                 let swept = transaction
                     .sweep_full_resync_batch(
                         progress.generation_id,
                         FULL_RESYNC_SWEEP_BATCH_LIMIT,
                         now_ms()?,
                     )
-                    .map_err(|_| "sync failed".to_string())?;
-                transaction
-                    .commit()
-                    .map_err(|_| "sync failed".to_string())?;
+                    .map_err(normalize_local_sync_error)?;
+                transaction.commit().map_err(normalize_local_sync_error)?;
                 summary.deleted_count += swept.swept_lists
                     + swept.swept_tasks
                     + swept.swept_templates
@@ -288,13 +290,12 @@ where
                 if swept.scanned_records == 0 {
                     let mut transaction = store
                         .begin_write_transaction()
-                        .map_err(|_| "sync failed".to_string())?;
+                        .map_err(normalize_local_sync_error)?;
                     let high_water = transaction
                         .finalize_full_resync(progress.generation_id, SYNC_CURSOR_NAME, now_ms()?)
-                        .map_err(|_| "sync failed".to_string())?;
-                    transaction
-                        .commit()
-                        .map_err(|_| "sync failed".to_string())?;
+                        .map_err(normalize_local_sync_error)?;
+                    transaction.commit().map_err(normalize_local_sync_error)?;
+                    store.preflight_network_request()?;
                     let closure = engine
                         .pull_page_for_generation(
                             high_water,
@@ -308,6 +309,7 @@ where
                         .clone()
                         .filter(|_| closure.reached_closure())
                         .ok_or_else(|| "sync failed".to_string())?;
+                    store.preflight_network_request()?;
                     engine
                         .ack_continuity(proof)
                         .await
@@ -372,11 +374,11 @@ where
 {
     let progress = store
         .load_full_resync()
-        .map_err(|_| PageApplyError::Hard)?
-        .ok_or(PageApplyError::Hard)?;
+        .map_err(PageApplyError::Hard)?
+        .ok_or_else(|| PageApplyError::Hard("sync failed".to_string()))?;
     let mut transaction = store
         .begin_write_transaction()
-        .map_err(|_| PageApplyError::Hard)?;
+        .map_err(PageApplyError::Hard)?;
     let mut page_summary = SyncRunSummary {
         pulled_count: records.len(),
         ..SyncRunSummary::default()
@@ -384,12 +386,12 @@ where
     for record in records {
         let disposition =
             apply_pull_record(record, context, &mut transaction, now_ms, &mut page_summary)
-                .map_err(|_| PageApplyError::Hard)?;
+                .map_err(PageApplyError::Hard)?;
         match disposition {
             ApplyDisposition::AppliedCurrent | ApplyDisposition::Rebased => {
                 if transaction
                     .delete_quarantine(record.record_id)
-                    .map_err(|_| PageApplyError::Hard)?
+                    .map_err(PageApplyError::Hard)?
                 {
                     page_summary.resolved_quarantine_count += 1;
                 }
@@ -402,7 +404,7 @@ where
                 {
                     return Err(PageApplyError::MissingKey);
                 }
-                let failed_at = now_ms().map_err(|_| PageApplyError::Hard)?;
+                let failed_at = now_ms().map_err(PageApplyError::Hard)?;
                 transaction
                     .put_quarantine(LocalSyncQuarantineEntry {
                         record_id: record.record_id,
@@ -416,7 +418,7 @@ where
                         last_failed_at: failed_at,
                         attempt_count: 1,
                     })
-                    .map_err(|_| PageApplyError::Hard)?;
+                    .map_err(PageApplyError::Hard)?;
                 page_summary.decrypt_failed_count += 1;
                 if matches!(
                     reason,
@@ -434,24 +436,32 @@ where
         // Server presence is independent of decrypt/quarantine success.
         transaction
             .mark_full_resync_record(progress.generation_id, record.collection, record.record_id)
-            .map_err(|_| PageApplyError::Hard)?;
+            .map_err(PageApplyError::Hard)?;
     }
-    finish(&mut transaction).map_err(|_| PageApplyError::Hard)?;
-    transaction.commit().map_err(|_| PageApplyError::Hard)?;
+    finish(&mut transaction).map_err(PageApplyError::Hard)?;
+    transaction.commit().map_err(PageApplyError::Hard)?;
     Ok(page_summary)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum PageApplyError {
     MissingKey,
     UpgradeRequired(u8),
-    Hard,
+    Hard(String),
 }
 
 pub(super) fn page_apply_error_to_string(error: PageApplyError) -> String {
     match error {
         PageApplyError::UpgradeRequired(_) => "upgrade required".to_string(),
-        PageApplyError::MissingKey | PageApplyError::Hard => "sync failed".to_string(),
+        PageApplyError::MissingKey => "sync failed".to_string(),
+        PageApplyError::Hard(error) => normalize_local_sync_error(error),
+    }
+}
+
+fn normalize_local_sync_error(error: String) -> String {
+    match error.as_str() {
+        "sync lease busy" | "sync lease lost" | "database busy" => error,
+        _ => "sync failed".to_string(),
     }
 }
 
@@ -464,4 +474,23 @@ pub(super) fn merge_summary(target: &mut SyncRunSummary, page: SyncRunSummary) {
     target.missing_key_quarantined_count += page.missing_key_quarantined_count;
     target.corruption_quarantined_count += page.corruption_quarantined_count;
     target.resolved_quarantine_count += page.resolved_quarantine_count;
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+
+    #[test]
+    fn page_apply_preserves_coordination_error_categories() {
+        for expected in ["sync lease busy", "sync lease lost", "database busy"] {
+            assert_eq!(
+                page_apply_error_to_string(PageApplyError::Hard(expected.to_string())),
+                expected
+            );
+        }
+        assert_eq!(
+            page_apply_error_to_string(PageApplyError::Hard("sqlite details".to_string())),
+            "sync failed"
+        );
+    }
 }

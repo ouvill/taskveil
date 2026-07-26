@@ -342,6 +342,15 @@ pub trait LocalSyncWriteTransaction: LocalSyncStore {
 pub trait LocalSyncAtomicStore: LocalSyncStore {
     type WriteTransaction: LocalSyncWriteTransaction;
 
+    /// Revalidates the active sync lease immediately before starting a remote
+    /// request.
+    ///
+    /// A write fence after receiving a response is not sufficient: once a
+    /// suspended run loses its lease it must not create any further remote side
+    /// effects. Orchestrators therefore call this explicit gate at every
+    /// network boundary, independently of local read behavior.
+    fn preflight_network_request(&mut self) -> Result<(), String>;
+
     fn begin_write_transaction(&mut self) -> Result<Self::WriteTransaction, String>;
 }
 

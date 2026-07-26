@@ -3558,8 +3558,10 @@ dependencies = [
  "chrono",
  "iana-time-zone",
  "libc",
+ "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "taskveil-crypto",
  "taskveil-domain",
  "taskveil-storage",
@@ -3567,6 +3569,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 use taskveil_crypto::key_hierarchy::{
     unwrap_local_tenant_root_dek_with_master_key, wrap_local_tenant_root_dek_with_master_key,
@@ -7,9 +7,11 @@ use taskveil_crypto::key_hierarchy::{
 use taskveil_domain::Uuid;
 use taskveil_storage::{
     open_encrypted, LocalCryptoRepository, LocalProfileBinding, LocalTenantRootKeyBundle,
-    SqliteLocalCryptoRepository, StorageError,
+    OwnedSqliteWriteTx, SqliteLocalCryptoRepository, StorageError,
 };
-use taskveil_sync::{account::AccountKeyMaterial, LocalSyncKeys};
+#[cfg(any(test, feature = "test-support"))]
+use taskveil_sync::account::AccountKeyMaterial;
+use taskveil_sync::LocalSyncKeys;
 use zeroize::Zeroizing;
 
 use crate::LocalMutationContext;
@@ -86,15 +88,16 @@ pub fn load_local_crypto_context(
             LocalCryptoUnavailable::MissingMasterKey,
         ));
     };
-    let Some(tenant_root) = repository.load_tenant_root(binding.tenant_id)? else {
+    let mut tenant_roots = repository.load_tenant_roots(binding.tenant_id)?;
+    let Some(tenant_root) = tenant_roots.pop() else {
         return Ok(LocalCryptoAvailability::AccountBoundUnavailable(
             LocalCryptoUnavailable::MissingTenantRootKey,
         ));
     };
     let sync_keys = match unwrap_local_cache_entries(
         binding.tenant_id,
-        tenant_root.generation,
-        &tenant_root.wrapped_tenant_root_dek,
+        &tenant_root,
+        &tenant_roots,
         &master_key,
     ) {
         Ok(keys) => keys,
@@ -116,6 +119,7 @@ pub fn load_local_crypto_context(
     )))
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub fn persist_account_crypto_context(
     db_path: &Path,
     db_key: &[u8; 32],
@@ -133,6 +137,7 @@ pub fn persist_account_crypto_context(
     )
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub fn persist_local_crypto_context(
     db_path: &Path,
     db_key: &[u8; 32],
@@ -141,93 +146,216 @@ pub fn persist_local_crypto_context(
     sync_keys: LocalSyncKeys,
     now_ms: i64,
 ) -> Result<LocalCryptoContext, StorageError> {
-    let tenant_root_dek = sync_keys.tenant_root_dek.as_deref().ok_or_else(|| {
-        StorageError::IncompatibleSchema("local Tenant Root DEK is missing".to_string())
-    })?;
-    let wrapped_tenant_root_dek = wrap_local_tenant_root_dek_with_master_key(
-        identity.tenant_id,
-        sync_keys.tenant_generation,
-        tenant_root_dek,
-        master_key,
-    )
-    .map_err(|_| {
-        StorageError::IncompatibleSchema("invalid local Tenant Root DEK material".to_string())
-    })?;
-    let tenant_root = LocalTenantRootKeyBundle {
-        tenant_id: identity.tenant_id,
-        generation: sync_keys.tenant_generation,
-        wrapped_tenant_root_dek,
-        updated_at: now_ms,
-    };
-    persist_wrapped_context(
-        db_path,
-        db_key,
+    let connection = open_encrypted(db_path, db_key)?;
+    let mut transaction = OwnedSqliteWriteTx::begin(connection)?;
+    let (context, _) = persist_local_crypto_context_in_transaction(
+        &mut transaction,
         identity,
-        *master_key,
-        WrappedLocalKeyCache { tenant_root },
+        master_key,
         sync_keys,
         now_ms,
-    )
+    )?;
+    transaction.commit()?;
+    Ok(context)
+}
+
+pub(crate) fn persist_local_crypto_context_in_transaction(
+    transaction: &mut OwnedSqliteWriteTx,
+    identity: LocalCryptoIdentity,
+    master_key: &[u8; KEY_LEN],
+    sync_keys: LocalSyncKeys,
+    now_ms: i64,
+) -> Result<(LocalCryptoContext, bool), StorageError> {
+    let active_tenant_root_dek = sync_keys.tenant_root_dek.as_deref().ok_or_else(|| {
+        StorageError::IncompatibleSchema("local Tenant Root DEK is missing".to_string())
+    })?;
+    if sync_keys.tenant_generation == 0 {
+        return Err(StorageError::IncompatibleSchema(
+            "invalid active Tenant Root DEK generation".to_string(),
+        ));
+    }
+    let existing_binding = transaction.load_local_crypto_binding()?;
+    if let Some(existing) = &existing_binding {
+        if existing.tenant_id != identity.tenant_id {
+            return Err(StorageError::LocalProfileTenantMismatch {
+                bound_tenant_id: existing.tenant_id,
+                requested_tenant_id: identity.tenant_id,
+            });
+        }
+        if existing.user_id != identity.user_id {
+            return Err(StorageError::LocalProfileUserMismatch {
+                bound_user_id: existing.user_id,
+                requested_user_id: identity.user_id,
+            });
+        }
+    }
+    let existing_roots = transaction.load_tenant_roots(identity.tenant_id)?;
+    if existing_binding.is_none() && !existing_roots.is_empty() {
+        return Err(StorageError::IncompatibleSchema(
+            "Tenant Root DEK cache exists without a profile binding".to_string(),
+        ));
+    }
+    if existing_roots
+        .last()
+        .is_some_and(|root| root.generation > sync_keys.tenant_generation)
+    {
+        return Err(StorageError::IncompatibleSchema(
+            "active Tenant Root DEK generation cannot move backwards".to_string(),
+        ));
+    }
+
+    let mut existing_semantic_keys = BTreeMap::<u64, Zeroizing<[u8; KEY_LEN]>>::new();
+    let mut existing_wrapped = BTreeMap::new();
+    for root in existing_roots {
+        let unwrapped = Zeroizing::new(
+            unwrap_local_tenant_root_dek_with_master_key(
+                identity.tenant_id,
+                root.generation,
+                &root.wrapped_tenant_root_dek,
+                master_key,
+            )
+            .map_err(|_| {
+                StorageError::IncompatibleSchema(
+                    "stored local Tenant Root DEK cannot be authenticated".to_string(),
+                )
+            })?,
+        );
+        existing_semantic_keys.insert(root.generation, unwrapped);
+        existing_wrapped.insert(root.generation, root);
+    }
+    let mut semantic_keys = BTreeMap::<u64, Zeroizing<[u8; KEY_LEN]>>::new();
+    merge_semantic_tenant_key(
+        &mut semantic_keys,
+        sync_keys.tenant_generation,
+        active_tenant_root_dek,
+    )?;
+    for (generation, key) in &sync_keys.historical_tenant_root_deks {
+        if *generation >= sync_keys.tenant_generation {
+            return Err(StorageError::IncompatibleSchema(
+                "historical Tenant Root DEK generation must precede the active generation"
+                    .to_string(),
+            ));
+        }
+        merge_semantic_tenant_key(&mut semantic_keys, *generation, key)?;
+    }
+
+    let mut tenant_roots = Vec::with_capacity(semantic_keys.len());
+    for (generation, key) in &semantic_keys {
+        if existing_semantic_keys
+            .get(generation)
+            .is_some_and(|existing| existing.as_ref() != key.as_ref())
+        {
+            return Err(StorageError::IncompatibleSchema(
+                "Tenant Root DEK changed without a generation change".to_string(),
+            ));
+        }
+        if let Some(existing) = existing_wrapped.remove(generation) {
+            tenant_roots.push(existing);
+        } else {
+            tenant_roots.push(LocalTenantRootKeyBundle {
+                tenant_id: identity.tenant_id,
+                generation: *generation,
+                wrapped_tenant_root_dek: wrap_local_tenant_root_dek_with_master_key(
+                    identity.tenant_id,
+                    *generation,
+                    key,
+                    master_key,
+                )
+                .map_err(|_| {
+                    StorageError::IncompatibleSchema(
+                        "invalid local Tenant Root DEK material".to_string(),
+                    )
+                })?,
+                updated_at: now_ms,
+            });
+        }
+    }
+    let binding = LocalProfileBinding {
+        tenant_id: identity.tenant_id,
+        user_id: identity.user_id,
+        device_id: identity.device_id,
+        bound_at: existing_binding
+            .as_ref()
+            .map_or(now_ms, |value| value.bound_at),
+        updated_at: now_ms,
+    };
+    let runtime_changed = transaction.bind_tenant_roots(binding, &tenant_roots)?;
+    let normalized_sync_keys = LocalSyncKeys {
+        tenant_id: identity.tenant_id,
+        tenant_root_dek: Some(Zeroizing::new(*active_tenant_root_dek)),
+        tenant_generation: sync_keys.tenant_generation,
+        historical_tenant_root_deks: semantic_keys
+            .into_iter()
+            .filter(|(generation, _)| *generation != sync_keys.tenant_generation)
+            .collect(),
+    };
+    Ok((
+        LocalCryptoContext {
+            tenant_id: identity.tenant_id,
+            user_id: identity.user_id,
+            device_id: identity.device_id,
+            master_key: Zeroizing::new(*master_key),
+            sync_keys: normalized_sync_keys,
+        },
+        runtime_changed,
+    ))
+}
+
+fn merge_semantic_tenant_key(
+    keys: &mut BTreeMap<u64, Zeroizing<[u8; KEY_LEN]>>,
+    generation: u64,
+    key: &[u8; KEY_LEN],
+) -> Result<(), StorageError> {
+    if generation == 0 {
+        return Err(StorageError::IncompatibleSchema(
+            "invalid Tenant Root DEK generation".to_string(),
+        ));
+    }
+    if let Some(existing) = keys.get(&generation) {
+        if existing.as_ref() != key {
+            return Err(StorageError::IncompatibleSchema(
+                "Tenant Root DEK changed without a generation change".to_string(),
+            ));
+        }
+        return Ok(());
+    }
+    keys.insert(generation, Zeroizing::new(*key));
+    Ok(())
 }
 
 fn unwrap_local_cache_entries(
     tenant_id: Uuid,
-    tenant_generation: u64,
-    wrapped_tenant_root_dek: &[u8],
+    active: &LocalTenantRootKeyBundle,
+    historical: &[LocalTenantRootKeyBundle],
     master_key: &[u8; KEY_LEN],
 ) -> Result<LocalSyncKeys, ()> {
-    let tenant_root_dek = unwrap_local_tenant_root_dek_with_master_key(
-        tenant_id,
-        tenant_generation,
-        wrapped_tenant_root_dek,
-        master_key,
-    )
-    .map_err(|_| ())?;
+    let tenant_root_dek = Zeroizing::new(
+        unwrap_local_tenant_root_dek_with_master_key(
+            tenant_id,
+            active.generation,
+            &active.wrapped_tenant_root_dek,
+            master_key,
+        )
+        .map_err(|_| ())?,
+    );
+    let historical_tenant_root_deks = historical
+        .iter()
+        .map(|root| {
+            unwrap_local_tenant_root_dek_with_master_key(
+                tenant_id,
+                root.generation,
+                &root.wrapped_tenant_root_dek,
+                master_key,
+            )
+            .map(|key| (root.generation, Zeroizing::new(key)))
+            .map_err(|_| ())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(LocalSyncKeys {
         tenant_id,
-        tenant_root_dek: Some(Zeroizing::new(tenant_root_dek)),
-        tenant_generation,
-        historical_tenant_root_deks: Vec::new(),
-    })
-}
-
-struct WrappedLocalKeyCache {
-    tenant_root: LocalTenantRootKeyBundle,
-}
-
-fn persist_wrapped_context(
-    db_path: &Path,
-    db_key: &[u8; 32],
-    identity: LocalCryptoIdentity,
-    master_key: [u8; KEY_LEN],
-    wrapped_cache: WrappedLocalKeyCache,
-    sync_keys: LocalSyncKeys,
-    now_ms: i64,
-) -> Result<LocalCryptoContext, StorageError> {
-    let LocalCryptoIdentity {
-        tenant_id,
-        user_id,
-        device_id,
-    } = identity;
-    let connection = open_encrypted(db_path, db_key)?;
-    let mut repository = SqliteLocalCryptoRepository::new(connection);
-    let existing = repository.load_binding()?;
-    let bound_at = existing.as_ref().map_or(now_ms, |binding| binding.bound_at);
-    let binding = LocalProfileBinding {
-        tenant_id,
-        user_id,
-        device_id,
-        bound_at,
-        updated_at: now_ms,
-    };
-    repository.bind_tenant_root(binding, &wrapped_cache.tenant_root)?;
-
-    Ok(LocalCryptoContext {
-        tenant_id,
-        user_id,
-        device_id,
-        master_key: Zeroizing::new(master_key),
-        sync_keys,
+        tenant_root_dek: Some(tenant_root_dek),
+        tenant_generation: active.generation,
+        historical_tenant_root_deks,
     })
 }
 
@@ -235,8 +363,8 @@ fn persist_wrapped_context(
 mod tests {
     use taskveil_domain::{new_list, new_task};
     use taskveil_storage::{
-        ListRepository, SqliteListRepository, SqliteSyncStateRepository, SqliteTaskRepository,
-        SyncStateRepository, TaskRepository,
+        ListRepository, SqliteListRepository, SqliteProfileCoordinationRepository,
+        SqliteSyncStateRepository, SqliteTaskRepository, SyncStateRepository, TaskRepository,
     };
     use taskveil_sync::account::AccountKeyMaterial;
     use tempfile::TempDir;
@@ -257,6 +385,144 @@ mod tests {
             account_root_public: root.public,
             tenant_root_dek: Zeroizing::new([0x22; KEY_LEN]),
         }
+    }
+
+    fn sync_keys(
+        tenant_id: Uuid,
+        generation: u64,
+        key: [u8; KEY_LEN],
+        historical: Vec<(u64, Zeroizing<[u8; KEY_LEN]>)>,
+    ) -> LocalSyncKeys {
+        LocalSyncKeys {
+            tenant_id,
+            tenant_root_dek: Some(Zeroizing::new(key)),
+            tenant_generation: generation,
+            historical_tenant_root_deks: historical,
+        }
+    }
+
+    #[test]
+    fn semantic_key_identity_avoids_rewrap_cutover_and_persists_history() {
+        let temp = TempDir::new().unwrap();
+        let db_path = temp.path().join("semantic-keys.sqlite3");
+        let identity = LocalCryptoIdentity {
+            tenant_id: Uuid::now_v7(),
+            user_id: Uuid::now_v7(),
+            device_id: Uuid::now_v7(),
+        };
+        let first_key = [0x21; KEY_LEN];
+
+        persist_local_crypto_context(
+            &db_path,
+            &DB_KEY,
+            identity,
+            &MASTER_KEY,
+            sync_keys(identity.tenant_id, 1, first_key, Vec::new()),
+            NOW,
+        )
+        .unwrap();
+        let runtime = || {
+            SqliteProfileCoordinationRepository::new(open_encrypted(&db_path, &DB_KEY).unwrap())
+                .load_runtime()
+                .unwrap()
+                .runtime_epoch
+        };
+        assert_eq!(runtime(), 2);
+        let first_wrapped =
+            SqliteLocalCryptoRepository::new(open_encrypted(&db_path, &DB_KEY).unwrap())
+                .load_tenant_roots(identity.tenant_id)
+                .unwrap();
+
+        // AEAD wrapping is randomized, but an identical semantic key set must
+        // retain the authenticated ciphertext and leave the epoch unchanged.
+        persist_local_crypto_context(
+            &db_path,
+            &DB_KEY,
+            identity,
+            &MASTER_KEY,
+            sync_keys(identity.tenant_id, 1, first_key, Vec::new()),
+            NOW + 1,
+        )
+        .unwrap();
+        assert_eq!(runtime(), 2);
+        assert_eq!(
+            SqliteLocalCryptoRepository::new(open_encrypted(&db_path, &DB_KEY).unwrap())
+                .load_tenant_roots(identity.tenant_id)
+                .unwrap(),
+            first_wrapped
+        );
+
+        let rejected = persist_local_crypto_context(
+            &db_path,
+            &DB_KEY,
+            identity,
+            &MASTER_KEY,
+            sync_keys(identity.tenant_id, 1, [0x22; KEY_LEN], Vec::new()),
+            NOW + 2,
+        );
+        assert!(matches!(rejected, Err(StorageError::IncompatibleSchema(_))));
+        assert_eq!(runtime(), 2);
+
+        persist_local_crypto_context(
+            &db_path,
+            &DB_KEY,
+            identity,
+            &MASTER_KEY,
+            sync_keys(
+                identity.tenant_id,
+                2,
+                [0x23; KEY_LEN],
+                vec![(1, Zeroizing::new(first_key))],
+            ),
+            NOW + 3,
+        )
+        .unwrap();
+        assert_eq!(runtime(), 3);
+        let LocalCryptoAvailability::Ready(reloaded) =
+            load_local_crypto_context(&db_path, &DB_KEY, Some(MASTER_KEY)).unwrap()
+        else {
+            panic!("expected persisted key history");
+        };
+        assert_eq!(reloaded.sync_keys().tenant_generation, 2);
+        assert_eq!(
+            reloaded.sync_keys().historical_tenant_root_deks,
+            vec![(1, Zeroizing::new(first_key))]
+        );
+
+        persist_local_crypto_context(
+            &db_path,
+            &DB_KEY,
+            identity,
+            &MASTER_KEY,
+            sync_keys(identity.tenant_id, 2, [0x23; KEY_LEN], Vec::new()),
+            NOW + 4,
+        )
+        .unwrap();
+        assert_eq!(runtime(), 4);
+        let LocalCryptoAvailability::Ready(reloaded) =
+            load_local_crypto_context(&db_path, &DB_KEY, Some(MASTER_KEY)).unwrap()
+        else {
+            panic!("expected active key after retired generation pruning");
+        };
+        assert!(reloaded.sync_keys().historical_tenant_root_deks.is_empty());
+        assert_eq!(
+            SqliteLocalCryptoRepository::new(open_encrypted(&db_path, &DB_KEY).unwrap())
+                .load_tenant_roots(identity.tenant_id)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        persist_local_crypto_context(
+            &db_path,
+            &DB_KEY,
+            identity,
+            &MASTER_KEY,
+            sync_keys(identity.tenant_id, 2, [0x23; KEY_LEN], Vec::new()),
+            NOW + 5,
+        )
+        .unwrap();
+        assert_eq!(runtime(), 4);
     }
 
     #[test]

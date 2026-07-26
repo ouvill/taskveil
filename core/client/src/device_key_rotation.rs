@@ -24,7 +24,7 @@ impl TaskveilClient {
     /// Rotates the local Device Key and SQLCipher key using the crash-safe
     /// active/pending capsule protocol. Returns the committed DK generation.
     pub fn rotate_device_key(&self) -> Result<u64, ClientError> {
-        let _operation = self.begin_operation()?;
+        let _operation = self.begin_exclusive_operation()?;
         self.ensure_account_runtime_restored()?;
 
         let wrapping_material = {
@@ -66,6 +66,15 @@ impl TaskveilClient {
         )?;
         let committed_db_key = Zeroizing::new(derive_local_db_key(committed.device_key()));
         self.replace_db_key(committed_db_key)?;
+        let runtime = taskveil_storage::SqliteProfileCoordinationRepository::new(open_encrypted(
+            &self.db_path,
+            &self.db_key(),
+        )?)
+        .publish_capsule_generation(
+            i64::try_from(committed.generation()).map_err(|_| ClientError::LocalKeyState)?,
+            crate::runtime::now_ms()?,
+        )?;
+        self.publish_runtime_generation(runtime.runtime_epoch, committed.generation());
         Ok(committed.generation())
     }
 }
@@ -254,6 +263,47 @@ mod tests {
             };
             assert_eq!(recovered.generation(), expected_generation);
         }
+    }
+
+    #[test]
+    #[cfg(not(any(target_os = "ios", target_os = "macos")))]
+    fn shared_operation_recovers_pending_capsule_without_lock_upgrade_deadlock() {
+        let temp = TempDir::new().unwrap();
+        let client = TaskveilClient::open(crate::LocalProfileConfig::new(temp.path(), "Inbox"))
+            .expect("open profile");
+        let mut store = PlatformLocalKeyCapsuleStore::new(temp.path());
+
+        let interrupted = rotate_device_key_with_store(
+            &mut store,
+            client.db_path(),
+            |_| Ok(None),
+            |step| {
+                if step == DeviceKeyRotationStep::DatabaseRekeyed {
+                    Err(ClientError::InjectedDeviceKeyRotationFailure)
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert!(matches!(
+            interrupted,
+            Err(ClientError::InjectedDeviceKeyRotationFailure)
+        ));
+        assert!(store.load(LocalKeyCapsuleSlot::Pending).unwrap().is_some());
+
+        // A normal read initially enters through the shared-operation path.
+        // It must release that lock, perform bounded exclusive recovery, then
+        // reacquire shared access before touching the rekeyed database.
+        assert!(!client.get_lists().expect("recovered read").is_empty());
+        assert!(store.load(LocalKeyCapsuleSlot::Pending).unwrap().is_none());
+        assert_eq!(
+            store
+                .load(LocalKeyCapsuleSlot::Active)
+                .unwrap()
+                .unwrap()
+                .generation(),
+            2
+        );
     }
 
     #[test]

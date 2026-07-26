@@ -162,126 +162,144 @@ impl TaskveilClient {
 
     pub fn create_list(&self, name: String) -> Result<List, ClientError> {
         let _guard = self.operation_guard()?;
-        let now = now_ms()?;
-        let mode = self.create_list_mode()?;
-        match mode {
-            CreateListMode::Anonymous => self.create_anonymous_list(name, now),
-            CreateListMode::Ready {
-                tenant_id,
-                master_key,
-                mutation,
-            } => {
-                let list = self.mutation_service().create_list(
-                    name,
-                    now,
+        self.retry_runtime_epoch_once(|| {
+            let now = now_ms()?;
+            let mode = self.create_list_mode()?;
+            match mode {
+                CreateListMode::Anonymous => self.create_anonymous_list(name.clone(), now),
+                CreateListMode::Ready {
                     tenant_id,
-                    &master_key,
-                    &mutation,
-                )?;
-                let refreshed =
-                    load_local_crypto_context(&self.db_path, &self.db_key(), Some(*master_key))?;
-                let LocalCryptoAvailability::Ready(crypto) = refreshed else {
-                    return Err(ClientError::AccountBoundUnavailable);
-                };
-                self.account_state()?.crypto = CryptoRuntimeState::Ready(crypto);
-                Ok(list)
+                    master_key,
+                    mutation,
+                } => {
+                    let list = self.mutation_service().create_list(
+                        name.clone(),
+                        now,
+                        tenant_id,
+                        &master_key,
+                        &mutation,
+                    )?;
+                    let refreshed = load_local_crypto_context(
+                        &self.db_path,
+                        &self.db_key(),
+                        Some(*master_key),
+                    )?;
+                    let LocalCryptoAvailability::Ready(crypto) = refreshed else {
+                        return Err(ClientError::AccountBoundUnavailable);
+                    };
+                    self.account_state()?.crypto = CryptoRuntimeState::Ready(crypto);
+                    Ok(list)
+                }
             }
-        }
+        })
     }
 
     pub fn get_lists(&self) -> Result<Vec<List>, ClientError> {
+        let _guard = self.operation_guard()?;
         self.with_list_repository(|repository| Ok(repository.list_all()?))
     }
 
     pub fn get_archived_lists(&self) -> Result<Vec<List>, ClientError> {
+        let _guard = self.operation_guard()?;
         self.with_list_repository(|repository| Ok(repository.list_archived()?))
     }
 
     pub fn rename_list(&self, list_id: Uuid, name: String) -> Result<List, ClientError> {
         let _guard = self.operation_guard()?;
-        let now = now_ms()?;
-        match self.local_mutation_state()? {
-            LocalMutationState::Anonymous => {
-                self.mutate_anonymous_list(list_id, |list| Ok(domain_rename_list(list, name, now)?))
+        self.retry_runtime_epoch_once(|| {
+            let now = now_ms()?;
+            let name = name.clone();
+            match self.local_mutation_state()? {
+                LocalMutationState::Anonymous => self.mutate_anonymous_list(list_id, |list| {
+                    Ok(domain_rename_list(list, name, now)?)
+                }),
+                LocalMutationState::Ready(sync) => self
+                    .mutation_service()
+                    .rename_list(list_id, name, now, &sync),
+                LocalMutationState::AccountBoundUnavailable => {
+                    Err(ClientError::AccountBoundUnavailable)
+                }
             }
-            LocalMutationState::Ready(sync) => self
-                .mutation_service()
-                .rename_list(list_id, name, now, &sync),
-            LocalMutationState::AccountBoundUnavailable => {
-                Err(ClientError::AccountBoundUnavailable)
-            }
-        }
+        })
     }
 
     pub fn archive_list(&self, list_id: Uuid) -> Result<List, ClientError> {
         let _guard = self.operation_guard()?;
-        let now = now_ms()?;
-        match self.local_mutation_state()? {
-            LocalMutationState::Anonymous => self.mutate_anonymous_list(list_id, |list| {
-                if list.archived_at.is_none() && list.is_default {
-                    return Err(StorageError::DefaultListProtected {
-                        operation: "archived",
-                        list_id,
+        self.retry_runtime_epoch_once(|| {
+            let now = now_ms()?;
+            match self.local_mutation_state()? {
+                LocalMutationState::Anonymous => self.mutate_anonymous_list(list_id, |list| {
+                    if list.archived_at.is_none() && list.is_default {
+                        return Err(StorageError::DefaultListProtected {
+                            operation: "archived",
+                            list_id,
+                        }
+                        .into());
                     }
-                    .into());
+                    Ok(domain_archive_list(list, now)?)
+                }),
+                LocalMutationState::Ready(sync) => {
+                    self.mutation_service().archive_list(list_id, now, &sync)
                 }
-                Ok(domain_archive_list(list, now)?)
-            }),
-            LocalMutationState::Ready(sync) => {
-                self.mutation_service().archive_list(list_id, now, &sync)
+                LocalMutationState::AccountBoundUnavailable => {
+                    Err(ClientError::AccountBoundUnavailable)
+                }
             }
-            LocalMutationState::AccountBoundUnavailable => {
-                Err(ClientError::AccountBoundUnavailable)
-            }
-        }
+        })
     }
 
     pub fn unarchive_list(&self, list_id: Uuid) -> Result<List, ClientError> {
         let _guard = self.operation_guard()?;
-        let now = now_ms()?;
-        match self.local_mutation_state()? {
-            LocalMutationState::Anonymous => {
-                self.mutate_anonymous_list(list_id, |list| Ok(domain_unarchive_list(list, now)?))
+        self.retry_runtime_epoch_once(|| {
+            let now = now_ms()?;
+            match self.local_mutation_state()? {
+                LocalMutationState::Anonymous => self
+                    .mutate_anonymous_list(list_id, |list| Ok(domain_unarchive_list(list, now)?)),
+                LocalMutationState::Ready(sync) => {
+                    self.mutation_service().unarchive_list(list_id, now, &sync)
+                }
+                LocalMutationState::AccountBoundUnavailable => {
+                    Err(ClientError::AccountBoundUnavailable)
+                }
             }
-            LocalMutationState::Ready(sync) => {
-                self.mutation_service().unarchive_list(list_id, now, &sync)
-            }
-            LocalMutationState::AccountBoundUnavailable => {
-                Err(ClientError::AccountBoundUnavailable)
-            }
-        }
+        })
     }
 
     pub fn delete_list(&self, list_id: Uuid) -> Result<(), ClientError> {
         let _guard = self.operation_guard()?;
-        let state = self.local_mutation_state()?;
-        self.delete_list_with_state(list_id, state, now_ms()?)
+        self.retry_runtime_epoch_once(|| {
+            let state = self.local_mutation_state()?;
+            self.delete_list_with_state(list_id, state, now_ms()?)
+        })
     }
 
     pub fn create_task(&self, command: CreateTaskCommand) -> Result<Task, ClientError> {
         validate_task_planning(command.priority, command.estimated_minutes)?;
         let _guard = self.operation_guard()?;
-        let now = now_ms()?;
-        match self.local_mutation_state()? {
-            LocalMutationState::Anonymous => self.create_anonymous_task(command, now),
-            LocalMutationState::Ready(sync) => self.mutation_service().create_task(
-                CreateTaskInput {
-                    list_id: command.list_id,
-                    title: command.title,
-                    parent_task_id: command.parent_task_id,
-                    due: command.due,
-                    note: command.note,
-                    priority: command.priority,
-                    scheduled_at: command.scheduled_at,
-                    estimated_minutes: command.estimated_minutes,
-                    now_ms: now,
-                },
-                &sync,
-            ),
-            LocalMutationState::AccountBoundUnavailable => {
-                Err(ClientError::AccountBoundUnavailable)
+        self.retry_runtime_epoch_once(|| {
+            let command = command.clone();
+            let now = now_ms()?;
+            match self.local_mutation_state()? {
+                LocalMutationState::Anonymous => self.create_anonymous_task(command, now),
+                LocalMutationState::Ready(sync) => self.mutation_service().create_task(
+                    CreateTaskInput {
+                        list_id: command.list_id,
+                        title: command.title,
+                        parent_task_id: command.parent_task_id,
+                        due: command.due,
+                        note: command.note,
+                        priority: command.priority,
+                        scheduled_at: command.scheduled_at,
+                        estimated_minutes: command.estimated_minutes,
+                        now_ms: now,
+                    },
+                    &sync,
+                ),
+                LocalMutationState::AccountBoundUnavailable => {
+                    Err(ClientError::AccountBoundUnavailable)
+                }
             }
-        }
+        })
     }
 
     pub fn reorder_task(&self, command: ReorderTaskCommand) -> Result<Task, ClientError> {
@@ -291,29 +309,34 @@ impl TaskveilClient {
             command.previous_task_id,
             command.next_task_id,
         )?;
-        let now = now_ms()?;
-        match self.local_mutation_state()? {
-            LocalMutationState::Anonymous => self.reorder_anonymous_task(command, now),
-            LocalMutationState::Ready(sync) => self.mutation_service().reorder_task(
-                ReorderTaskInput {
-                    task_id: command.task_id,
-                    previous_task_id: command.previous_task_id,
-                    next_task_id: command.next_task_id,
-                    now_ms: now,
-                },
-                &sync,
-            ),
-            LocalMutationState::AccountBoundUnavailable => {
-                Err(ClientError::AccountBoundUnavailable)
+        self.retry_runtime_epoch_once(|| {
+            let command = command.clone();
+            let now = now_ms()?;
+            match self.local_mutation_state()? {
+                LocalMutationState::Anonymous => self.reorder_anonymous_task(command, now),
+                LocalMutationState::Ready(sync) => self.mutation_service().reorder_task(
+                    ReorderTaskInput {
+                        task_id: command.task_id,
+                        previous_task_id: command.previous_task_id,
+                        next_task_id: command.next_task_id,
+                        now_ms: now,
+                    },
+                    &sync,
+                ),
+                LocalMutationState::AccountBoundUnavailable => {
+                    Err(ClientError::AccountBoundUnavailable)
+                }
             }
-        }
+        })
     }
 
     pub fn get_tasks(&self, list_id: Uuid) -> Result<Vec<Task>, ClientError> {
+        let _guard = self.operation_guard()?;
         self.with_task_repository(|repository| Ok(repository.list_active_by_list(list_id)?))
     }
 
     pub fn get_active_timer_session(&self) -> Result<Option<ActiveTimerSession>, ClientError> {
+        let _guard = self.operation_guard()?;
         self.with_timer_repository(|repository| Ok(repository.load_active()?))
     }
 
@@ -322,15 +345,17 @@ impl TaskveilClient {
         session: ActiveTimerSession,
     ) -> Result<(), ClientError> {
         let _guard = self.operation_guard()?;
-        let updated_at = now_ms()?;
-        self.with_timer_repository(|repository| {
-            match repository.start_active(session, updated_at) {
-                Ok(()) => Ok(()),
-                Err(StorageError::ActiveTimerConflict(active_id)) => {
-                    Err(ClientError::ActiveTimerConflict(active_id))
+        self.retry_runtime_epoch_once(|| {
+            let updated_at = now_ms()?;
+            self.write_with_runtime_epoch(|transaction| {
+                match transaction.start_active_timer_session(session.clone(), updated_at) {
+                    Ok(()) => Ok(()),
+                    Err(StorageError::ActiveTimerConflict(active_id)) => {
+                        Err(ClientError::ActiveTimerConflict(active_id))
+                    }
+                    Err(error) => Err(error.into()),
                 }
-                Err(error) => Err(error.into()),
-            }
+            })
         })
     }
 
@@ -339,10 +364,12 @@ impl TaskveilClient {
         session: ActiveTimerSession,
     ) -> Result<(), ClientError> {
         let _guard = self.operation_guard()?;
-        let updated_at = now_ms()?;
-        self.with_timer_repository(|repository| {
-            repository.update_active(session, updated_at)?;
-            Ok(())
+        self.retry_runtime_epoch_once(|| {
+            let updated_at = now_ms()?;
+            self.write_with_runtime_epoch(|transaction| {
+                transaction.update_active_timer_session(session.clone(), updated_at)?;
+                Ok(())
+            })
         })
     }
 
@@ -351,13 +378,18 @@ impl TaskveilClient {
         expected_session_id: Uuid,
     ) -> Result<bool, ClientError> {
         let _guard = self.operation_guard()?;
-        self.with_timer_repository(|repository| Ok(repository.clear_active(expected_session_id)?))
+        self.retry_runtime_epoch_once(|| {
+            self.write_with_runtime_epoch(|transaction| {
+                Ok(transaction.clear_active_timer_session(expected_session_id)?)
+            })
+        })
     }
 
     pub fn get_completed_timer_sessions(
         &self,
         task_id: Uuid,
     ) -> Result<Vec<CompletedTimerSession>, ClientError> {
+        let _guard = self.operation_guard()?;
         self.with_timer_repository(|repository| Ok(repository.list_completed_by_task(task_id)?))
     }
 
@@ -366,38 +398,43 @@ impl TaskveilClient {
         session: CompletedTimerSession,
     ) -> Result<bool, ClientError> {
         let _guard = self.operation_guard()?;
-        let now = now_ms()?;
-        match self.local_mutation_state()? {
-            LocalMutationState::Anonymous => {
-                let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
-                let mut transaction = SqliteWriteTx::begin(&mut connection)?;
-                let inserted = transaction.finish_active_timer_session(session)?;
-                transaction.commit()?;
-                Ok(inserted)
-            }
-            LocalMutationState::Ready(sync) => {
-                let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
-                let mut transaction = SqliteWriteTx::begin(&mut connection)?;
-                let inserted = transaction.finish_active_timer_session(session.clone())?;
-                if inserted {
-                    enqueue_timer_session_in_transaction(
-                        &mut transaction,
-                        &sync,
-                        &session,
-                        false,
-                        now,
-                    )?;
+        self.retry_runtime_epoch_once(|| {
+            let now = now_ms()?;
+            match self.local_mutation_state()? {
+                LocalMutationState::Anonymous => {
+                    let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
+                    let mut transaction = SqliteWriteTx::begin(&mut connection)?;
+                    transaction.assert_profile_runtime_epoch(self.loaded_runtime_epoch())?;
+                    let inserted = transaction.finish_active_timer_session(session.clone())?;
+                    transaction.commit()?;
+                    Ok(inserted)
                 }
-                transaction.commit()?;
-                Ok(inserted)
+                LocalMutationState::Ready(sync) => {
+                    let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
+                    let mut transaction = SqliteWriteTx::begin(&mut connection)?;
+                    transaction.assert_profile_runtime_epoch(self.loaded_runtime_epoch())?;
+                    let inserted = transaction.finish_active_timer_session(session.clone())?;
+                    if inserted {
+                        enqueue_timer_session_in_transaction(
+                            &mut transaction,
+                            &sync,
+                            &session,
+                            false,
+                            now,
+                        )?;
+                    }
+                    transaction.commit()?;
+                    Ok(inserted)
+                }
+                LocalMutationState::AccountBoundUnavailable => {
+                    Err(ClientError::AccountBoundUnavailable)
+                }
             }
-            LocalMutationState::AccountBoundUnavailable => {
-                Err(ClientError::AccountBoundUnavailable)
-            }
-        }
+        })
     }
 
     pub fn search_tasks(&self, query: &str) -> Result<Vec<Task>, ClientError> {
+        let _guard = self.operation_guard()?;
         self.with_task_repository(|repository| Ok(repository.search_tasks(query)?))
     }
 
@@ -406,6 +443,7 @@ impl TaskveilClient {
         today_start_ms: i64,
         tomorrow_start_ms: i64,
     ) -> Result<Vec<HomeTaskView>, ClientError> {
+        let _guard = self.operation_guard()?;
         self.with_task_repository(|repository| {
             Ok(repository
                 .list_home(today_start_ms, tomorrow_start_ms)?
@@ -419,6 +457,7 @@ impl TaskveilClient {
         &self,
         range: CalendarRange,
     ) -> Result<Vec<CalendarOccurrenceView>, ClientError> {
+        let _guard = self.operation_guard()?;
         let storage_range =
             StorageCalendarRange::new(range.start_on, range.end_on, range.start_at, range.end_at)
                 .map_err(|_| ClientError::InvalidCalendarRange)?;
@@ -432,6 +471,7 @@ impl TaskveilClient {
     }
 
     pub fn count_task_descendants(&self, task_id: Uuid) -> Result<usize, ClientError> {
+        let _guard = self.operation_guard()?;
         self.with_task_repository(|repository| {
             repository.get(task_id)?;
             Ok(repository.count_descendants(task_id)?)
@@ -439,6 +479,7 @@ impl TaskveilClient {
     }
 
     pub fn count_tasks_in_list(&self, list_id: Uuid) -> Result<usize, ClientError> {
+        let _guard = self.operation_guard()?;
         self.with_list_repository(|repository| {
             let list_id = repository.get(list_id)?.id;
             Ok(repository.count_tasks(list_id)?)
@@ -448,55 +489,64 @@ impl TaskveilClient {
     pub fn update_task(&self, command: UpdateTaskCommand) -> Result<Task, ClientError> {
         validate_task_planning(command.priority, command.estimated_minutes)?;
         let _guard = self.operation_guard()?;
-        let now = now_ms()?;
-        match self.local_mutation_state()? {
-            LocalMutationState::Anonymous => self.update_anonymous_task(command, now),
-            LocalMutationState::Ready(sync) => self.mutation_service().update_task(
-                UpdateTaskInput {
-                    task_id: command.task_id,
-                    title: command.title,
-                    note: command.note,
-                    priority: command.priority,
-                    due: command.due,
-                    scheduled_at: command.scheduled_at,
-                    estimated_minutes: command.estimated_minutes,
-                    now_ms: now,
-                },
-                &sync,
-            ),
-            LocalMutationState::AccountBoundUnavailable => {
-                Err(ClientError::AccountBoundUnavailable)
+        self.retry_runtime_epoch_once(|| {
+            let command = command.clone();
+            let now = now_ms()?;
+            match self.local_mutation_state()? {
+                LocalMutationState::Anonymous => self.update_anonymous_task(command, now),
+                LocalMutationState::Ready(sync) => self.mutation_service().update_task(
+                    UpdateTaskInput {
+                        task_id: command.task_id,
+                        title: command.title,
+                        note: command.note,
+                        priority: command.priority,
+                        due: command.due,
+                        scheduled_at: command.scheduled_at,
+                        estimated_minutes: command.estimated_minutes,
+                        now_ms: now,
+                    },
+                    &sync,
+                ),
+                LocalMutationState::AccountBoundUnavailable => {
+                    Err(ClientError::AccountBoundUnavailable)
+                }
             }
-        }
+        })
     }
 
     pub fn set_task_status(&self, command: SetTaskStatusCommand) -> Result<Task, ClientError> {
         let _guard = self.operation_guard()?;
-        let now = now_ms()?;
-        match self.local_mutation_state()? {
-            LocalMutationState::Anonymous => self.set_anonymous_task_status(command, now),
-            LocalMutationState::Ready(sync) => self.mutation_service().set_task_status(
-                SetTaskStatusInput {
-                    task_id: command.task_id,
-                    status: command.status,
-                    closed_reason: command.closed_reason,
-                    now_ms: now,
-                },
-                &sync,
-            ),
-            LocalMutationState::AccountBoundUnavailable => {
-                Err(ClientError::AccountBoundUnavailable)
+        self.retry_runtime_epoch_once(|| {
+            let command = command.clone();
+            let now = now_ms()?;
+            match self.local_mutation_state()? {
+                LocalMutationState::Anonymous => self.set_anonymous_task_status(command, now),
+                LocalMutationState::Ready(sync) => self.mutation_service().set_task_status(
+                    SetTaskStatusInput {
+                        task_id: command.task_id,
+                        status: command.status,
+                        closed_reason: command.closed_reason,
+                        now_ms: now,
+                    },
+                    &sync,
+                ),
+                LocalMutationState::AccountBoundUnavailable => {
+                    Err(ClientError::AccountBoundUnavailable)
+                }
             }
-        }
+        })
     }
 
     pub fn delete_task(&self, task_id: Uuid) -> Result<(), ClientError> {
         let _guard = self.operation_guard()?;
-        let state = self.local_mutation_state()?;
-        self.delete_task_with_state(task_id, state, now_ms()?)
+        self.retry_runtime_epoch_once(|| {
+            let state = self.local_mutation_state()?;
+            self.delete_task_with_state(task_id, state, now_ms()?)
+        })
     }
 
     pub fn get_latest_task_undo(&self) -> Result<Option<TaskUndoView>, ClientError> {
+        let _guard = self.operation_guard()?;
         self.with_task_repository(|repository| {
             Ok(repository.latest_unconsumed_undo()?.map(TaskUndoView::from))
         })
@@ -504,27 +554,36 @@ impl TaskveilClient {
 
     pub fn undo_task_operation(&self, undo_id: Uuid) -> Result<Task, ClientError> {
         let _guard = self.operation_guard()?;
-        let now = now_ms()?;
-        match self.local_mutation_state()? {
-            LocalMutationState::Anonymous => self.with_task_repository(|repository| {
-                Ok(repository.undo_task_operation(undo_id, now)?)
-            }),
-            LocalMutationState::Ready(sync) => self
-                .mutation_service()
-                .undo_task_operation(undo_id, now, &sync),
-            LocalMutationState::AccountBoundUnavailable => {
-                Err(ClientError::AccountBoundUnavailable)
+        self.retry_runtime_epoch_once(|| {
+            let now = now_ms()?;
+            match self.local_mutation_state()? {
+                LocalMutationState::Anonymous => self.write_with_runtime_epoch(|transaction| {
+                    Ok(transaction.undo_task_operation(undo_id, now)?)
+                }),
+                LocalMutationState::Ready(sync) => self
+                    .mutation_service()
+                    .undo_task_operation(undo_id, now, &sync),
+                LocalMutationState::AccountBoundUnavailable => {
+                    Err(ClientError::AccountBoundUnavailable)
+                }
             }
-        }
+        })
     }
 
     pub fn get_setting(&self, key: &str) -> Result<Option<String>, ClientError> {
+        let _guard = self.operation_guard()?;
         self.setting(key)
     }
 
     pub fn set_setting(&self, key: &str, value: &str) -> Result<(), ClientError> {
         let _guard = self.operation_guard()?;
-        self.set_setting_value(key, value)
+        self.retry_runtime_epoch_once(|| {
+            let updated_at = now_ms()?;
+            self.write_with_runtime_epoch(|transaction| {
+                transaction.set_setting(key, value, updated_at)?;
+                Ok(())
+            })
+        })
     }
 
     pub fn create_task_reminder(
@@ -533,11 +592,13 @@ impl TaskveilClient {
         remind_at: i64,
     ) -> Result<ReminderView, ClientError> {
         let _guard = self.operation_guard()?;
-        let created_at = now_ms()?;
-        self.with_reminder_repository(|repository| {
-            Ok(repository
-                .create_task_reminder(task_id, remind_at, created_at)?
-                .into())
+        self.retry_runtime_epoch_once(|| {
+            let created_at = now_ms()?;
+            self.write_with_runtime_epoch(|transaction| {
+                Ok(transaction
+                    .create_task_reminder(task_id, remind_at, created_at)?
+                    .into())
+            })
         })
     }
 
@@ -547,33 +608,40 @@ impl TaskveilClient {
         remind_at: i64,
     ) -> Result<ReminderView, ClientError> {
         let _guard = self.operation_guard()?;
-        let updated_at = now_ms()?;
-        self.with_reminder_repository(|repository| {
-            Ok(repository
-                .update_reminder(reminder_id, remind_at, updated_at)?
-                .into())
+        self.retry_runtime_epoch_once(|| {
+            let updated_at = now_ms()?;
+            self.write_with_runtime_epoch(|transaction| {
+                Ok(transaction
+                    .update_reminder(reminder_id, remind_at, updated_at)?
+                    .into())
+            })
         })
     }
 
     pub fn delete_reminder(&self, reminder_id: Uuid) -> Result<ReminderView, ClientError> {
         let _guard = self.operation_guard()?;
-        self.with_reminder_repository(|repository| {
-            Ok(repository.delete_reminder(reminder_id)?.into())
+        self.retry_runtime_epoch_once(|| {
+            self.write_with_runtime_epoch(|transaction| {
+                Ok(transaction.delete_reminder(reminder_id)?.into())
+            })
         })
     }
 
     pub fn clear_task_reminders(&self, task_id: Uuid) -> Result<Vec<ReminderView>, ClientError> {
         let _guard = self.operation_guard()?;
-        self.with_reminder_repository(|repository| {
-            Ok(repository
-                .clear_task_reminders(task_id)?
-                .into_iter()
-                .map(ReminderView::from)
-                .collect())
+        self.retry_runtime_epoch_once(|| {
+            self.write_with_runtime_epoch(|transaction| {
+                Ok(transaction
+                    .clear_task_reminders(task_id)?
+                    .into_iter()
+                    .map(ReminderView::from)
+                    .collect())
+            })
         })
     }
 
     pub fn get_task_reminders(&self, task_id: Uuid) -> Result<Vec<ReminderView>, ClientError> {
+        let _guard = self.operation_guard()?;
         self.with_reminder_repository(|repository| {
             Ok(repository
                 .list_task_reminders(task_id)?
@@ -587,6 +655,7 @@ impl TaskveilClient {
         &self,
         task_id: Uuid,
     ) -> Result<Vec<ReminderView>, ClientError> {
+        let _guard = self.operation_guard()?;
         self.with_reminder_repository(|repository| {
             Ok(repository
                 .list_task_subtree_reminders(task_id)?
@@ -597,6 +666,7 @@ impl TaskveilClient {
     }
 
     pub fn get_list_reminders(&self, list_id: Uuid) -> Result<Vec<ReminderView>, ClientError> {
+        let _guard = self.operation_guard()?;
         let list_id = self.with_list_repository(|repository| Ok(repository.get(list_id)?.id))?;
         self.with_reminder_repository(|repository| {
             Ok(repository
@@ -608,6 +678,7 @@ impl TaskveilClient {
     }
 
     pub fn list_pending_reminders(&self, at_ms: i64) -> Result<Vec<ReminderView>, ClientError> {
+        let _guard = self.operation_guard()?;
         self.with_reminder_repository(|repository| {
             Ok(repository
                 .list_pending_reminders(at_ms)?
@@ -623,18 +694,36 @@ impl TaskveilClient {
         snoozed_until: i64,
     ) -> Result<ReminderView, ClientError> {
         let _guard = self.operation_guard()?;
-        let updated_at = now_ms()?;
-        self.with_reminder_repository(|repository| {
-            Ok(repository
-                .snooze_reminder(reminder_id, snoozed_until, updated_at)?
-                .into())
+        self.retry_runtime_epoch_once(|| {
+            let updated_at = now_ms()?;
+            self.write_with_runtime_epoch(|transaction| {
+                Ok(transaction
+                    .snooze_reminder(reminder_id, snoozed_until, updated_at)?
+                    .into())
+            })
         })
     }
 }
 
 impl TaskveilClient {
+    fn write_with_runtime_epoch<T>(
+        &self,
+        operation: impl FnOnce(&mut SqliteWriteTx<'_>) -> Result<T, ClientError>,
+    ) -> Result<T, ClientError> {
+        let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
+        let mut transaction = SqliteWriteTx::begin(&mut connection)?;
+        transaction.assert_profile_runtime_epoch(self.loaded_runtime_epoch())?;
+        let result = operation(&mut transaction)?;
+        transaction.commit()?;
+        Ok(result)
+    }
+
     fn mutation_service(&self) -> SqliteMutationService {
-        SqliteMutationService::new_secret(self.db_path.clone(), self.db_key())
+        SqliteMutationService::new_secret_with_epoch(
+            self.db_path.clone(),
+            self.db_key(),
+            self.loaded_runtime_epoch(),
+        )
     }
 
     fn create_list_mode(&self) -> Result<CreateListMode, ClientError> {
@@ -656,6 +745,7 @@ impl TaskveilClient {
     fn create_anonymous_list(&self, name: String, now: i64) -> Result<List, ClientError> {
         let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
         let mut transaction = SqliteWriteTx::begin(&mut connection)?;
+        transaction.assert_profile_runtime_epoch(self.loaded_runtime_epoch())?;
         let mut lists = transaction.list_lists_including_archived()?;
         lists.sort_by(|a, b| (a.sort_order.as_str(), a.id).cmp(&(b.sort_order.as_str(), b.id)));
         let rank = match fractional_index_after(lists.last().map(|list| list.sort_order.as_str())) {
@@ -686,6 +776,7 @@ impl TaskveilClient {
     ) -> Result<List, ClientError> {
         let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
         let mut transaction = SqliteWriteTx::begin(&mut connection)?;
+        transaction.assert_profile_runtime_epoch(self.loaded_runtime_epoch())?;
         let before = transaction.get_list(list_id)?;
         let updated = mutation(before.clone())?;
         if updated == before {
@@ -703,6 +794,7 @@ impl TaskveilClient {
     ) -> Result<Task, ClientError> {
         let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
         let mut transaction = SqliteWriteTx::begin(&mut connection)?;
+        transaction.assert_profile_runtime_epoch(self.loaded_runtime_epoch())?;
         transaction.get_list(command.list_id)?;
         let mut tasks = transaction.list_active_tasks_by_list(command.list_id)?;
         let mut siblings = tasks
@@ -765,6 +857,7 @@ impl TaskveilClient {
     ) -> Result<Task, ClientError> {
         let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
         let mut transaction = SqliteWriteTx::begin(&mut connection)?;
+        transaction.assert_profile_runtime_epoch(self.loaded_runtime_epoch())?;
         let target = transaction.get_task(command.task_id)?;
         let mut scope = transaction
             .list_active_tasks_by_list(target.list_id)?
@@ -817,6 +910,7 @@ impl TaskveilClient {
     ) -> Result<Task, ClientError> {
         let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
         let mut transaction = SqliteWriteTx::begin(&mut connection)?;
+        transaction.assert_profile_runtime_epoch(self.loaded_runtime_epoch())?;
         let before = transaction.get_task(command.task_id)?;
         let task = update_title(before.clone(), command.title, now)?;
         let task = update_note(task, command.note, now)?;
@@ -836,6 +930,7 @@ impl TaskveilClient {
     ) -> Result<Task, ClientError> {
         let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
         let mut transaction = SqliteWriteTx::begin(&mut connection)?;
+        transaction.assert_profile_runtime_epoch(self.loaded_runtime_epoch())?;
         let before = transaction.get_task(command.task_id)?;
         let updated = transition_task(before.clone(), command.status, command.closed_reason, now)?;
         if matches!(command.status, TaskStatus::Done | TaskStatus::WontDo) {
@@ -867,6 +962,7 @@ impl TaskveilClient {
         };
         let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
         let mut transaction = SqliteWriteTx::begin(&mut connection)?;
+        transaction.assert_profile_runtime_epoch(self.loaded_runtime_epoch())?;
         transaction.get_task(task_id)?;
         let tasks = transaction.list_task_subtree(task_id)?;
         let mut sessions = Vec::new();
@@ -907,6 +1003,7 @@ impl TaskveilClient {
         };
         let mut connection = open_encrypted(&self.db_path, &self.db_key())?;
         let mut transaction = SqliteWriteTx::begin(&mut connection)?;
+        transaction.assert_profile_runtime_epoch(self.loaded_runtime_epoch())?;
         let list = transaction.get_list(list_id)?;
         let list_id = list.id;
         if list.is_default {
@@ -1065,9 +1162,9 @@ mod tests {
     };
     use taskveil_storage::{
         ListRepository, OwnedSqliteWriteTx, ReminderRepository, SettingsRepository,
-        SqliteListRepository, SqliteReminderRepository, SqliteSettingsRepository,
-        SqliteSyncStateRepository, SqliteTaskRepository, SqliteTimerSessionRepository,
-        SyncStateRepository, TaskRepository, TimerSessionRepository,
+        SqliteListRepository, SqliteProfileCoordinationRepository, SqliteReminderRepository,
+        SqliteSettingsRepository, SqliteSyncStateRepository, SqliteTaskRepository,
+        SqliteTimerSessionRepository, SyncStateRepository, TaskRepository, TimerSessionRepository,
     };
     use taskveil_sync::{LocalSyncKeys, SYNC_LOCAL_HLC_SETTING_KEY};
     use tempfile::TempDir;
@@ -1081,6 +1178,55 @@ mod tests {
 
     const DB_KEY: [u8; 32] = [0xd2; 32];
     const BASE_MS: i64 = 1_799_500_000_000;
+
+    #[test]
+    fn local_write_epoch_fence_runs_before_the_command_side_effect() {
+        let temp = TempDir::new().unwrap();
+        let db_path = temp.path().join("local-write-epoch.sqlite3");
+        open_encrypted(&db_path, &DB_KEY).unwrap();
+        let client = TaskveilClient {
+            db_dir: temp.path().to_path_buf(),
+            profile_coordinator: TaskveilClient::pinned_test_coordinator(temp.path(), &db_path),
+            db_path: db_path.clone(),
+            db_key: Mutex::new(Zeroizing::new(DB_KEY)),
+            account: Mutex::new(AccountRuntimeState {
+                session: None,
+                session_restored: true,
+                loaded_credential_generation: None,
+                crypto: CryptoRuntimeState::Anonymous,
+            }),
+            sync: Mutex::new(SyncRuntimeState::default()),
+            runtime_epoch: std::sync::atomic::AtomicI64::new(1),
+            capsule_generation: std::sync::atomic::AtomicU64::new(1),
+        };
+        SqliteProfileCoordinationRepository::new(open_encrypted(&db_path, &DB_KEY).unwrap())
+            .bump_runtime_epoch(BASE_MS)
+            .unwrap();
+        let mut command_side_effects = 0;
+
+        let result = client.write_with_runtime_epoch(|transaction| {
+            command_side_effects += 1;
+            transaction.set_setting("must_not_commit", "stale", BASE_MS)?;
+            Ok(())
+        });
+
+        assert!(matches!(
+            result,
+            Err(ClientError::Storage(
+                StorageError::ProfileRuntimeEpochChanged {
+                    expected: 1,
+                    actual: 2
+                }
+            ))
+        ));
+        assert_eq!(command_side_effects, 0);
+        assert_eq!(
+            SqliteSettingsRepository::new(open_encrypted(&db_path, &DB_KEY).unwrap())
+                .get_setting("must_not_commit")
+                .unwrap(),
+            None
+        );
+    }
 
     #[test]
     fn get_tasks_for_deleted_non_alias_list_remains_empty() {
@@ -1097,15 +1243,18 @@ mod tests {
         drop(lists);
         let client = TaskveilClient {
             db_dir: temp.path().to_path_buf(),
+            profile_coordinator: TaskveilClient::pinned_test_coordinator(temp.path(), &db_path),
             db_path,
             db_key: Mutex::new(Zeroizing::new(DB_KEY)),
             account: Mutex::new(AccountRuntimeState {
                 session: None,
                 session_restored: true,
+                loaded_credential_generation: None,
                 crypto: CryptoRuntimeState::Anonymous,
             }),
             sync: Mutex::new(SyncRuntimeState::default()),
-            operation_busy: std::sync::atomic::AtomicBool::new(false),
+            runtime_epoch: std::sync::atomic::AtomicI64::new(1),
+            capsule_generation: std::sync::atomic::AtomicU64::new(1),
         };
 
         assert!(client.get_tasks(list_id).unwrap().is_empty());
@@ -1140,15 +1289,18 @@ mod tests {
 
         let client = TaskveilClient {
             db_dir: temp.path().to_path_buf(),
+            profile_coordinator: TaskveilClient::pinned_test_coordinator(temp.path(), &db_path),
             db_path: db_path.clone(),
             db_key: Mutex::new(Zeroizing::new(DB_KEY)),
             account: Mutex::new(AccountRuntimeState {
                 session: None,
                 session_restored: true,
+                loaded_credential_generation: None,
                 crypto: CryptoRuntimeState::Anonymous,
             }),
             sync: Mutex::new(SyncRuntimeState::default()),
-            operation_busy: std::sync::atomic::AtomicBool::new(false),
+            runtime_epoch: std::sync::atomic::AtomicI64::new(1),
+            capsule_generation: std::sync::atomic::AtomicU64::new(1),
         };
 
         assert_eq!(client.get_tasks(alias.id).unwrap(), vec![task]);
@@ -1181,15 +1333,18 @@ mod tests {
             .unwrap();
         let client = TaskveilClient {
             db_dir: temp.path().to_path_buf(),
+            profile_coordinator: TaskveilClient::pinned_test_coordinator(temp.path(), &db_path),
             db_path: db_path.clone(),
             db_key: Mutex::new(Zeroizing::new(DB_KEY)),
             account: Mutex::new(AccountRuntimeState {
                 session: None,
                 session_restored: true,
+                loaded_credential_generation: None,
                 crypto: CryptoRuntimeState::Anonymous,
             }),
             sync: Mutex::new(SyncRuntimeState::default()),
-            operation_busy: std::sync::atomic::AtomicBool::new(false),
+            runtime_epoch: std::sync::atomic::AtomicI64::new(1),
+            capsule_generation: std::sync::atomic::AtomicU64::new(1),
         };
         let running = ActiveTimerSession {
             session_id: Uuid::now_v7(),
@@ -1296,15 +1451,18 @@ mod tests {
             .unwrap();
         let client = TaskveilClient {
             db_dir: temp.path().to_path_buf(),
+            profile_coordinator: TaskveilClient::pinned_test_coordinator(temp.path(), &db_path),
             db_path: db_path.clone(),
             db_key: Mutex::new(Zeroizing::new(DB_KEY)),
             account: Mutex::new(AccountRuntimeState {
                 session: None,
                 session_restored: true,
+                loaded_credential_generation: None,
                 crypto: CryptoRuntimeState::Ready(Box::new(ready_crypto)),
             }),
             sync: Mutex::new(SyncRuntimeState::default()),
-            operation_busy: std::sync::atomic::AtomicBool::new(false),
+            runtime_epoch: std::sync::atomic::AtomicI64::new(2),
+            capsule_generation: std::sync::atomic::AtomicU64::new(1),
         };
 
         let mut mismatched = completed.clone();
@@ -1405,15 +1563,18 @@ mod tests {
         .unwrap();
         let client = TaskveilClient {
             db_dir: temp.path().to_path_buf(),
+            profile_coordinator: TaskveilClient::pinned_test_coordinator(temp.path(), &db_path),
             db_path: db_path.clone(),
             db_key: Mutex::new(Zeroizing::new(DB_KEY)),
             account: Mutex::new(AccountRuntimeState {
                 session: None,
                 session_restored: true,
+                loaded_credential_generation: None,
                 crypto: CryptoRuntimeState::Ready(Box::new(ready_crypto)),
             }),
             sync: Mutex::new(SyncRuntimeState::default()),
-            operation_busy: std::sync::atomic::AtomicBool::new(false),
+            runtime_epoch: std::sync::atomic::AtomicI64::new(2),
+            capsule_generation: std::sync::atomic::AtomicU64::new(1),
         };
 
         assert!(client
@@ -1442,15 +1603,21 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let client = TaskveilClient {
             db_dir: temp.path().to_path_buf(),
+            profile_coordinator: crate::profile_coordination::ProfileCoordinator::for_profile(
+                temp.path(),
+            )
+            .unwrap(),
             db_path: temp.path().join("profile.sqlite3"),
             db_key: Mutex::new(Zeroizing::new(DB_KEY)),
             account: Mutex::new(AccountRuntimeState {
                 session: None,
                 session_restored: true,
+                loaded_credential_generation: None,
                 crypto: CryptoRuntimeState::Anonymous,
             }),
             sync: Mutex::new(SyncRuntimeState::default()),
-            operation_busy: std::sync::atomic::AtomicBool::new(false),
+            runtime_epoch: std::sync::atomic::AtomicI64::new(1),
+            capsule_generation: std::sync::atomic::AtomicU64::new(1),
         };
 
         let result = client.update_task(UpdateTaskCommand {
@@ -1472,15 +1639,21 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let client = TaskveilClient {
             db_dir: temp.path().to_path_buf(),
+            profile_coordinator: crate::profile_coordination::ProfileCoordinator::for_profile(
+                temp.path(),
+            )
+            .unwrap(),
             db_path: temp.path().join("profile.sqlite3"),
             db_key: Mutex::new(Zeroizing::new(DB_KEY)),
             account: Mutex::new(AccountRuntimeState {
                 session: None,
                 session_restored: true,
+                loaded_credential_generation: None,
                 crypto: CryptoRuntimeState::Anonymous,
             }),
             sync: Mutex::new(SyncRuntimeState::default()),
-            operation_busy: std::sync::atomic::AtomicBool::new(false),
+            runtime_epoch: std::sync::atomic::AtomicI64::new(1),
+            capsule_generation: std::sync::atomic::AtomicU64::new(1),
         };
 
         let result = client.create_task(CreateTaskCommand {
@@ -1499,7 +1672,7 @@ mod tests {
     }
 
     #[test]
-    fn network_operation_blocks_local_mutation_and_drop_reopens_the_gate() {
+    fn network_wait_allows_local_mutation_but_blocks_exclusive_profile_changes() {
         let temp = TempDir::new().unwrap();
         let db_path = temp.path().join("gate.sqlite3");
         let list = new_list(
@@ -1513,27 +1686,40 @@ mod tests {
             .unwrap();
         let client = TaskveilClient {
             db_dir: temp.path().to_path_buf(),
+            profile_coordinator: TaskveilClient::pinned_test_coordinator(temp.path(), &db_path),
             db_path,
             db_key: Mutex::new(Zeroizing::new(DB_KEY)),
             account: Mutex::new(AccountRuntimeState {
                 session: None,
                 session_restored: true,
+                loaded_credential_generation: None,
                 crypto: CryptoRuntimeState::Anonymous,
             }),
             sync: Mutex::new(SyncRuntimeState::default()),
-            operation_busy: std::sync::atomic::AtomicBool::new(false),
+            runtime_epoch: std::sync::atomic::AtomicI64::new(1),
+            capsule_generation: std::sync::atomic::AtomicU64::new(1),
         };
 
         let network_operation = client.begin_operation().unwrap();
+        assert_eq!(
+            client
+                .rename_list(list.id, "Allowed during sync".into())
+                .unwrap()
+                .name,
+            "Allowed during sync"
+        );
         assert!(matches!(
-            client.rename_list(list.id, "Blocked".into()),
-            Err(ClientError::Busy)
+            client.begin_exclusive_operation(),
+            Err(ClientError::ProfileBusy)
         ));
         drop(network_operation);
-
+        let _exclusive = client.begin_exclusive_operation().unwrap();
         assert_eq!(
-            client.rename_list(list.id, "Allowed".into()).unwrap().name,
-            "Allowed"
+            client
+                .with_list_repository(|repository| Ok(repository.get(list.id)?))
+                .unwrap()
+                .name,
+            "Allowed during sync"
         );
     }
 
@@ -1553,15 +1739,18 @@ mod tests {
                 .unwrap();
             let client = TaskveilClient {
                 db_dir: temp.path().to_path_buf(),
+                profile_coordinator: TaskveilClient::pinned_test_coordinator(temp.path(), &db_path),
                 db_path: db_path.clone(),
                 db_key: Mutex::new(Zeroizing::new(DB_KEY)),
                 account: Mutex::new(AccountRuntimeState {
                     session: None,
                     session_restored: true,
+                    loaded_credential_generation: None,
                     crypto,
                 }),
                 sync: Mutex::new(SyncRuntimeState::default()),
-                operation_busy: std::sync::atomic::AtomicBool::new(false),
+                runtime_epoch: std::sync::atomic::AtomicI64::new(1),
+                capsule_generation: std::sync::atomic::AtomicU64::new(1),
             };
             (temp, db_path, list, client)
         };
@@ -1613,6 +1802,10 @@ mod tests {
         .unwrap();
         let ready = TaskveilClient {
             db_dir: ready_temp.path().to_path_buf(),
+            profile_coordinator: TaskveilClient::pinned_test_coordinator(
+                ready_temp.path(),
+                &ready_path,
+            ),
             db_path: ready_path.clone(),
             db_key: Mutex::new(Zeroizing::new(DB_KEY)),
             account: Mutex::new(AccountRuntimeState {
@@ -1624,10 +1817,12 @@ mod tests {
                     device_id: Some("device".into()),
                 }),
                 session_restored: true,
+                loaded_credential_generation: None,
                 crypto: CryptoRuntimeState::Ready(Box::new(ready_crypto)),
             }),
             sync: Mutex::new(SyncRuntimeState::default()),
-            operation_busy: std::sync::atomic::AtomicBool::new(false),
+            runtime_epoch: std::sync::atomic::AtomicI64::new(2),
+            capsule_generation: std::sync::atomic::AtomicU64::new(1),
         };
         ready
             .rename_list(ready_list.id, "Online ready".into())
@@ -1689,15 +1884,18 @@ mod tests {
 
         let client = TaskveilClient {
             db_dir: temp.path().to_path_buf(),
+            profile_coordinator: TaskveilClient::pinned_test_coordinator(temp.path(), &db_path),
             db_path: db_path.clone(),
             db_key: Mutex::new(Zeroizing::new(DB_KEY)),
             account: Mutex::new(AccountRuntimeState {
                 session: None,
                 session_restored: true,
+                loaded_credential_generation: None,
                 crypto: CryptoRuntimeState::Anonymous,
             }),
             sync: Mutex::new(SyncRuntimeState::default()),
-            operation_busy: std::sync::atomic::AtomicBool::new(false),
+            runtime_epoch: std::sync::atomic::AtomicI64::new(1),
+            capsule_generation: std::sync::atomic::AtomicU64::new(1),
         };
         let sync = LocalMutationContext {
             device_id: "device-a".into(),
@@ -1745,15 +1943,18 @@ mod tests {
 
         let client = TaskveilClient {
             db_dir: temp.path().to_path_buf(),
+            profile_coordinator: TaskveilClient::pinned_test_coordinator(temp.path(), &db_path),
             db_path: db_path.clone(),
             db_key: Mutex::new(Zeroizing::new(DB_KEY)),
             account: Mutex::new(AccountRuntimeState {
                 session: None,
                 session_restored: true,
+                loaded_credential_generation: None,
                 crypto: CryptoRuntimeState::Anonymous,
             }),
             sync: Mutex::new(SyncRuntimeState::default()),
-            operation_busy: std::sync::atomic::AtomicBool::new(false),
+            runtime_epoch: std::sync::atomic::AtomicI64::new(1),
+            capsule_generation: std::sync::atomic::AtomicU64::new(1),
         };
         let sync = LocalMutationContext {
             device_id: "device-a".into(),

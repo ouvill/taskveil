@@ -22,28 +22,8 @@ impl ReminderRepository for SqliteReminderRepository {
         remind_at: i64,
         created_at: i64,
     ) -> Result<Reminder, StorageError> {
-        ensure_task_open_for_reminder(&self.connection, task_id)?;
-        validate_reminder_time(remind_at, created_at)?;
-        let reminder = Reminder {
-            id: Uuid::now_v7(),
-            task_id,
-            remind_at,
-            snoozed_until: None,
-            created_at,
-        };
         let transaction = self.connection.transaction()?;
-        let reminder_count: i64 = transaction.query_row(
-            "SELECT COUNT(*) FROM reminders WHERE task_id = ?1",
-            [task_id.to_string()],
-            |row| row.get(0),
-        )?;
-        if reminder_count >= MAX_REMINDERS_PER_TASK as i64 {
-            return Err(StorageError::ReminderLimitReached {
-                limit: MAX_REMINDERS_PER_TASK,
-            });
-        }
-        ensure_unique_reminder_time_on(&transaction, task_id, remind_at, None)?;
-        insert_reminder_on(&transaction, &reminder)?;
+        let reminder = create_task_reminder_on(&transaction, task_id, remind_at, created_at)?;
         transaction.commit()?;
         Ok(reminder)
     }
@@ -54,40 +34,18 @@ impl ReminderRepository for SqliteReminderRepository {
         remind_at: i64,
         updated_at: i64,
     ) -> Result<Reminder, StorageError> {
-        validate_reminder_time(remind_at, updated_at)?;
-        let current = get_reminder_on(&self.connection, reminder_id)?;
-        ensure_task_open_for_reminder(&self.connection, current.task_id)?;
         let transaction = self.connection.transaction()?;
-        ensure_unique_reminder_time_on(
-            &transaction,
-            current.task_id,
-            remind_at,
-            Some(reminder_id),
-        )?;
-        transaction.execute(
-            "UPDATE reminders
-             SET remind_at = ?2, snoozed_until = NULL
-             WHERE id = ?1",
-            params![reminder_id.to_string(), remind_at],
-        )?;
-        let reminder = get_reminder_on(&transaction, reminder_id)?;
+        let reminder = update_reminder_on(&transaction, reminder_id, remind_at, updated_at)?;
         transaction.commit()?;
         Ok(reminder)
     }
 
     fn delete_reminder(&mut self, reminder_id: Uuid) -> Result<Reminder, StorageError> {
-        let reminder = get_reminder_on(&self.connection, reminder_id)?;
-        self.connection.execute(
-            "DELETE FROM reminders WHERE id = ?1",
-            [reminder_id.to_string()],
-        )?;
-        Ok(reminder)
+        delete_reminder_on(&self.connection, reminder_id)
     }
 
     fn clear_task_reminders(&mut self, task_id: Uuid) -> Result<Vec<Reminder>, StorageError> {
-        let reminders = list_task_reminders_on(&self.connection, task_id)?;
-        delete_task_reminders_on(&self.connection, task_id)?;
-        Ok(reminders)
+        clear_task_reminders_on(&self.connection, task_id)
     }
 
     fn list_task_reminders(&self, task_id: Uuid) -> Result<Vec<Reminder>, StorageError> {
@@ -157,28 +115,99 @@ impl ReminderRepository for SqliteReminderRepository {
         snoozed_until: i64,
         updated_at: i64,
     ) -> Result<Reminder, StorageError> {
-        let reminder = get_reminder_on(&self.connection, reminder_id)?;
-        ensure_task_open_for_reminder(&self.connection, reminder.task_id)?;
-        validate_reminder_time(snoozed_until, updated_at)?;
-        let changed = self.connection.execute(
-            "UPDATE reminders
-             SET snoozed_until = ?2
-             WHERE id = ?1",
-            params![reminder_id.to_string(), snoozed_until],
-        )?;
-        if changed == 0 {
-            return Err(StorageError::NotFound(reminder_id));
-        }
-        self.connection
-            .query_row(
-                "SELECT id, task_id, remind_at, snoozed_until, created_at
-                 FROM reminders
-                 WHERE id = ?1",
-                [reminder_id.to_string()],
-                row_to_reminder,
-            )
-            .map_err(StorageError::from)
+        snooze_reminder_on(&self.connection, reminder_id, snoozed_until, updated_at)
     }
+}
+
+pub(super) fn create_task_reminder_on(
+    connection: &Connection,
+    task_id: Uuid,
+    remind_at: i64,
+    created_at: i64,
+) -> Result<Reminder, StorageError> {
+    ensure_task_open_for_reminder(connection, task_id)?;
+    validate_reminder_time(remind_at, created_at)?;
+    let reminder_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM reminders WHERE task_id = ?1",
+        [task_id.to_string()],
+        |row| row.get(0),
+    )?;
+    if reminder_count >= MAX_REMINDERS_PER_TASK as i64 {
+        return Err(StorageError::ReminderLimitReached {
+            limit: MAX_REMINDERS_PER_TASK,
+        });
+    }
+    ensure_unique_reminder_time_on(connection, task_id, remind_at, None)?;
+    let reminder = Reminder {
+        id: Uuid::now_v7(),
+        task_id,
+        remind_at,
+        snoozed_until: None,
+        created_at,
+    };
+    insert_reminder_on(connection, &reminder)?;
+    Ok(reminder)
+}
+
+pub(super) fn update_reminder_on(
+    connection: &Connection,
+    reminder_id: Uuid,
+    remind_at: i64,
+    updated_at: i64,
+) -> Result<Reminder, StorageError> {
+    validate_reminder_time(remind_at, updated_at)?;
+    let current = get_reminder_on(connection, reminder_id)?;
+    ensure_task_open_for_reminder(connection, current.task_id)?;
+    ensure_unique_reminder_time_on(connection, current.task_id, remind_at, Some(reminder_id))?;
+    connection.execute(
+        "UPDATE reminders
+         SET remind_at = ?2, snoozed_until = NULL
+         WHERE id = ?1",
+        params![reminder_id.to_string(), remind_at],
+    )?;
+    get_reminder_on(connection, reminder_id)
+}
+
+pub(super) fn delete_reminder_on(
+    connection: &Connection,
+    reminder_id: Uuid,
+) -> Result<Reminder, StorageError> {
+    let reminder = get_reminder_on(connection, reminder_id)?;
+    connection.execute(
+        "DELETE FROM reminders WHERE id = ?1",
+        [reminder_id.to_string()],
+    )?;
+    Ok(reminder)
+}
+
+pub(super) fn clear_task_reminders_on(
+    connection: &Connection,
+    task_id: Uuid,
+) -> Result<Vec<Reminder>, StorageError> {
+    let reminders = list_task_reminders_on(connection, task_id)?;
+    delete_task_reminders_on(connection, task_id)?;
+    Ok(reminders)
+}
+
+pub(super) fn snooze_reminder_on(
+    connection: &Connection,
+    reminder_id: Uuid,
+    snoozed_until: i64,
+    updated_at: i64,
+) -> Result<Reminder, StorageError> {
+    let reminder = get_reminder_on(connection, reminder_id)?;
+    ensure_task_open_for_reminder(connection, reminder.task_id)?;
+    validate_reminder_time(snoozed_until, updated_at)?;
+    let changed = connection.execute(
+        "UPDATE reminders
+         SET snoozed_until = ?2
+         WHERE id = ?1",
+        params![reminder_id.to_string(), snoozed_until],
+    )?;
+    if changed == 0 {
+        return Err(StorageError::NotFound(reminder_id));
+    }
+    get_reminder_on(connection, reminder_id)
 }
 
 fn ensure_task_exists(connection: &Connection, task_id: Uuid) -> Result<(), StorageError> {

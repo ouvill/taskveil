@@ -1,13 +1,11 @@
 use crate::*;
 
-/// account bindingとMK-wrapped Tenant Root Key cacheの永続化を担うリポジトリ。
+/// account bindingとMK-wrapped Tenant Root Key cacheの読込を担うリポジトリ。
+///
+/// cache更新はgeneration履歴とsemantic key identityを一体で検証する必要があるため、
+/// 単一rootを置換する公開repository APIは提供しない。
 pub trait LocalCryptoRepository {
     fn load_binding(&self) -> Result<Option<LocalProfileBinding>, StorageError>;
-    fn bind_tenant_root(
-        &mut self,
-        binding: LocalProfileBinding,
-        tenant_root: &LocalTenantRootKeyBundle,
-    ) -> Result<(), StorageError>;
     fn load_tenant_root(
         &self,
         tenant_id: Uuid,

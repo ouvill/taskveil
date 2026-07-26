@@ -13,7 +13,7 @@ where
 {
     let mut transaction = store
         .begin_write_transaction()
-        .map_err(|_| PageApplyError::Hard)?;
+        .map_err(PageApplyError::Hard)?;
     let mut page_summary = SyncRunSummary {
         pulled_count: page.records.len(),
         ..SyncRunSummary::default()
@@ -21,12 +21,12 @@ where
     for record in &page.records {
         let disposition =
             apply_pull_record(record, context, &mut transaction, now_ms, &mut page_summary)
-                .map_err(|_| PageApplyError::Hard)?;
+                .map_err(PageApplyError::Hard)?;
         match disposition {
             ApplyDisposition::AppliedCurrent | ApplyDisposition::Rebased => {
                 if transaction
                     .delete_quarantine(record.record_id)
-                    .map_err(|_| PageApplyError::Hard)?
+                    .map_err(PageApplyError::Hard)?
                 {
                     page_summary.resolved_quarantine_count += 1;
                 }
@@ -39,7 +39,7 @@ where
                 {
                     return Err(PageApplyError::MissingKey);
                 }
-                let failed_at = now_ms().map_err(|_| PageApplyError::Hard)?;
+                let failed_at = now_ms().map_err(PageApplyError::Hard)?;
                 transaction
                     .put_quarantine(LocalSyncQuarantineEntry {
                         record_id: record.record_id,
@@ -53,7 +53,7 @@ where
                         last_failed_at: failed_at,
                         attempt_count: 1,
                     })
-                    .map_err(|_| PageApplyError::Hard)?;
+                    .map_err(PageApplyError::Hard)?;
                 page_summary.decrypt_failed_count += 1;
                 if matches!(
                     reason,
@@ -73,10 +73,10 @@ where
         .set_cursor(
             SYNC_CURSOR_NAME,
             page.next_since,
-            now_ms().map_err(|_| PageApplyError::Hard)?,
+            now_ms().map_err(PageApplyError::Hard)?,
         )
-        .map_err(|_| PageApplyError::Hard)?;
-    transaction.commit().map_err(|_| PageApplyError::Hard)?;
+        .map_err(PageApplyError::Hard)?;
+    transaction.commit().map_err(PageApplyError::Hard)?;
     Ok(page_summary)
 }
 

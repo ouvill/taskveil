@@ -1143,6 +1143,120 @@ async fn unsupported_preflight_durably_blocks_outbox_before_push() {
 }
 
 #[tokio::test]
+async fn exact_preflight_fault_blocks_its_http_request_and_every_later_boundary() {
+    const DB_KEY: [u8; 32] = [0xd5; 32];
+    let tenant_id = Uuid::now_v7();
+    let device_id = Uuid::now_v7();
+    let preflight_count = Arc::new(AtomicUsize::new(0));
+    let pull_count = Arc::new(AtomicUsize::new(0));
+    let ack_count = Arc::new(AtomicUsize::new(0));
+
+    let app = Router::new()
+        .route(
+            "/v2/tenants/{tenant_id}/preflight",
+            axum::routing::get({
+                let counter = preflight_count.clone();
+                move || {
+                    let counter = counter.clone();
+                    async move {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        axum::Json(test_capabilities(
+                            tenant_id,
+                            taskveil_sync::protocol::SYNC_PROTOCOL_VERSION,
+                        ))
+                    }
+                }
+            }),
+        )
+        .route(
+            "/v2/tenants/{tenant_id}/pull",
+            axum::routing::get({
+                let counter = pull_count.clone();
+                move || {
+                    let counter = counter.clone();
+                    async move {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        axum::Json(taskveil_sync::protocol::PullResponse {
+                            records: Vec::new(),
+                            next_since: 0,
+                            has_more: false,
+                            high_water: 0,
+                            closure_proof: Some(taskveil_sync::protocol::ClosureProof {
+                                proof_id: Uuid::now_v7(),
+                                tenant_id,
+                                device_id,
+                                high_water: 0,
+                                generation: 0,
+                            }),
+                        })
+                    }
+                }
+            }),
+        )
+        .route(
+            "/v2/tenants/{tenant_id}/continuity/ack",
+            axum::routing::post({
+                let counter = ack_count.clone();
+                move || {
+                    let counter = counter.clone();
+                    async move {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        axum::Json(taskveil_sync::protocol::ContinuityAckResponse {
+                            continuity_seq: 0,
+                            continuity_generation: 0,
+                        })
+                    }
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let expected_http_counts = [(0, 0, 0), (1, 0, 0), (1, 1, 0)];
+    for (fail_on_call, expected) in (1..=3).zip(expected_http_counts) {
+        preflight_count.store(0, Ordering::SeqCst);
+        pull_count.store(0, Ordering::SeqCst);
+        ack_count.store(0, Ordering::SeqCst);
+
+        let temp = TempDir::new().unwrap();
+        let mut store = SqliteSyncStore::new(temp.path().join("fault.sqlite3"), DB_KEY);
+        store.fail_preflight_on_call(fail_on_call);
+        let mut now = || Ok(Utc::now().timestamp_millis());
+        let result = run_sync_now(
+            ActiveSyncContext {
+                server_url: format!("http://{address}"),
+                tenant_id,
+                device_id: device_id.to_string(),
+                session_token: taskveil_sync::SecretString::new("token"),
+                manifest_auth_key: test_manifest_auth_key(),
+                keys: LocalSyncKeys {
+                    tenant_id,
+                    tenant_root_dek: Some([0xd5; 32].into()),
+                    tenant_generation: 1,
+                    historical_tenant_root_deks: Vec::new(),
+                },
+            },
+            &mut store,
+            &mut now,
+        )
+        .await;
+
+        assert_eq!(result, Err("sync lease lost".to_string()));
+        assert_eq!(store.preflight_call_count(), fail_on_call);
+        assert_eq!(
+            (
+                preflight_count.load(Ordering::SeqCst),
+                pull_count.load(Ordering::SeqCst),
+                ack_count.load(Ordering::SeqCst),
+            ),
+            expected,
+            "the exact faulted boundary and all later HTTP requests must be blocked",
+        );
+    }
+}
+
+#[tokio::test]
 async fn continuity_410_still_enforces_protocol_upgrade_before_resync() {
     const DB_KEY: [u8; 32] = [0xd6; 32];
     let tenant_id = Uuid::now_v7();

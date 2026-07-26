@@ -1,3 +1,13 @@
+use crate::local_crypto_repository::{
+    bind_tenant_roots_on, load_local_profile_binding_on, load_local_tenant_roots_on,
+};
+use crate::profile_coordination::{
+    assert_runtime_epoch_on, assert_sync_lease_on, bump_runtime_epoch_on,
+};
+use crate::reminder_repository::{
+    clear_task_reminders_on, create_task_reminder_on, delete_reminder_on, snooze_reminder_on,
+    update_reminder_on,
+};
 use crate::*;
 
 /// A short-lived SQLite write transaction shared by domain and sync-state writes.
@@ -73,6 +83,16 @@ impl<'connection> SqliteWriteTx<'connection> {
         updated_at: i64,
     ) -> Result<(), StorageError> {
         update_active_timer_session_on(&self.transaction, session, updated_at)
+    }
+
+    pub fn clear_active_timer_session(
+        &mut self,
+        expected_session_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        Ok(self.transaction.execute(
+            "DELETE FROM active_timer_session WHERE singleton = 1 AND session_id = ?1",
+            [expected_session_id.to_string()],
+        )? == 1)
     }
 
     pub fn list_timer_sessions_by_task(
@@ -290,6 +310,41 @@ impl<'connection> SqliteWriteTx<'connection> {
         set_setting_on(&self.transaction, key, value, updated_at)
     }
 
+    pub fn create_task_reminder(
+        &mut self,
+        task_id: Uuid,
+        remind_at: i64,
+        created_at: i64,
+    ) -> Result<Reminder, StorageError> {
+        create_task_reminder_on(&self.transaction, task_id, remind_at, created_at)
+    }
+
+    pub fn update_reminder(
+        &mut self,
+        reminder_id: Uuid,
+        remind_at: i64,
+        updated_at: i64,
+    ) -> Result<Reminder, StorageError> {
+        update_reminder_on(&self.transaction, reminder_id, remind_at, updated_at)
+    }
+
+    pub fn delete_reminder(&mut self, reminder_id: Uuid) -> Result<Reminder, StorageError> {
+        delete_reminder_on(&self.transaction, reminder_id)
+    }
+
+    pub fn clear_task_reminders(&mut self, task_id: Uuid) -> Result<Vec<Reminder>, StorageError> {
+        clear_task_reminders_on(&self.transaction, task_id)
+    }
+
+    pub fn snooze_reminder(
+        &mut self,
+        reminder_id: Uuid,
+        snoozed_until: i64,
+        updated_at: i64,
+    ) -> Result<Reminder, StorageError> {
+        snooze_reminder_on(&self.transaction, reminder_id, snoozed_until, updated_at)
+    }
+
     pub fn put_outbox_head(
         &mut self,
         entry: NewSyncOutboxEntry,
@@ -338,6 +393,18 @@ impl<'connection> SqliteWriteTx<'connection> {
 
     pub fn commit(self) -> Result<(), StorageError> {
         self.transaction.commit().map_err(StorageError::from)
+    }
+
+    pub fn assert_profile_runtime_epoch(&self, expected: i64) -> Result<(), StorageError> {
+        assert_runtime_epoch_on(&self.transaction, expected)
+    }
+
+    pub fn assert_sync_lease(&self, lease: &SyncLease, now_ms: i64) -> Result<(), StorageError> {
+        assert_sync_lease_on(&self.transaction, lease, now_ms)
+    }
+
+    pub fn bump_runtime_epoch(&mut self, now_ms: i64) -> Result<ProfileRuntimeState, StorageError> {
+        bump_runtime_epoch_on(&self.transaction, now_ms)
     }
 }
 
@@ -421,6 +488,39 @@ impl OwnedSqliteWriteTx {
 
     pub fn put_record_state(&mut self, state: SyncRecordState) -> Result<(), StorageError> {
         put_record_state_on(self.connection(), state)
+    }
+
+    /// Replaces the complete generation-indexed Tenant Root cache after the
+    /// caller has authenticated and compared its semantic key material.
+    pub fn bind_tenant_roots(
+        &mut self,
+        binding: LocalProfileBinding,
+        tenant_roots: &[LocalTenantRootKeyBundle],
+    ) -> Result<bool, StorageError> {
+        bind_tenant_roots_on(self.connection(), binding, tenant_roots)
+    }
+
+    pub fn load_local_crypto_binding(&self) -> Result<Option<LocalProfileBinding>, StorageError> {
+        load_local_profile_binding_on(self.connection())
+    }
+
+    pub fn load_tenant_roots(
+        &self,
+        tenant_id: Uuid,
+    ) -> Result<Vec<LocalTenantRootKeyBundle>, StorageError> {
+        load_local_tenant_roots_on(self.connection(), tenant_id)
+    }
+
+    pub fn bump_runtime_epoch(&mut self, now_ms: i64) -> Result<ProfileRuntimeState, StorageError> {
+        bump_runtime_epoch_on(self.connection(), now_ms)
+    }
+
+    pub fn assert_profile_runtime_epoch(&self, expected: i64) -> Result<(), StorageError> {
+        assert_runtime_epoch_on(self.connection(), expected)
+    }
+
+    pub fn assert_sync_lease(&self, lease: &SyncLease, now_ms: i64) -> Result<(), StorageError> {
+        assert_sync_lease_on(self.connection(), lease, now_ms)
     }
 
     pub fn get_cursor(&self, name: &str) -> Result<Option<SyncCursor>, StorageError> {
@@ -593,6 +693,23 @@ impl OwnedSqliteWriteTx {
         get_default_list_on(self.connection()).map(|list| list.map(|list| list.id))
     }
 
+    pub fn list_lists_including_archived(&self) -> Result<Vec<List>, StorageError> {
+        let mut statement = self.connection().prepare(
+            "SELECT id, name, color, icon, sort_order, archived_at,
+                    is_default, created_at, updated_at
+             FROM lists
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM list_aliases alias WHERE alias.alias_list_id = lists.id
+             )
+             ORDER BY sort_order ASC, id ASC",
+        )?;
+        let lists = statement
+            .query_map([], row_to_list)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(StorageError::from)?;
+        Ok(lists)
+    }
+
     pub fn get_list(&self, id: Uuid) -> Result<Option<List>, StorageError> {
         optional_not_found(get_list_on(self.connection(), id))
     }
@@ -686,6 +803,16 @@ impl OwnedSqliteWriteTx {
                     active_duration_ms, created_at
              FROM timer_sessions WHERE task_id = ?1 ORDER BY started_at, id",
             [task_id.to_string()],
+        )
+    }
+
+    pub fn list_timer_sessions_for_sync(&self) -> Result<Vec<CompletedTimerSession>, StorageError> {
+        list_completed_timer_sessions_on(
+            self.connection(),
+            "SELECT id, task_id, mode, finish_kind, started_at, ended_at,
+                    active_duration_ms, created_at
+             FROM timer_sessions ORDER BY started_at, id",
+            [],
         )
     }
 

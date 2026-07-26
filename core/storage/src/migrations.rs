@@ -29,6 +29,11 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         name: "resync_page_tokens",
         sql: include_str!("../migrations/0003_resync_page_tokens.sql"),
     },
+    Migration {
+        version: 4,
+        name: "profile_coordination",
+        sql: include_str!("../migrations/0004_profile_coordination.sql"),
+    },
 ];
 
 #[derive(Clone, Copy)]
@@ -261,7 +266,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(version, LATEST_MIGRATION_VERSION);
-        assert_eq!(name, "resync_page_tokens");
+        assert_eq!(name, "profile_coordination");
         assert_eq!(checksum_length, 48);
         assert!(table_exists(&connection, "tasks").unwrap());
     }
@@ -424,7 +429,10 @@ mod tests {
         drop(connection);
 
         let connection = open_encrypted(file.path(), &KEY).unwrap();
-        assert_eq!(ledger_count(&connection), 2);
+        assert_eq!(
+            ledger_count(&connection),
+            i64::from(LATEST_MIGRATION_VERSION)
+        );
         assert_eq!(
             connection
                 .query_row("SELECT count(*) FROM sync_full_resync_state", [], |row| {
@@ -440,6 +448,96 @@ mod tests {
                 })
                 .unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn profile_coordination_migrates_v3_database_with_initialized_epoch_and_lease() {
+        let file = NamedTempFile::new().unwrap();
+        let mut connection = open_raw(file.path());
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        transaction.execute_batch(CREATE_MIGRATION_TABLE).unwrap();
+        for migration in &MIGRATIONS[..3] {
+            transaction.execute_batch(migration.sql).unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO _taskveil_migrations (version, name, checksum)
+                     VALUES (?1, ?2, ?3)",
+                    params![
+                        migration.version,
+                        migration.name,
+                        migration_checksum(migration)
+                    ],
+                )
+                .unwrap();
+        }
+        let tenant_id = Uuid::now_v7().to_string();
+        transaction
+            .execute(
+                "INSERT INTO local_tenant_root_key_cache (
+                     tenant_id, generation, wrapped_tenant_root_dek, updated_at
+                 ) VALUES (?1, 7, x'0102', 10)",
+                [&tenant_id],
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+        drop(connection);
+
+        let connection = open_encrypted(file.path(), &KEY).unwrap();
+        let runtime: (i64, i64) = connection
+            .query_row(
+                "SELECT runtime_epoch, capsule_generation
+                 FROM local_profile_runtime WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let lease: (Option<String>, i64, i64) = connection
+            .query_row(
+                "SELECT owner_id, fencing_token, runtime_epoch
+                 FROM sync_run_lease WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(runtime, (1, 1));
+        assert_eq!(lease, (None, 0, 1));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT generation, wrapped_tenant_root_dek
+                     FROM local_tenant_root_key_cache
+                     WHERE tenant_id = ?1",
+                    [&tenant_id],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+                )
+                .unwrap(),
+            (7, vec![1, 2])
+        );
+        connection
+            .execute(
+                "INSERT INTO local_tenant_root_key_cache (
+                     tenant_id, generation, wrapped_tenant_root_dek, updated_at
+                 ) VALUES (?1, 8, x'0304', 11)",
+                [&tenant_id],
+            )
+            .unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM local_tenant_root_key_cache
+                     WHERE tenant_id = ?1",
+                    [&tenant_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            ledger_count(&connection),
+            i64::from(LATEST_MIGRATION_VERSION)
         );
     }
 
@@ -490,7 +588,6 @@ mod tests {
                 latest
             }) if found == LATEST_MIGRATION_VERSION + 1
                 && latest == LATEST_MIGRATION_VERSION
-            })
         ));
     }
 
@@ -559,18 +656,23 @@ mod tests {
             },
             Migration {
                 version: 2,
+                name: "middle",
+                sql: "CREATE TABLE middle (id INTEGER);",
+            },
+            Migration {
+                version: 3,
                 name: "failing",
                 sql: "CREATE TABLE partial (id INTEGER);
                       SELECT value FROM missing_failure_injection_table;",
             },
         ];
 
-        let result = ensure_schema(&mut connection, &failing);
+        let result = ensure_schema_at_version(&mut connection, &failing, 3);
 
         assert!(matches!(
             result,
             Err(StorageError::MigrationFailed {
-                target_version: 2,
+                target_version: 3,
                 migration: "failing",
                 ..
             })

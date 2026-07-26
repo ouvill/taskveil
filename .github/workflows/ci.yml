@@ -152,6 +152,50 @@ jobs:
             target
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
 
+  rust-profile-coordination:
+    name: Profile coordination (${{ matrix.platform }})
+    needs: changes
+    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Linux
+            os: ubuntu-24.04
+          - platform: macOS
+            os: macos-26
+          - platform: Windows
+            os: windows-2025
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: 1.97.0
+
+      - name: Full client test suite
+        run: cargo test -p taskveil-client -- --nocapture
+
+      - name: Explicit real-process coordination acceptance tests
+        run: |
+          cargo test -p taskveil-client canonical_path_aliases_share_the_same_process_lock -- --nocapture
+          cargo test -p taskveil-client different_profiles_do_not_contend_across_real_processes -- --nocapture
+          cargo test -p taskveil-client real_process_sync_lease_allows_concurrent_local_mutation -- --nocapture
+          cargo test -p taskveil-client real_child_expiry_takeover_fences_requests_and_commits_without_sleep -- --nocapture
+          cargo test -p taskveil-client real_child_stale -- --nocapture
+          cargo test -p taskveil-client post_open_profile_root -- --nocapture
+
+      - name: Explicit inherited DACL acceptance test
+        if: runner.os == 'Windows'
+        run: |
+          cargo test -p taskveil-client windows_profile_acl_rejects_inherit_only_untrusted_write_access -- --nocapture
+          cargo test -p taskveil-client windows_existing_lockfiles_reject_explicit_untrusted_write_access -- --nocapture
+          cargo test -p taskveil-client windows_existing_database_rejects_explicit_untrusted_write_access -- --nocapture
+          cargo test -p taskveil-client windows_junction_alias_shares_the_same_real_process_lock -- --nocapture
+
   sqlx-metadata:
     name: SQLx metadata freshness
     needs: changes

@@ -96,6 +96,7 @@ where
         return Err("upgrade required".to_string());
     }
     let since = store.get_cursor_seq(SYNC_CURSOR_NAME)?.unwrap_or(0);
+    store.preflight_network_request()?;
     let preflight = match engine.preflight(since).await {
         Ok(preflight) => {
             if durable_upgrade_block.is_some() {
@@ -120,6 +121,7 @@ where
         Err(error) => return Err(sync_engine_error_to_string(error)),
     };
     if validate_preflight_key_state(&context, &preflight, store, now_ms).is_err() {
+        store.preflight_network_request()?;
         context.keys = key_refresher.refresh().await?;
         validate_preflight_key_state(&context, &preflight, store, now_ms)?;
     }
@@ -167,6 +169,7 @@ where
             && !refreshed_in_normal_pull
             && !store.list_replayable_quarantine(None, 1)?.is_empty()
         {
+            store.preflight_network_request()?;
             context.keys = key_refresher.refresh().await?;
         }
         if let Err(error) = replay_quarantine(&context, store, now_ms, &mut summary) {
@@ -208,6 +211,7 @@ where
                 state: entry.state,
             })
             .collect::<Vec<_>>();
+        store.preflight_network_request()?;
         let push_outcome = engine
             .push_batch(push_ops)
             .await
@@ -273,6 +277,7 @@ where
         return Err("sync failed".to_string());
     }
     if preflight.active_key_generation > 1 {
+        store.preflight_network_request()?;
         AccountClient::new(context.server_url.clone())
             .map_err(|_| "sync failed".to_string())?
             .acknowledge_key_generation(
@@ -534,6 +539,7 @@ where
     let mut refreshed = false;
     loop {
         let since = store.get_cursor_seq(SYNC_CURSOR_NAME)?.unwrap_or(0);
+        store.preflight_network_request()?;
         let page = engine
             .pull_page(since, 100)
             .await
@@ -541,6 +547,7 @@ where
         match apply_pull_page(&page, context, store, now_ms, false) {
             Ok(page_summary) => merge_summary(summary, page_summary),
             Err(PageApplyError::MissingKey) => {
+                store.preflight_network_request()?;
                 context.keys = key_refresher.refresh().await?;
                 refreshed = true;
                 if let Err(error) = replay_quarantine(context, store, now_ms, summary) {
@@ -577,6 +584,7 @@ where
                 .clone()
                 .filter(|_| page.reached_closure())
                 .ok_or_else(|| "sync failed".to_string())?;
+            store.preflight_network_request()?;
             engine
                 .ack_continuity(proof)
                 .await

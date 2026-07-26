@@ -1,6 +1,9 @@
 mod convert;
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use convert::{
     local_cursor_to_storage, local_outbox_to_storage, local_quarantine_to_storage,
@@ -11,9 +14,10 @@ use convert::{
 use taskveil_domain::{CompletedTimerSession, List, Task, TaskSeries, TaskTemplate, Uuid};
 use taskveil_storage::{
     open_encrypted, ListRepository, OwnedSqliteWriteTx, SettingsRepository, SqliteListRepository,
-    SqliteSettingsRepository, SqliteSyncStateRepository, SqliteTaskRepository,
-    SqliteTemplateSeriesRepository, SqliteTimerSessionRepository, StorageError,
-    SyncStateRepository, TaskRepository, TemplateSeriesRepository, TimerSessionRepository,
+    SqliteProfileCoordinationRepository, SqliteSettingsRepository, SqliteSyncStateRepository,
+    SqliteTaskRepository, SqliteTemplateSeriesRepository, SqliteTimerSessionRepository,
+    StorageError, SyncLease, SyncStateRepository, TaskRepository, TemplateSeriesRepository,
+    TimerSessionRepository,
 };
 use taskveil_sync::{
     enqueue::{LocalFullResyncProgress, LocalFullResyncSweepSummary},
@@ -26,32 +30,312 @@ use zeroize::Zeroizing;
 pub struct SqliteSyncStore {
     db_path: PathBuf,
     db_key: Zeroizing<[u8; 32]>,
+    lease: Option<SyncLease>,
+    release_lease_on_drop: bool,
+    #[cfg(any(test, feature = "test-support"))]
+    coordination: SyncStoreCoordination,
+    #[cfg(any(test, feature = "test-support"))]
+    preflight_calls: usize,
+    #[cfg(any(test, feature = "test-support"))]
+    fail_preflight_on_call: Option<usize>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncStoreCoordination {
+    LeaseRequired,
+    #[cfg(any(test, feature = "test-support"))]
+    UnfencedProtocolHarness,
 }
 
 pub struct SqliteSyncWriteTx {
     transaction: OwnedSqliteWriteTx,
+    lease: Option<SyncLease>,
+    runtime_cutover: bool,
+}
+
+pub(crate) struct RotationBackfillSnapshot {
+    pub lists: Vec<List>,
+    pub templates: Vec<TaskTemplate>,
+    pub schedules: Vec<TaskSeries>,
+    pub tasks: Vec<Task>,
+    pub timer_sessions: Vec<CompletedTimerSession>,
 }
 
 impl SqliteSyncStore {
     #[cfg(any(test, feature = "test-support"))]
     pub fn new(db_path: PathBuf, db_key: [u8; 32]) -> Self {
-        Self::new_secret(db_path, Zeroizing::new(db_key))
+        Self {
+            db_path,
+            db_key: Zeroizing::new(db_key),
+            lease: None,
+            release_lease_on_drop: false,
+            coordination: SyncStoreCoordination::UnfencedProtocolHarness,
+            preflight_calls: 0,
+            fail_preflight_on_call: None,
+        }
     }
 
     pub(crate) fn new_secret(db_path: PathBuf, db_key: Zeroizing<[u8; 32]>) -> Self {
-        Self { db_path, db_key }
+        Self {
+            db_path,
+            db_key,
+            lease: None,
+            release_lease_on_drop: false,
+            #[cfg(any(test, feature = "test-support"))]
+            coordination: SyncStoreCoordination::LeaseRequired,
+            #[cfg(any(test, feature = "test-support"))]
+            preflight_calls: 0,
+            #[cfg(any(test, feature = "test-support"))]
+            fail_preflight_on_call: None,
+        }
+    }
+
+    pub(crate) fn new_secret_with_lease(
+        db_path: PathBuf,
+        db_key: Zeroizing<[u8; 32]>,
+        lease: SyncLease,
+    ) -> Self {
+        Self {
+            db_path,
+            db_key,
+            lease: Some(lease),
+            release_lease_on_drop: false,
+            #[cfg(any(test, feature = "test-support"))]
+            coordination: SyncStoreCoordination::LeaseRequired,
+            #[cfg(any(test, feature = "test-support"))]
+            preflight_calls: 0,
+            #[cfg(any(test, feature = "test-support"))]
+            fail_preflight_on_call: None,
+        }
+    }
+
+    /// Injects a lease loss at an exact outer network boundary. This exists
+    /// only for protocol harnesses so tests can prove that a missing preflight
+    /// would incorrectly allow the corresponding HTTP request.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_preflight_on_call(&mut self, call: usize) {
+        assert!(call > 0, "preflight calls are one-based");
+        self.fail_preflight_on_call = Some(call);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn preflight_call_count(&self) -> usize {
+        self.preflight_calls
+    }
+
+    /// Begins the account/device publication transaction while the caller owns
+    /// the profile-exclusive OS guard. This is deliberately not a sync-store
+    /// constructor: production sync protocol paths must always carry a lease.
+    pub(crate) fn begin_profile_cutover_transaction(
+        db_path: &Path,
+        db_key: &[u8; 32],
+    ) -> Result<SqliteSyncWriteTx, String> {
+        let connection = open_encrypted(db_path, db_key).map_err(sync_coordination_error)?;
+        let transaction = OwnedSqliteWriteTx::begin(connection).map_err(sync_coordination_error)?;
+        Ok(SqliteSyncWriteTx {
+            transaction,
+            lease: None,
+            runtime_cutover: false,
+        })
+    }
+
+    pub(crate) fn acquire_sync_lease(
+        &mut self,
+        owner_id: &str,
+        runtime_epoch: i64,
+        ttl_ms: i64,
+    ) -> Result<(), StorageError> {
+        if self.lease.is_some() {
+            return Err(StorageError::SyncLeaseLost);
+        }
+        let now = coordination_now_ms()?;
+        let connection = open_encrypted(&self.db_path, &self.db_key)?;
+        let lease = SqliteProfileCoordinationRepository::new(connection).acquire_sync_lease(
+            owner_id,
+            now,
+            ttl_ms,
+            runtime_epoch,
+        )?;
+        self.lease = Some(lease);
+        self.release_lease_on_drop = true;
+        Ok(())
+    }
+
+    pub(crate) fn release_sync_lease(&mut self) -> Result<(), StorageError> {
+        let Some(lease) = self.lease.clone() else {
+            return Ok(());
+        };
+        let connection = open_encrypted(&self.db_path, &self.db_key)?;
+        SqliteProfileCoordinationRepository::new(connection)
+            .release_sync_lease(&lease, coordination_now_ms()?)?;
+        self.lease = None;
+        self.release_lease_on_drop = false;
+        Ok(())
+    }
+
+    pub(crate) fn renew_sync_lease(&mut self) -> Result<Option<SyncLease>, StorageError> {
+        let Some(lease) = self.lease.clone() else {
+            return Ok(None);
+        };
+        let connection = open_encrypted(&self.db_path, &self.db_key)?;
+        let mut coordination = SqliteProfileCoordinationRepository::new(connection);
+        let now = coordination_now_ms()?;
+        let renewed = coordination.renew_sync_lease(&lease, now, SYNC_LEASE_TTL_MS)?;
+        self.lease = Some(renewed.clone());
+        Ok(Some(renewed))
+    }
+
+    pub(crate) fn active_lease(&self) -> Result<SyncLease, StorageError> {
+        self.lease.clone().ok_or(StorageError::SyncLeaseLost)
+    }
+
+    /// Runs every outer-store mutation through the same fenced transaction
+    /// path used by pull/apply. Sync orchestration intentionally performs
+    /// reads between network requests, but it must never be able to publish a
+    /// setting, cursor, anchor, quarantine row, or domain row after losing its
+    /// lease.
+    fn fenced_write<T>(
+        &mut self,
+        write: impl FnOnce(&mut SqliteSyncWriteTx) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut transaction = self.begin_write_transaction()?;
+        let result = write(&mut transaction)?;
+        transaction.commit()?;
+        Ok(result)
     }
 }
+
+impl Drop for SqliteSyncStore {
+    fn drop(&mut self) {
+        if self.release_lease_on_drop {
+            let _ = self.release_sync_lease();
+        }
+    }
+}
+
+const SYNC_LEASE_TTL_MS: i64 = 5 * 60 * 1_000;
 
 impl LocalSyncAtomicStore for SqliteSyncStore {
     type WriteTransaction = SqliteSyncWriteTx;
 
-    fn begin_write_transaction(&mut self) -> Result<Self::WriteTransaction, String> {
+    fn preflight_network_request(&mut self) -> Result<(), String> {
+        #[cfg(any(test, feature = "test-support"))]
+        if self.coordination == SyncStoreCoordination::UnfencedProtocolHarness
+            && self.lease.is_none()
+        {
+            self.preflight_calls += 1;
+            if self.fail_preflight_on_call == Some(self.preflight_calls) {
+                return Err("sync lease lost".to_string());
+            }
+            return Ok(());
+        }
+        let lease = self
+            .renew_sync_lease()
+            .map_err(sync_coordination_error)?
+            .ok_or_else(|| sync_coordination_error(StorageError::SyncLeaseLost))?;
         let connection =
-            open_encrypted(&self.db_path, &self.db_key).map_err(|error| error.to_string())?;
-        let transaction =
-            OwnedSqliteWriteTx::begin(connection).map_err(|error| error.to_string())?;
-        Ok(SqliteSyncWriteTx { transaction })
+            open_encrypted(&self.db_path, &self.db_key).map_err(sync_coordination_error)?;
+        SqliteProfileCoordinationRepository::new(connection)
+            .assert_sync_lease(
+                &lease,
+                coordination_now_ms().map_err(sync_coordination_error)?,
+            )
+            .map_err(sync_coordination_error)
+    }
+
+    fn begin_write_transaction(&mut self) -> Result<Self::WriteTransaction, String> {
+        let lease = self.renew_sync_lease().map_err(sync_coordination_error)?;
+        #[cfg(any(test, feature = "test-support"))]
+        let unfenced_harness = self.coordination == SyncStoreCoordination::UnfencedProtocolHarness;
+        #[cfg(not(any(test, feature = "test-support")))]
+        let unfenced_harness = false;
+        if lease.is_none() && !unfenced_harness {
+            return Err(sync_coordination_error(StorageError::SyncLeaseLost));
+        }
+        let connection =
+            open_encrypted(&self.db_path, &self.db_key).map_err(sync_coordination_error)?;
+        let transaction = OwnedSqliteWriteTx::begin(connection).map_err(sync_coordination_error)?;
+        if let Some(lease) = lease.as_ref() {
+            transaction
+                .assert_sync_lease(
+                    lease,
+                    coordination_now_ms().map_err(sync_coordination_error)?,
+                )
+                .map_err(sync_coordination_error)?;
+        }
+        Ok(SqliteSyncWriteTx {
+            transaction,
+            lease,
+            runtime_cutover: false,
+        })
+    }
+}
+
+impl SqliteSyncWriteTx {
+    pub(crate) fn rotation_backfill_snapshot(&self) -> Result<RotationBackfillSnapshot, String> {
+        Ok(RotationBackfillSnapshot {
+            lists: self
+                .transaction
+                .list_lists_including_archived()
+                .map_err(sync_coordination_error)?,
+            templates: self
+                .transaction
+                .list_templates()
+                .map_err(sync_coordination_error)?,
+            schedules: self
+                .transaction
+                .list_series()
+                .map_err(sync_coordination_error)?,
+            tasks: self
+                .transaction
+                .list_all_tasks_for_sync()
+                .map_err(sync_coordination_error)?,
+            timer_sessions: self
+                .transaction
+                .list_timer_sessions_for_sync()
+                .map_err(sync_coordination_error)?,
+        })
+    }
+
+    pub(crate) fn persist_local_crypto_context(
+        &mut self,
+        identity: crate::LocalCryptoIdentity,
+        master_key: &[u8; 32],
+        sync_keys: taskveil_sync::LocalSyncKeys,
+        now_ms: i64,
+    ) -> Result<crate::LocalCryptoContext, String> {
+        if !self.runtime_cutover {
+            if let Some(lease) = self.lease.as_ref() {
+                self.transaction
+                    .assert_sync_lease(
+                        lease,
+                        coordination_now_ms().map_err(sync_coordination_error)?,
+                    )
+                    .map_err(sync_coordination_error)?;
+            }
+        }
+        let (context, runtime_changed) =
+            crate::local_crypto::persist_local_crypto_context_in_transaction(
+                &mut self.transaction,
+                identity,
+                master_key,
+                sync_keys,
+                now_ms,
+            )
+            .map_err(sync_coordination_error)?;
+        self.runtime_cutover |= runtime_changed;
+        Ok(context)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bump_runtime_epoch(&mut self, now_ms: i64) -> Result<(), String> {
+        self.transaction
+            .bump_runtime_epoch(now_ms)
+            .map(|_| {
+                self.runtime_cutover = true;
+            })
+            .map_err(sync_coordination_error)
     }
 }
 
@@ -64,33 +348,22 @@ impl LocalMutationSyncStore for SqliteSyncStore {
         with_sync_repository(&self.db_path, &self.db_key, |repository| {
             repository
                 .has_outbox_head(collection.as_str(), record_id)
-                .map_err(|error| error.to_string())
+                .map_err(sync_coordination_error)
         })
     }
 
     fn get_setting(&mut self, key: &str) -> Result<Option<String>, String> {
         with_settings_repository(&self.db_path, &self.db_key, |repository| {
-            repository
-                .get_setting(key)
-                .map_err(|error| error.to_string())
+            repository.get_setting(key).map_err(sync_coordination_error)
         })
     }
 
     fn set_setting(&mut self, key: &str, value: &str, updated_at: i64) -> Result<(), String> {
-        with_settings_repository(&self.db_path, &self.db_key, |repository| {
-            repository
-                .set_setting(key, value, updated_at)
-                .map_err(|error| error.to_string())
-        })
+        self.fenced_write(|transaction| transaction.set_setting(key, value, updated_at))
     }
 
     fn put_outbox_head(&mut self, entry: NewLocalSyncOutboxEntry) -> Result<(), String> {
-        with_sync_repository(&self.db_path, &self.db_key, |repository| {
-            repository
-                .put_outbox_head(local_outbox_to_storage(entry))
-                .map(|_| ())
-                .map_err(|error| error.to_string())
-        })
+        self.fenced_write(|transaction| transaction.put_outbox_head(entry))
     }
 
     fn get_record_state(
@@ -102,7 +375,7 @@ impl LocalMutationSyncStore for SqliteSyncStore {
             repository
                 .get_record_state(collection.as_str(), record_id)
                 .map(|state| state.map(storage_record_to_local))
-                .map_err(|error| error.to_string())
+                .map_err(sync_coordination_error)
         })
     }
 
@@ -113,12 +386,8 @@ impl LocalMutationSyncStore for SqliteSyncStore {
         state: LocalSyncRecordState,
         updated_at: i64,
     ) -> Result<(), String> {
-        with_sync_repository(&self.db_path, &self.db_key, |repository| {
-            repository
-                .put_record_state(local_record_to_storage(
-                    collection, record_id, state, updated_at,
-                ))
-                .map_err(|error| error.to_string())
+        self.fenced_write(|transaction| {
+            transaction.put_record_state(collection, record_id, state, updated_at)
         })
     }
 }
@@ -128,7 +397,7 @@ impl LocalSyncStore for SqliteSyncStore {
         let progress = with_sync_repository(&self.db_path, &self.db_key, |repository| {
             repository
                 .load_full_resync()
-                .map_err(|error| error.to_string())
+                .map_err(sync_coordination_error)
         })?;
         let awaiting_base_ack = self
             .get_setting(taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY)?
@@ -140,7 +409,7 @@ impl LocalSyncStore for SqliteSyncStore {
         with_sync_repository(&self.db_path, &self.db_key, |repository| {
             repository
                 .list_outbox_heads(limit)
-                .map_err(|error| error.to_string())
+                .map_err(sync_coordination_error)
         })?
         .into_iter()
         .map(storage_outbox_to_local)
@@ -151,7 +420,7 @@ impl LocalSyncStore for SqliteSyncStore {
         with_sync_repository(&self.db_path, &self.db_key, |repository| {
             repository
                 .list_all_outbox_heads(limit)
-                .map_err(|error| error.to_string())
+                .map_err(sync_coordination_error)
         })?
         .into_iter()
         .map(storage_outbox_to_local)
@@ -159,11 +428,7 @@ impl LocalSyncStore for SqliteSyncStore {
     }
 
     fn ack_outbox_op(&mut self, op_id: Uuid) -> Result<bool, String> {
-        with_sync_repository(&self.db_path, &self.db_key, |repository| {
-            repository
-                .ack_outbox_op(op_id)
-                .map_err(|error| error.to_string())
-        })
+        self.fenced_write(|transaction| transaction.ack_outbox_op(op_id))
     }
 
     fn delete_outbox_head(
@@ -171,11 +436,7 @@ impl LocalSyncStore for SqliteSyncStore {
         collection: SyncCollection,
         record_id: Uuid,
     ) -> Result<bool, String> {
-        with_sync_repository(&self.db_path, &self.db_key, |repository| {
-            repository
-                .delete_outbox_head(collection.as_str(), record_id)
-                .map_err(|error| error.to_string())
-        })
+        self.fenced_write(|transaction| transaction.delete_outbox_head(collection, record_id))
     }
 
     fn get_cursor_seq(&mut self, name: &str) -> Result<Option<i64>, String> {
@@ -183,37 +444,27 @@ impl LocalSyncStore for SqliteSyncStore {
             repository
                 .get_cursor(name)
                 .map(|cursor| cursor.map(|cursor| cursor.seq))
-                .map_err(|error| error.to_string())
+                .map_err(sync_coordination_error)
         })
     }
 
     fn set_cursor(&mut self, name: &str, seq: i64, updated_at: i64) -> Result<(), String> {
-        with_sync_repository(&self.db_path, &self.db_key, |repository| {
-            repository
-                .set_cursor(name, seq, updated_at)
-                .map_err(|error| error.to_string())
-        })
+        self.fenced_write(|transaction| transaction.set_cursor(name, seq, updated_at))
     }
 
     fn delete_cursor(&mut self, name: &str) -> Result<(), String> {
-        with_sync_repository(&self.db_path, &self.db_key, |repository| {
-            repository
-                .delete_cursor(name)
-                .map_err(|error| error.to_string())
-        })
+        self.fenced_write(|transaction| transaction.delete_cursor(name))
     }
 
     fn put_quarantine(&mut self, entry: LocalSyncQuarantineEntry) -> Result<(), String> {
-        with_sync_repository(&self.db_path, &self.db_key, |repository| {
-            repository
-                .put_quarantine(local_quarantine_to_storage(entry))
-                .map_err(|e| e.to_string())
-        })
+        self.fenced_write(|transaction| transaction.put_quarantine(entry))
     }
 
     fn list_quarantine(&mut self, limit: usize) -> Result<Vec<LocalSyncQuarantineEntry>, String> {
         with_sync_repository(&self.db_path, &self.db_key, |repository| {
-            repository.list_quarantine(limit).map_err(|e| e.to_string())
+            repository
+                .list_quarantine(limit)
+                .map_err(sync_coordination_error)
         })?
         .into_iter()
         .map(storage_quarantine_to_local)
@@ -228,7 +479,7 @@ impl LocalSyncStore for SqliteSyncStore {
         with_sync_repository(&self.db_path, &self.db_key, |repository| {
             repository
                 .list_replayable_quarantine(after, limit)
-                .map_err(|e| e.to_string())
+                .map_err(sync_coordination_error)
         })?
         .into_iter()
         .map(storage_quarantine_to_local)
@@ -236,11 +487,7 @@ impl LocalSyncStore for SqliteSyncStore {
     }
 
     fn delete_quarantine(&mut self, record_id: Uuid) -> Result<bool, String> {
-        with_sync_repository(&self.db_path, &self.db_key, |repository| {
-            repository
-                .delete_quarantine(record_id)
-                .map_err(|e| e.to_string())
-        })
+        self.fenced_write(|transaction| transaction.delete_quarantine(record_id))
     }
 
     fn list_record_states(
@@ -256,7 +503,7 @@ impl LocalSyncStore for SqliteSyncStore {
                         .map(|state| (state.record_id, storage_record_to_local(state)))
                         .collect()
                 })
-                .map_err(|error| error.to_string())
+                .map_err(sync_coordination_error)
         })
     }
 
@@ -264,7 +511,7 @@ impl LocalSyncStore for SqliteSyncStore {
         with_sync_repository(&self.db_path, &self.db_key, |repository| {
             repository
                 .has_live_quarantine(collection.as_str())
-                .map_err(|error| error.to_string())
+                .map_err(sync_coordination_error)
         })
     }
 
@@ -273,7 +520,7 @@ impl LocalSyncStore for SqliteSyncStore {
             repository
                 .list_list_aliases()
                 .map(|aliases| aliases.into_iter().map(storage_alias_to_local).collect())
-                .map_err(|error| error.to_string())
+                .map_err(sync_coordination_error)
         })
     }
 
@@ -282,37 +529,19 @@ impl LocalSyncStore for SqliteSyncStore {
         aliases: &[LocalListAlias],
         updated_at: i64,
     ) -> Result<(), String> {
-        let connection =
-            open_encrypted(&self.db_path, &self.db_key).map_err(|error| error.to_string())?;
-        let mut transaction =
-            OwnedSqliteWriteTx::begin(connection).map_err(|error| error.to_string())?;
-        replace_list_aliases_in_transaction(&mut transaction, aliases, updated_at)?;
-        transaction
-            .commit()
-            .map(|_| ())
-            .map_err(|error| error.to_string())
+        self.fenced_write(|transaction| transaction.replace_list_aliases(aliases, updated_at))
     }
 
     fn resolve_list_alias(&mut self, list_id: Uuid) -> Result<Uuid, String> {
         with_sync_repository(&self.db_path, &self.db_key, |repository| {
             repository
                 .resolve_list_alias(list_id)
-                .map_err(|error| error.to_string())
+                .map_err(sync_coordination_error)
         })
     }
 
     fn materialize_canonical_list(&mut self, canonical_list_id: Uuid) -> Result<(), String> {
-        let connection =
-            open_encrypted(&self.db_path, &self.db_key).map_err(|error| error.to_string())?;
-        let mut transaction =
-            OwnedSqliteWriteTx::begin(connection).map_err(|error| error.to_string())?;
-        transaction
-            .materialize_canonical_list(canonical_list_id)
-            .map_err(|error| error.to_string())?;
-        transaction
-            .commit()
-            .map(|_| ())
-            .map_err(|error| error.to_string())
+        self.fenced_write(|transaction| transaction.materialize_canonical_list(canonical_list_id))
     }
 
     fn default_list_id(&mut self) -> Result<Option<Uuid>, String> {
@@ -320,7 +549,7 @@ impl LocalSyncStore for SqliteSyncStore {
             repository
                 .get_default()
                 .map(|list| list.map(|list| list.id))
-                .map_err(|error| error.to_string())
+                .map_err(sync_coordination_error)
         })
     }
 
@@ -329,25 +558,17 @@ impl LocalSyncStore for SqliteSyncStore {
             match repository.get(id) {
                 Ok(list) => Ok(Some(list)),
                 Err(StorageError::NotFound(_)) => Ok(None),
-                Err(error) => Err(error.to_string()),
+                Err(error) => Err(sync_coordination_error(error)),
             }
         })
     }
 
     fn upsert_list_for_sync(&mut self, list: List) -> Result<(), String> {
-        with_list_repository(&self.db_path, &self.db_key, |repository| {
-            repository
-                .upsert_for_sync(list)
-                .map_err(|error| error.to_string())
-        })
+        self.fenced_write(|transaction| transaction.upsert_list_for_sync(list))
     }
 
     fn delete_list_and_rehome_tasks_for_sync(&mut self, list_id: Uuid) -> Result<usize, String> {
-        with_list_repository(&self.db_path, &self.db_key, |repository| {
-            repository
-                .delete_and_rehome_tasks_for_sync(list_id)
-                .map_err(|error| error.to_string())
-        })
+        self.fenced_write(|transaction| transaction.delete_list_and_rehome_tasks_for_sync(list_id))
     }
 
     fn get_task(&mut self, id: Uuid) -> Result<Option<Task>, String> {
@@ -355,7 +576,7 @@ impl LocalSyncStore for SqliteSyncStore {
             match repository.get(id) {
                 Ok(task) => Ok(Some(task)),
                 Err(StorageError::NotFound(_)) => Ok(None),
-                Err(error) => Err(error.to_string()),
+                Err(error) => Err(sync_coordination_error(error)),
             }
         })
     }
@@ -370,7 +591,7 @@ impl LocalSyncStore for SqliteSyncStore {
                         .filter(|task| task.list_id == list_id)
                         .collect()
                 })
-                .map_err(|error| error.to_string())
+                .map_err(sync_coordination_error)
         })
     }
 
@@ -378,7 +599,7 @@ impl LocalSyncStore for SqliteSyncStore {
         with_task_repository(&self.db_path, &self.db_key, |repository| {
             repository
                 .list_all_for_sync()
-                .map_err(|error| error.to_string())
+                .map_err(sync_coordination_error)
         })
     }
 
@@ -386,24 +607,16 @@ impl LocalSyncStore for SqliteSyncStore {
         with_task_repository(&self.db_path, &self.db_key, |repository| {
             repository
                 .list_subtree_for_sync(task_id)
-                .map_err(|error| error.to_string())
+                .map_err(sync_coordination_error)
         })
     }
 
     fn upsert_task_for_sync(&mut self, task: Task) -> Result<(), String> {
-        with_task_repository(&self.db_path, &self.db_key, |repository| {
-            repository
-                .upsert_for_sync(task)
-                .map_err(|error| error.to_string())
-        })
+        self.fenced_write(|transaction| transaction.upsert_task_for_sync(task))
     }
 
     fn delete_task_subtree_for_sync(&mut self, task_id: Uuid) -> Result<usize, String> {
-        with_task_repository(&self.db_path, &self.db_key, |repository| {
-            repository
-                .delete_subtree_for_sync(task_id)
-                .map_err(|error| error.to_string())
-        })
+        self.fenced_write(|transaction| transaction.delete_task_subtree_for_sync(task_id))
     }
 
     fn get_template(&mut self, id: Uuid) -> Result<Option<TaskTemplate>, String> {
@@ -411,25 +624,17 @@ impl LocalSyncStore for SqliteSyncStore {
             match repository.get_template(id) {
                 Ok(template) => Ok(Some(template)),
                 Err(StorageError::NotFound(_)) => Ok(None),
-                Err(error) => Err(error.to_string()),
+                Err(error) => Err(sync_coordination_error(error)),
             }
         })
     }
 
     fn upsert_template_for_sync(&mut self, template: TaskTemplate) -> Result<(), String> {
-        with_recurrence_repository(&self.db_path, &self.db_key, |repository| {
-            repository
-                .upsert_template_for_sync(template)
-                .map_err(|error| error.to_string())
-        })
+        self.fenced_write(|transaction| transaction.upsert_template_for_sync(template))
     }
 
     fn delete_template_for_sync(&mut self, id: Uuid) -> Result<bool, String> {
-        with_recurrence_repository(&self.db_path, &self.db_key, |repository| {
-            repository
-                .delete_template(id)
-                .map_err(|error| error.to_string())
-        })
+        self.fenced_write(|transaction| transaction.delete_template_for_sync(id))
     }
 
     fn get_series(&mut self, id: Uuid) -> Result<Option<TaskSeries>, String> {
@@ -437,25 +642,17 @@ impl LocalSyncStore for SqliteSyncStore {
             match repository.get_series(id) {
                 Ok(schedule) => Ok(Some(schedule)),
                 Err(StorageError::NotFound(_)) => Ok(None),
-                Err(error) => Err(error.to_string()),
+                Err(error) => Err(sync_coordination_error(error)),
             }
         })
     }
 
     fn upsert_series_for_sync(&mut self, schedule: TaskSeries) -> Result<(), String> {
-        with_recurrence_repository(&self.db_path, &self.db_key, |repository| {
-            repository
-                .upsert_series_for_sync(schedule)
-                .map_err(|error| error.to_string())
-        })
+        self.fenced_write(|transaction| transaction.upsert_series_for_sync(schedule))
     }
 
     fn delete_series_for_sync(&mut self, id: Uuid) -> Result<bool, String> {
-        with_recurrence_repository(&self.db_path, &self.db_key, |repository| {
-            repository
-                .delete_series(id)
-                .map_err(|error| error.to_string())
-        })
+        self.fenced_write(|transaction| transaction.delete_series_for_sync(id))
     }
 
     fn get_timer_session(&mut self, id: Uuid) -> Result<Option<CompletedTimerSession>, String> {
@@ -463,7 +660,7 @@ impl LocalSyncStore for SqliteSyncStore {
             match repository.get_completed(id) {
                 Ok(session) => Ok(Some(session)),
                 Err(StorageError::NotFound(_)) => Ok(None),
-                Err(error) => Err(error.to_string()),
+                Err(error) => Err(sync_coordination_error(error)),
             }
         })
     }
@@ -472,20 +669,11 @@ impl LocalSyncStore for SqliteSyncStore {
         &mut self,
         session: CompletedTimerSession,
     ) -> Result<(), String> {
-        with_timer_repository(&self.db_path, &self.db_key, |repository| {
-            repository
-                .insert_completed(session)
-                .map(|_| ())
-                .map_err(|error| error.to_string())
-        })
+        self.fenced_write(|transaction| transaction.upsert_timer_session_for_sync(session))
     }
 
     fn delete_timer_session_for_sync(&mut self, id: Uuid) -> Result<bool, String> {
-        with_timer_repository(&self.db_path, &self.db_key, |repository| {
-            repository
-                .delete_completed(id)
-                .map_err(|error| error.to_string())
-        })
+        self.fenced_write(|transaction| transaction.delete_timer_session_for_sync(id))
     }
 
     fn list_timer_sessions_by_task(
@@ -495,16 +683,12 @@ impl LocalSyncStore for SqliteSyncStore {
         with_timer_repository(&self.db_path, &self.db_key, |repository| {
             repository
                 .list_completed_by_task(task_id)
-                .map_err(|error| error.to_string())
+                .map_err(sync_coordination_error)
         })
     }
 
     fn clear_active_timer_for_task(&mut self, task_id: Uuid) -> Result<bool, String> {
-        with_timer_repository(&self.db_path, &self.db_key, |repository| {
-            repository
-                .clear_active_for_task(task_id)
-                .map_err(|error| error.to_string())
-        })
+        self.fenced_write(|transaction| transaction.clear_active_timer_for_task(task_id))
     }
 }
 
@@ -516,26 +700,26 @@ impl LocalMutationSyncStore for SqliteSyncWriteTx {
     ) -> Result<bool, String> {
         self.transaction
             .has_outbox_head(collection.as_str(), record_id)
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn get_setting(&mut self, key: &str) -> Result<Option<String>, String> {
         self.transaction
             .get_setting(key)
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn set_setting(&mut self, key: &str, value: &str, updated_at: i64) -> Result<(), String> {
         self.transaction
             .set_setting(key, value, updated_at)
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn put_outbox_head(&mut self, entry: NewLocalSyncOutboxEntry) -> Result<(), String> {
         self.transaction
             .put_outbox_head(local_outbox_to_storage(entry))
             .map(|_| ())
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn get_record_state(
@@ -546,7 +730,7 @@ impl LocalMutationSyncStore for SqliteSyncWriteTx {
         self.transaction
             .get_record_state(collection.as_str(), record_id)
             .map(|state| state.map(storage_record_to_local))
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn put_record_state(
@@ -560,7 +744,7 @@ impl LocalMutationSyncStore for SqliteSyncWriteTx {
             .put_record_state(local_record_to_storage(
                 collection, record_id, state, updated_at,
             ))
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 }
 
@@ -569,11 +753,11 @@ impl LocalSyncStore for SqliteSyncWriteTx {
         let progress = self
             .transaction
             .load_full_resync()
-            .map_err(|error| error.to_string())?;
+            .map_err(sync_coordination_error)?;
         let awaiting_base_ack = self
             .transaction
             .get_setting(taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY)
-            .map_err(|error| error.to_string())?
+            .map_err(sync_coordination_error)?
             .is_some_and(|token| !token.is_empty());
         Ok(progress.map(|progress| storage_resync_to_local(progress, awaiting_base_ack)))
     }
@@ -581,7 +765,7 @@ impl LocalSyncStore for SqliteSyncWriteTx {
     fn list_outbox_heads(&mut self, limit: usize) -> Result<Vec<LocalSyncOutboxEntry>, String> {
         self.transaction
             .list_outbox_heads(limit)
-            .map_err(|error| error.to_string())?
+            .map_err(sync_coordination_error)?
             .into_iter()
             .map(storage_outbox_to_local)
             .collect()
@@ -590,7 +774,7 @@ impl LocalSyncStore for SqliteSyncWriteTx {
     fn list_all_outbox_heads(&mut self, limit: usize) -> Result<Vec<LocalSyncOutboxEntry>, String> {
         self.transaction
             .list_all_outbox_heads(limit)
-            .map_err(|error| error.to_string())?
+            .map_err(sync_coordination_error)?
             .into_iter()
             .map(storage_outbox_to_local)
             .collect()
@@ -599,7 +783,7 @@ impl LocalSyncStore for SqliteSyncWriteTx {
     fn ack_outbox_op(&mut self, op_id: Uuid) -> Result<bool, String> {
         self.transaction
             .ack_outbox_op(op_id)
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn delete_outbox_head(
@@ -609,38 +793,38 @@ impl LocalSyncStore for SqliteSyncWriteTx {
     ) -> Result<bool, String> {
         self.transaction
             .delete_outbox_head(collection.as_str(), record_id)
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn get_cursor_seq(&mut self, name: &str) -> Result<Option<i64>, String> {
         self.transaction
             .get_cursor(name)
             .map(|cursor| cursor.map(|cursor| cursor.seq))
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn set_cursor(&mut self, name: &str, seq: i64, updated_at: i64) -> Result<(), String> {
         self.transaction
             .set_cursor(name, seq, updated_at)
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn delete_cursor(&mut self, name: &str) -> Result<(), String> {
         self.transaction
             .delete_cursor(name)
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn put_quarantine(&mut self, entry: LocalSyncQuarantineEntry) -> Result<(), String> {
         self.transaction
             .put_quarantine(local_quarantine_to_storage(entry))
-            .map_err(|e| e.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn list_quarantine(&mut self, limit: usize) -> Result<Vec<LocalSyncQuarantineEntry>, String> {
         self.transaction
             .list_quarantine(limit)
-            .map_err(|e| e.to_string())?
+            .map_err(sync_coordination_error)?
             .into_iter()
             .map(storage_quarantine_to_local)
             .collect()
@@ -653,7 +837,7 @@ impl LocalSyncStore for SqliteSyncWriteTx {
     ) -> Result<Vec<LocalSyncQuarantineEntry>, String> {
         self.transaction
             .list_replayable_quarantine(after, limit)
-            .map_err(|e| e.to_string())?
+            .map_err(sync_coordination_error)?
             .into_iter()
             .map(storage_quarantine_to_local)
             .collect()
@@ -662,7 +846,7 @@ impl LocalSyncStore for SqliteSyncWriteTx {
     fn delete_quarantine(&mut self, record_id: Uuid) -> Result<bool, String> {
         self.transaction
             .delete_quarantine(record_id)
-            .map_err(|e| e.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn list_record_states(
@@ -677,20 +861,20 @@ impl LocalSyncStore for SqliteSyncWriteTx {
                     .map(|state| (state.record_id, storage_record_to_local(state)))
                     .collect()
             })
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn has_live_quarantine(&mut self, collection: SyncCollection) -> Result<bool, String> {
         self.transaction
             .has_live_quarantine(collection.as_str())
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn list_list_aliases(&mut self) -> Result<Vec<LocalListAlias>, String> {
         self.transaction
             .list_list_aliases()
             .map(|aliases| aliases.into_iter().map(storage_alias_to_local).collect())
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn replace_list_aliases(
@@ -704,120 +888,120 @@ impl LocalSyncStore for SqliteSyncWriteTx {
     fn resolve_list_alias(&mut self, list_id: Uuid) -> Result<Uuid, String> {
         self.transaction
             .resolve_list_alias(list_id)
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn materialize_canonical_list(&mut self, canonical_list_id: Uuid) -> Result<(), String> {
         self.transaction
             .materialize_canonical_list(canonical_list_id)
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn default_list_id(&mut self) -> Result<Option<Uuid>, String> {
         self.transaction
             .default_list_id()
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn get_list(&mut self, id: Uuid) -> Result<Option<List>, String> {
         self.transaction
             .get_list(id)
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn upsert_list_for_sync(&mut self, list: List) -> Result<(), String> {
         self.transaction
             .upsert_list_for_sync(list)
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn delete_list_and_rehome_tasks_for_sync(&mut self, list_id: Uuid) -> Result<usize, String> {
         self.transaction
             .delete_list_and_rehome_tasks_for_sync(list_id)
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn get_task(&mut self, id: Uuid) -> Result<Option<Task>, String> {
         self.transaction
             .get_task(id)
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn list_tasks_by_list_for_sync(&mut self, list_id: Uuid) -> Result<Vec<Task>, String> {
         self.transaction
             .list_tasks_by_list(list_id)
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn list_all_tasks_for_sync(&mut self) -> Result<Vec<Task>, String> {
         self.transaction
             .list_all_tasks_for_sync()
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn list_task_subtree_for_sync(&mut self, task_id: Uuid) -> Result<Vec<Task>, String> {
         self.transaction
             .list_task_subtree_for_sync(task_id)
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn upsert_task_for_sync(&mut self, task: Task) -> Result<(), String> {
         self.transaction
             .upsert_task_for_sync(task)
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn delete_task_subtree_for_sync(&mut self, task_id: Uuid) -> Result<usize, String> {
         self.transaction
             .delete_task_subtree_for_sync(task_id)
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn get_template(&mut self, id: Uuid) -> Result<Option<TaskTemplate>, String> {
         match self.transaction.get_template(id) {
             Ok(template) => Ok(Some(template)),
             Err(StorageError::NotFound(_)) => Ok(None),
-            Err(error) => Err(error.to_string()),
+            Err(error) => Err(sync_coordination_error(error)),
         }
     }
 
     fn upsert_template_for_sync(&mut self, template: TaskTemplate) -> Result<(), String> {
         self.transaction
             .upsert_template(template)
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn delete_template_for_sync(&mut self, id: Uuid) -> Result<bool, String> {
         self.transaction
             .delete_template(id)
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn get_series(&mut self, id: Uuid) -> Result<Option<TaskSeries>, String> {
         match self.transaction.get_series(id) {
             Ok(schedule) => Ok(Some(schedule)),
             Err(StorageError::NotFound(_)) => Ok(None),
-            Err(error) => Err(error.to_string()),
+            Err(error) => Err(sync_coordination_error(error)),
         }
     }
 
     fn upsert_series_for_sync(&mut self, schedule: TaskSeries) -> Result<(), String> {
         self.transaction
             .upsert_series(schedule)
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn delete_series_for_sync(&mut self, id: Uuid) -> Result<bool, String> {
         self.transaction
             .delete_series(id)
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn get_timer_session(&mut self, id: Uuid) -> Result<Option<CompletedTimerSession>, String> {
         match self.transaction.get_timer_session(id) {
             Ok(session) => Ok(Some(session)),
             Err(StorageError::NotFound(_)) => Ok(None),
-            Err(error) => Err(error.to_string()),
+            Err(error) => Err(sync_coordination_error(error)),
         }
     }
 
@@ -828,13 +1012,13 @@ impl LocalSyncStore for SqliteSyncWriteTx {
         self.transaction
             .insert_timer_session(session)
             .map(|_| ())
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn delete_timer_session_for_sync(&mut self, id: Uuid) -> Result<bool, String> {
         self.transaction
             .delete_timer_session(id)
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn list_timer_sessions_by_task(
@@ -843,13 +1027,13 @@ impl LocalSyncStore for SqliteSyncWriteTx {
     ) -> Result<Vec<CompletedTimerSession>, String> {
         self.transaction
             .list_timer_sessions_by_task_for_sync(task_id)
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn clear_active_timer_for_task(&mut self, task_id: Uuid) -> Result<bool, String> {
         self.transaction
             .clear_active_timer_for_task_for_sync(task_id)
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 }
 
@@ -864,7 +1048,7 @@ impl LocalSyncWriteTransaction for SqliteSyncWriteTx {
         self.transaction
             .start_full_resync(generation_id, continuity_generation, base_seq, now_ms)
             .map(|progress| storage_resync_to_local(progress, false))
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn mark_full_resync_record(
@@ -875,7 +1059,7 @@ impl LocalSyncWriteTransaction for SqliteSyncWriteTx {
     ) -> Result<(), String> {
         self.transaction
             .mark_full_resync_record(generation_id, collection.as_str(), record_id)
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn advance_full_resync_base(
@@ -888,7 +1072,7 @@ impl LocalSyncWriteTransaction for SqliteSyncWriteTx {
         let cursor = next_cursor.map(local_cursor_to_storage);
         self.transaction
             .advance_full_resync_base(generation_id, cursor.as_ref(), base_complete, now_ms)
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn advance_full_resync_delta(
@@ -899,7 +1083,7 @@ impl LocalSyncWriteTransaction for SqliteSyncWriteTx {
     ) -> Result<(), String> {
         self.transaction
             .advance_full_resync_delta(generation_id, delta_cursor, now_ms)
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn enter_full_resync_sweep(
@@ -910,7 +1094,7 @@ impl LocalSyncWriteTransaction for SqliteSyncWriteTx {
     ) -> Result<(), String> {
         self.transaction
             .enter_full_resync_sweep(generation_id, closure_high_water, now_ms)
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn sweep_full_resync_batch(
@@ -922,7 +1106,7 @@ impl LocalSyncWriteTransaction for SqliteSyncWriteTx {
         self.transaction
             .sweep_full_resync_batch(generation_id, limit, now_ms)
             .map(storage_sweep_to_local)
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn finalize_full_resync(
@@ -933,20 +1117,50 @@ impl LocalSyncWriteTransaction for SqliteSyncWriteTx {
     ) -> Result<i64, String> {
         self.transaction
             .finalize_full_resync(generation_id, cursor_name, now_ms)
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn reset_full_resync(&mut self) -> Result<(), String> {
         self.transaction
             .reset_full_resync()
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
     }
 
     fn commit(self) -> Result<(), String> {
+        if !self.runtime_cutover {
+            if let Some(lease) = self.lease.as_ref() {
+                self.transaction
+                    .assert_sync_lease(
+                        lease,
+                        coordination_now_ms().map_err(sync_coordination_error)?,
+                    )
+                    .map_err(sync_coordination_error)?;
+            }
+        }
         self.transaction
             .commit()
             .map(|_| ())
-            .map_err(|error| error.to_string())
+            .map_err(sync_coordination_error)
+    }
+}
+
+fn coordination_now_ms() -> Result<i64, StorageError> {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| StorageError::ProfileCoordinationClockRollback)?;
+    i64::try_from(duration.as_millis()).map_err(|_| StorageError::ProfileCoordinationOverflow)
+}
+
+fn sync_coordination_error(error: StorageError) -> String {
+    if error.is_database_busy() {
+        return "database busy".to_string();
+    }
+    match error {
+        StorageError::SyncLeaseBusy => "sync lease busy".to_string(),
+        StorageError::SyncLeaseLost | StorageError::ProfileRuntimeEpochChanged { .. } => {
+            "sync lease lost".to_string()
+        }
+        error => error.to_string(),
     }
 }
 
@@ -966,7 +1180,7 @@ fn replace_list_aliases_in_transaction(
     } else {
         let existing = transaction
             .list_list_aliases()
-            .map_err(|error| error.to_string())?;
+            .map_err(sync_coordination_error)?;
         let Some(first) = existing.first() else {
             return Ok(());
         };
@@ -978,7 +1192,7 @@ fn replace_list_aliases_in_transaction(
         .collect::<Vec<_>>();
     transaction
         .replace_list_aliases(canonical_list_id, &alias_list_ids, updated_at)
-        .map_err(|error| error.to_string())
+        .map_err(sync_coordination_error)
 }
 
 fn with_sync_repository<T>(
@@ -986,7 +1200,7 @@ fn with_sync_repository<T>(
     db_key: &[u8; 32],
     f: impl FnOnce(&mut SqliteSyncStateRepository) -> Result<T, String>,
 ) -> Result<T, String> {
-    let connection = open_encrypted(db_path, db_key).map_err(|error| error.to_string())?;
+    let connection = open_encrypted(db_path, db_key).map_err(sync_coordination_error)?;
     let mut repository = SqliteSyncStateRepository::new(connection);
     f(&mut repository)
 }
@@ -996,7 +1210,7 @@ fn with_settings_repository<T>(
     db_key: &[u8; 32],
     f: impl FnOnce(&mut SqliteSettingsRepository) -> Result<T, String>,
 ) -> Result<T, String> {
-    let connection = open_encrypted(db_path, db_key).map_err(|error| error.to_string())?;
+    let connection = open_encrypted(db_path, db_key).map_err(sync_coordination_error)?;
     let mut repository = SqliteSettingsRepository::new(connection);
     f(&mut repository)
 }
@@ -1006,7 +1220,7 @@ fn with_task_repository<T>(
     db_key: &[u8; 32],
     f: impl FnOnce(&mut SqliteTaskRepository) -> Result<T, String>,
 ) -> Result<T, String> {
-    let connection = open_encrypted(db_path, db_key).map_err(|error| error.to_string())?;
+    let connection = open_encrypted(db_path, db_key).map_err(sync_coordination_error)?;
     let mut repository = SqliteTaskRepository::new(connection);
     f(&mut repository)
 }
@@ -1016,7 +1230,7 @@ fn with_recurrence_repository<T>(
     db_key: &[u8; 32],
     f: impl FnOnce(&mut SqliteTemplateSeriesRepository) -> Result<T, String>,
 ) -> Result<T, String> {
-    let connection = open_encrypted(db_path, db_key).map_err(|error| error.to_string())?;
+    let connection = open_encrypted(db_path, db_key).map_err(sync_coordination_error)?;
     let mut repository = SqliteTemplateSeriesRepository::new(connection);
     f(&mut repository)
 }
@@ -1026,7 +1240,7 @@ fn with_timer_repository<T>(
     db_key: &[u8; 32],
     f: impl FnOnce(&mut SqliteTimerSessionRepository) -> Result<T, String>,
 ) -> Result<T, String> {
-    let connection = open_encrypted(db_path, db_key).map_err(|error| error.to_string())?;
+    let connection = open_encrypted(db_path, db_key).map_err(sync_coordination_error)?;
     let mut repository = SqliteTimerSessionRepository::new(connection);
     f(&mut repository)
 }
@@ -1036,22 +1250,24 @@ fn with_list_repository<T>(
     db_key: &[u8; 32],
     f: impl FnOnce(&mut SqliteListRepository) -> Result<T, String>,
 ) -> Result<T, String> {
-    let connection = open_encrypted(db_path, db_key).map_err(|error| error.to_string())?;
+    let connection = open_encrypted(db_path, db_key).map_err(sync_coordination_error)?;
     let mut repository = SqliteListRepository::new(connection);
     f(&mut repository)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        io::{BufRead, BufReader, Write},
+        process::{Command, Stdio},
+    };
+
     use super::*;
     use taskveil_domain::{
         new_list, new_task, CompletedTimerSession, SeriesCursor, TaskBlueprint, TaskBlueprintNode,
         TaskContent, TaskSeriesConfig, TimerFinishKind, TimerMode, TASK_BLUEPRINT_SCHEMA_REVISION,
     };
-    use taskveil_storage::{
-        ListRepository, LocalCryptoRepository, LocalProfileBinding, LocalTenantRootKeyBundle,
-        SqliteLocalCryptoRepository,
-    };
+    use taskveil_storage::{ListRepository, LocalProfileBinding, LocalTenantRootKeyBundle};
     use taskveil_sync::{
         enqueue_backfill, EncryptedSyncState, LocalSyncKeys, LocalSyncSemanticState,
         PullFailureReason, SYNC_CURSOR_NAME,
@@ -1059,6 +1275,371 @@ mod tests {
     use tempfile::tempdir;
 
     const DB_KEY: [u8; 32] = [0x51; 32];
+
+    #[test]
+    fn child_sync_lease_actor() {
+        let Some(db_path) = std::env::var_os("TASKVEIL_SYNC_LEASE_CHILD_DB") else {
+            return;
+        };
+        let mut store = SqliteSyncStore::new(PathBuf::from(db_path), DB_KEY);
+        store.acquire_sync_lease("child", 1, 60_000).unwrap();
+        println!("TASKVEIL_SYNC_LEASE_READY");
+        std::io::stdout().flush().unwrap();
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).unwrap();
+        if std::env::var_os("TASKVEIL_SYNC_LEASE_CHECK_STALE").is_some() {
+            assert_eq!(
+                store.preflight_network_request(),
+                Err("sync lease lost".to_string())
+            );
+            match store.begin_write_transaction() {
+                Err(error) => assert_eq!(error, "sync lease lost"),
+                Ok(_) => panic!("stale child unexpectedly opened a write transaction"),
+            }
+        }
+    }
+
+    #[test]
+    fn process_crash_keeps_lease_fenced_until_expiry_then_allows_takeover() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("profile.sqlite3");
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "sqlite_sync_store::tests::child_sync_lease_actor",
+                "--nocapture",
+            ])
+            .env("TASKVEIL_SYNC_LEASE_CHILD_DB", &db_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut output = BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        loop {
+            line.clear();
+            assert_ne!(output.read_line(&mut line).unwrap(), 0);
+            if line.contains("TASKVEIL_SYNC_LEASE_READY") {
+                break;
+            }
+        }
+
+        let mut contender = SqliteSyncStore::new(db_path, DB_KEY);
+        assert!(matches!(
+            contender.acquire_sync_lease("parent", 1, 60_000),
+            Err(StorageError::SyncLeaseBusy)
+        ));
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(matches!(
+            contender.acquire_sync_lease("parent", 1, 60_000),
+            Err(StorageError::SyncLeaseBusy)
+        ));
+        open_encrypted(&contender.db_path, &DB_KEY)
+            .unwrap()
+            .execute(
+                "UPDATE sync_run_lease SET expires_at_ms = 0 WHERE singleton = 1",
+                [],
+            )
+            .unwrap();
+        contender.acquire_sync_lease("parent", 1, 60_000).unwrap();
+    }
+
+    #[test]
+    fn real_child_expiry_takeover_fences_requests_and_commits_without_sleep() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("profile.sqlite3");
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "sqlite_sync_store::tests::child_sync_lease_actor",
+                "--nocapture",
+            ])
+            .env("TASKVEIL_SYNC_LEASE_CHILD_DB", &db_path)
+            .env("TASKVEIL_SYNC_LEASE_CHECK_STALE", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut output = BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        loop {
+            line.clear();
+            assert_ne!(output.read_line(&mut line).unwrap(), 0);
+            if line.contains("TASKVEIL_SYNC_LEASE_READY") {
+                break;
+            }
+        }
+
+        let mut contender = SqliteSyncStore::new(db_path.clone(), DB_KEY);
+        assert!(matches!(
+            contender.acquire_sync_lease("parent", 1, 60_000),
+            Err(StorageError::SyncLeaseBusy)
+        ));
+        open_encrypted(&db_path, &DB_KEY)
+            .unwrap()
+            .execute(
+                "UPDATE sync_run_lease SET expires_at_ms = 0 WHERE singleton = 1",
+                [],
+            )
+            .unwrap();
+        contender.acquire_sync_lease("parent", 1, 60_000).unwrap();
+
+        child.stdin.take().unwrap().write_all(b"check\n").unwrap();
+        assert!(child.wait().unwrap().success());
+    }
+
+    #[test]
+    fn lost_lease_is_preserved_as_a_typed_sync_error_across_string_traits() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("profile.sqlite3");
+        let mut store = SqliteSyncStore::new(db_path.clone(), DB_KEY);
+        store.acquire_sync_lease("owner", 1, 1_000).unwrap();
+        open_encrypted(&db_path, &DB_KEY)
+            .unwrap()
+            .execute(
+                "UPDATE sync_run_lease SET expires_at_ms = 0 WHERE singleton = 1",
+                [],
+            )
+            .unwrap();
+        match store.begin_write_transaction() {
+            Err(error) => assert_eq!(error, "sync lease lost"),
+            Ok(_) => panic!("expired lease unexpectedly started a write transaction"),
+        }
+    }
+
+    #[test]
+    fn production_sync_store_without_a_lease_fails_closed() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("missing-lease.sqlite3");
+        let mut store = SqliteSyncStore::new_secret(db_path, Zeroizing::new(DB_KEY));
+
+        assert_eq!(
+            store.preflight_network_request().unwrap_err(),
+            "sync lease lost"
+        );
+        match store.begin_write_transaction() {
+            Err(error) => assert_eq!(error, "sync lease lost"),
+            Ok(_) => panic!("production sync store opened an unfenced transaction"),
+        }
+    }
+
+    #[test]
+    fn protocol_harness_can_fail_an_exact_network_preflight() {
+        let temp = tempdir().unwrap();
+        let mut store = SqliteSyncStore::new(temp.path().join("fault.sqlite3"), DB_KEY);
+        store.fail_preflight_on_call(2);
+
+        store.preflight_network_request().unwrap();
+        assert_eq!(
+            store.preflight_network_request(),
+            Err("sync lease lost".to_string())
+        );
+        assert_eq!(store.preflight_call_count(), 2);
+    }
+
+    #[test]
+    fn storage_coordination_errors_have_stable_sync_adapter_names() {
+        assert_eq!(
+            sync_coordination_error(StorageError::SyncLeaseBusy),
+            "sync lease busy"
+        );
+        assert_eq!(
+            sync_coordination_error(StorageError::SyncLeaseLost),
+            "sync lease lost"
+        );
+        assert_eq!(
+            sync_coordination_error(StorageError::ProfileRuntimeEpochChanged {
+                expected: 1,
+                actual: 2,
+            }),
+            "sync lease lost"
+        );
+    }
+
+    #[test]
+    fn sqlite_write_contention_is_preserved_as_database_busy() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("profile.sqlite3");
+        let blocker =
+            OwnedSqliteWriteTx::begin(open_encrypted(&db_path, &DB_KEY).unwrap()).unwrap();
+        let mut contender = SqliteSyncStore::new(db_path, DB_KEY);
+
+        match contender.begin_write_transaction() {
+            Err(error) => assert_eq!(error, "database busy"),
+            Ok(_) => panic!("contending writer unexpectedly acquired the database"),
+        }
+        drop(blocker);
+    }
+
+    #[test]
+    fn takeover_stops_the_old_run_before_the_next_network_request() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("profile.sqlite3");
+        let mut old_store = SqliteSyncStore::new(db_path.clone(), DB_KEY);
+        old_store.acquire_sync_lease("old-run", 1, 60_000).unwrap();
+
+        open_encrypted(&db_path, &DB_KEY)
+            .unwrap()
+            .execute(
+                "UPDATE sync_run_lease SET expires_at_ms = 0 WHERE singleton = 1",
+                [],
+            )
+            .unwrap();
+        let mut new_store = SqliteSyncStore::new(db_path, DB_KEY);
+        new_store.acquire_sync_lease("new-run", 1, 60_000).unwrap();
+
+        let mut remote_request_count = 0;
+        let result = old_store.preflight_network_request().map(|()| {
+            remote_request_count += 1;
+        });
+
+        assert_eq!(result.unwrap_err(), "sync lease lost");
+        assert_eq!(remote_request_count, 0);
+    }
+
+    #[test]
+    fn epoch_change_aborts_old_store_and_only_a_new_run_can_acquire() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("profile.sqlite3");
+        let mut old_store = SqliteSyncStore::new(db_path.clone(), DB_KEY);
+        old_store.acquire_sync_lease("old-run", 1, 60_000).unwrap();
+        let runtime =
+            SqliteProfileCoordinationRepository::new(open_encrypted(&db_path, &DB_KEY).unwrap())
+                .bump_runtime_epoch(coordination_now_ms().unwrap())
+                .unwrap();
+        assert_eq!(runtime.runtime_epoch, 2);
+
+        match old_store.begin_write_transaction() {
+            Err(error) => assert_eq!(error, "sync lease lost"),
+            Ok(_) => panic!("stale run unexpectedly started a write transaction"),
+        }
+        assert!(matches!(
+            old_store.acquire_sync_lease("old-run", runtime.runtime_epoch, 60_000),
+            Err(StorageError::SyncLeaseLost)
+        ));
+        assert_eq!(old_store.get_cursor_seq(SYNC_CURSOR_NAME).unwrap(), None);
+
+        let mut new_store = SqliteSyncStore::new(db_path, DB_KEY);
+        new_store
+            .acquire_sync_lease("new-run", runtime.runtime_epoch, 60_000)
+            .unwrap();
+        let mut transaction = new_store.begin_write_transaction().unwrap();
+        transaction.set_cursor(SYNC_CURSOR_NAME, 7, 100).unwrap();
+        transaction.commit().unwrap();
+        assert_eq!(new_store.get_cursor_seq(SYNC_CURSOR_NAME).unwrap(), Some(7));
+    }
+
+    #[test]
+    fn runtime_cutover_remains_sticky_across_two_key_persists_in_one_transaction() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("sticky-cutover.sqlite3");
+        let tenant_id = Uuid::now_v7();
+        let identity = crate::LocalCryptoIdentity {
+            tenant_id,
+            user_id: Uuid::now_v7(),
+            device_id: Uuid::now_v7(),
+        };
+        let keys = LocalSyncKeys {
+            tenant_id,
+            tenant_root_dek: Some(Zeroizing::new([0x61; 32])),
+            tenant_generation: 1,
+            historical_tenant_root_deks: Vec::new(),
+        };
+        let mut store = SqliteSyncStore::new(db_path.clone(), DB_KEY);
+        store.acquire_sync_lease("owner", 1, 60_000).unwrap();
+        let mut transaction = store.begin_write_transaction().unwrap();
+        transaction
+            .persist_local_crypto_context(identity, &[0x62; 32], keys.clone(), 10)
+            .unwrap();
+        transaction
+            .persist_local_crypto_context(identity, &[0x62; 32], keys, 11)
+            .unwrap();
+        transaction
+            .commit()
+            .expect("the first cutover remains authoritative");
+
+        assert_eq!(
+            SqliteProfileCoordinationRepository::new(open_encrypted(&db_path, &DB_KEY).unwrap())
+                .load_runtime()
+                .unwrap()
+                .runtime_epoch,
+            2
+        );
+    }
+
+    #[test]
+    fn takeover_rejects_every_outer_metadata_write_from_the_old_run() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("profile.sqlite3");
+        let mut old_store = SqliteSyncStore::new(db_path.clone(), DB_KEY);
+        old_store
+            .set_setting("sync_upgrade_required", "old", 1)
+            .unwrap();
+        old_store.set_cursor(SYNC_CURSOR_NAME, 1, 1).unwrap();
+        old_store.acquire_sync_lease("old-run", 1, 60_000).unwrap();
+
+        // Deterministically cross the network-wait barrier without sleeping:
+        // expire A's durable lease, let B take over and publish its values.
+        open_encrypted(&db_path, &DB_KEY)
+            .unwrap()
+            .execute(
+                "UPDATE sync_run_lease SET expires_at_ms = 0 WHERE singleton = 1",
+                [],
+            )
+            .unwrap();
+        let mut new_store = SqliteSyncStore::new(db_path.clone(), DB_KEY);
+        new_store.acquire_sync_lease("new-run", 1, 60_000).unwrap();
+        new_store
+            .set_setting("sync_upgrade_required", "new", 2)
+            .unwrap();
+        new_store.set_cursor(SYNC_CURSOR_NAME, 2, 2).unwrap();
+
+        for key in [
+            "sync_upgrade_required",
+            taskveil_sync::SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY,
+            taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY,
+            taskveil_sync::KEY_ROTATION_PENDING_SETTING_KEY,
+        ] {
+            assert_eq!(
+                old_store.set_setting(key, "stale", 3).unwrap_err(),
+                "sync lease lost"
+            );
+        }
+        assert_eq!(
+            old_store.set_cursor(SYNC_CURSOR_NAME, 3, 3).unwrap_err(),
+            "sync lease lost"
+        );
+        assert_eq!(
+            old_store.delete_cursor(SYNC_CURSOR_NAME).unwrap_err(),
+            "sync lease lost"
+        );
+        assert_eq!(
+            old_store
+                .materialize_canonical_list(Uuid::now_v7())
+                .unwrap_err(),
+            "sync lease lost"
+        );
+        match old_store.begin_write_transaction() {
+            Err(error) => assert_eq!(error, "sync lease lost"),
+            Ok(_) => panic!("stale run unexpectedly opened a resync write transaction"),
+        }
+
+        let observer = SqliteSyncStore::new(db_path, DB_KEY);
+        let mut observer = observer;
+        assert_eq!(
+            observer.get_setting("sync_upgrade_required").unwrap(),
+            Some("new".to_string())
+        );
+        assert_eq!(observer.get_cursor_seq(SYNC_CURSOR_NAME).unwrap(), Some(2));
+        for key in [
+            taskveil_sync::SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY,
+            taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY,
+            taskveil_sync::KEY_ROTATION_PENDING_SETTING_KEY,
+        ] {
+            assert_eq!(observer.get_setting(key).unwrap(), None);
+        }
+    }
 
     #[derive(Clone)]
     struct AdapterFixtures {
@@ -1496,10 +2077,10 @@ mod tests {
         )
         .unwrap();
         let tenant_id = Uuid::now_v7();
-        let mut crypto =
-            SqliteLocalCryptoRepository::new(open_encrypted(&db_path, &DB_KEY).unwrap());
+        let mut crypto = OwnedSqliteWriteTx::begin(open_encrypted(&db_path, &DB_KEY).unwrap())
+            .expect("begin local crypto seed");
         crypto
-            .bind_tenant_root(
+            .bind_tenant_roots(
                 LocalProfileBinding {
                     tenant_id,
                     user_id: Uuid::now_v7(),
@@ -1507,14 +2088,15 @@ mod tests {
                     bound_at: 1,
                     updated_at: 1,
                 },
-                &LocalTenantRootKeyBundle {
+                &[LocalTenantRootKeyBundle {
                     tenant_id,
                     generation: 1,
                     wrapped_tenant_root_dek: vec![2],
                     updated_at: 1,
-                },
+                }],
             )
             .unwrap();
+        crypto.commit().unwrap();
         let mut repository = SqliteListRepository::new(open_encrypted(&db_path, &DB_KEY).unwrap());
         repository.insert(list.clone()).unwrap();
         drop(repository);

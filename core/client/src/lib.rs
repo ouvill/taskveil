@@ -32,13 +32,16 @@ mod device_key_rotation;
 mod local_crypto;
 mod model;
 mod mutation_service;
+mod profile_coordination;
 mod runtime;
 mod sqlite_sync_store;
 
 pub(crate) use crud_service::{CreateTaskInput, ReorderTaskInput, SetTaskStatusInput};
+#[cfg(test)]
+pub(crate) use local_crypto::persist_local_crypto_context;
 pub(crate) use local_crypto::{
-    load_local_crypto_context, persist_account_crypto_context, persist_local_crypto_context,
-    LocalCryptoAvailability, LocalCryptoContext, LocalCryptoIdentity, LocalCryptoUnavailable,
+    load_local_crypto_context, LocalCryptoAvailability, LocalCryptoContext, LocalCryptoIdentity,
+    LocalCryptoUnavailable,
 };
 pub use model::{
     AccountAuthResult, AccountSessionState, BillingState, OrganizationSafetyState, RealtimeTicket,

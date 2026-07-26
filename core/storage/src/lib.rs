@@ -23,6 +23,7 @@ mod list_repository;
 mod local_crypto_repository;
 mod migrations;
 mod models;
+mod profile_coordination;
 mod reminder_repository;
 mod row;
 mod settings_repository;
@@ -56,6 +57,9 @@ pub use models::{
     SyncOutboxEntry, SyncOutboxState, SyncQuarantineEntry, SyncRecordSemanticState,
     SyncRecordState, TaskUndoEntry, TaskUndoOperation, MAX_REMINDERS_PER_TASK,
 };
+pub use profile_coordination::{
+    ProfileRuntimeState, SqliteProfileCoordinationRepository, SyncLease,
+};
 pub use reminder_repository::SqliteReminderRepository;
 pub use settings_repository::SqliteSettingsRepository;
 pub use sync_state_repository::SqliteSyncStateRepository;
@@ -72,7 +76,7 @@ pub use transaction::{OwnedSqliteWriteTx, SqliteWriteTx};
 use migrations::ensure_schema_at_version;
 use migrations::{ensure_schema, MIGRATIONS};
 
-pub const LATEST_MIGRATION_VERSION: i32 = 3;
+pub const LATEST_MIGRATION_VERSION: i32 = 4;
 const LOCAL_DB_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[cfg(test)]

@@ -17,8 +17,8 @@ pub use recurrence::{
 use std::{
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
-        Mutex, MutexGuard,
+        atomic::{AtomicI64, AtomicU64, Ordering},
+        Arc, Mutex, MutexGuard,
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -26,13 +26,14 @@ use std::{
 use taskveil_crypto::{derive_local_db_key, PlatformLocalKeyCapsuleStore};
 use taskveil_storage::{
     open_encrypted, ListRepository, LocalCryptoRepository, SettingsRepository,
-    SqliteListRepository, SqliteLocalCryptoRepository, SqliteReminderRepository,
-    SqliteSettingsRepository, SqliteTaskRepository, SqliteTemplateSeriesRepository,
-    SqliteTimerSessionRepository,
+    SqliteListRepository, SqliteLocalCryptoRepository, SqliteProfileCoordinationRepository,
+    SqliteReminderRepository, SqliteSettingsRepository, SqliteTaskRepository,
+    SqliteTemplateSeriesRepository, SqliteTimerSessionRepository,
 };
 use taskveil_sync::SyncRunSummary;
 use zeroize::Zeroizing;
 
+use crate::profile_coordination::{ProfileCoordinator, ProfileExclusiveGuard, ProfileSharedGuard};
 use crate::{
     device_key_rotation::resolve_active_capsule, AccountSessionState, ClientError,
     LocalCryptoContext, LocalCryptoUnavailable, LocalMutationContext,
@@ -77,15 +78,18 @@ impl LocalProfileConfig {
 pub struct TaskveilClient {
     pub(crate) db_dir: PathBuf,
     pub(crate) db_path: PathBuf,
+    profile_coordinator: Arc<ProfileCoordinator>,
     db_key: Mutex<Zeroizing<[u8; 32]>>,
     account: Mutex<AccountRuntimeState>,
     sync: Mutex<SyncRuntimeState>,
-    operation_busy: AtomicBool,
+    runtime_epoch: AtomicI64,
+    capsule_generation: AtomicU64,
 }
 
 pub(super) struct AccountRuntimeState {
     pub(super) session: Option<AccountSessionState>,
     pub(super) session_restored: bool,
+    pub(super) loaded_credential_generation: Option<String>,
     pub(super) crypto: CryptoRuntimeState,
 }
 
@@ -113,27 +117,45 @@ pub(crate) enum LocalMutationState {
 }
 
 impl TaskveilClient {
+    #[cfg(test)]
+    fn pinned_test_coordinator(db_dir: &Path, db_path: &Path) -> Arc<ProfileCoordinator> {
+        let coordinator = ProfileCoordinator::for_profile(db_dir).unwrap();
+        coordinator.pin_database(db_path).unwrap();
+        coordinator
+    }
+
     pub fn open(config: LocalProfileConfig) -> Result<Self, ClientError> {
-        std::fs::create_dir_all(&config.db_dir).map_err(ClientError::Io)?;
-        let db_path = config.db_dir.join("taskveil.db");
-        let mut capsule_store = PlatformLocalKeyCapsuleStore::new(&config.db_dir);
+        let profile_coordinator = ProfileCoordinator::for_profile(&config.db_dir)?;
+        let _profile_lock = profile_coordinator.try_exclusive()?;
+        let db_dir = profile_coordinator.canonical_root().to_path_buf();
+        let db_path = db_dir.join("taskveil.db");
+        let mut capsule_store = PlatformLocalKeyCapsuleStore::new(&db_dir);
         let capsule = resolve_active_capsule(&mut capsule_store, &db_path)?;
         let db_key = Zeroizing::new(derive_local_db_key(capsule.device_key()));
         let connection = open_encrypted(&db_path, &db_key)?;
         SqliteListRepository::new(connection)
             .ensure_default_list(config.default_inbox_name, now_ms()?)?;
-
+        profile_coordinator.pin_database(&db_path)?;
+        let mut coordination =
+            SqliteProfileCoordinationRepository::new(open_encrypted(&db_path, &db_key)?);
+        let runtime = coordination.publish_capsule_generation(
+            i64::try_from(capsule.generation()).map_err(|_| ClientError::LocalKeyState)?,
+            now_ms()?,
+        )?;
         Ok(Self {
-            db_dir: config.db_dir,
+            db_dir,
             db_path,
+            profile_coordinator,
             db_key: Mutex::new(db_key),
             account: Mutex::new(AccountRuntimeState {
                 session: None,
                 session_restored: false,
+                loaded_credential_generation: None,
                 crypto: CryptoRuntimeState::Unloaded,
             }),
             sync: Mutex::new(SyncRuntimeState::default()),
-            operation_busy: AtomicBool::new(false),
+            runtime_epoch: AtomicI64::new(runtime.runtime_epoch),
+            capsule_generation: AtomicU64::new(capsule.generation()),
         })
     }
 
@@ -152,6 +174,11 @@ impl TaskveilClient {
     }
 
     pub fn sync_server_url(&self) -> Result<String, ClientError> {
+        let _operation = self.begin_operation()?;
+        self.sync_server_url_unlocked()
+    }
+
+    pub(super) fn sync_server_url_unlocked(&self) -> Result<String, ClientError> {
         let stored = self.setting(SYNC_SERVER_URL_SETTING_KEY)?;
         Ok(stored
             .filter(|value| !value.trim().is_empty())
@@ -159,7 +186,7 @@ impl TaskveilClient {
     }
 
     pub fn set_sync_server_url(&self, server_url: String) -> Result<(), ClientError> {
-        let _operation = self.begin_operation()?;
+        let _operation = self.begin_exclusive_operation()?;
         let _session_lock = account::acquire_session_token_set_lock(&self.db_dir)?;
         let server_url = taskveil_sync::canonical_server_origin(&server_url)
             .map_err(|_| ClientError::AccountRequest)?;
@@ -218,17 +245,164 @@ impl TaskveilClient {
         self.sync.lock().map_err(|_| ClientError::RuntimeState)
     }
 
-    pub(super) fn operation_guard(&self) -> Result<OperationGuard<'_>, ClientError> {
+    pub(super) fn operation_guard(&self) -> Result<OperationGuard, ClientError> {
         self.begin_operation()
     }
 
-    pub(super) fn begin_operation(&self) -> Result<OperationGuard<'_>, ClientError> {
-        self.operation_busy
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .map_err(|_| ClientError::Busy)?;
-        Ok(OperationGuard {
-            running: &self.operation_busy,
-        })
+    pub(super) fn begin_operation(&self) -> Result<OperationGuard, ClientError> {
+        let coordinator = Arc::clone(&self.profile_coordinator);
+        let shared = coordinator.try_shared()?;
+        coordinator.validate_pinned_paths(&self.db_path)?;
+        if self.has_pending_capsule_locked()? {
+            drop(shared);
+            {
+                let _exclusive = coordinator.try_exclusive()?;
+                coordinator.validate_pinned_paths(&self.db_path)?;
+                self.recover_pending_capsule_locked()?;
+            }
+            let profile = ProfileOperationGuard::Shared(coordinator.try_shared()?);
+            return self.begin_operation_with_profile(profile);
+        }
+        let profile = ProfileOperationGuard::Shared(shared);
+        self.begin_operation_with_profile(profile)
+    }
+
+    pub(super) fn begin_exclusive_operation(&self) -> Result<OperationGuard, ClientError> {
+        let exclusive = self.profile_coordinator.try_exclusive()?;
+        self.profile_coordinator
+            .validate_pinned_paths(&self.db_path)?;
+        self.recover_pending_capsule_locked()?;
+        let profile = ProfileOperationGuard::Exclusive(exclusive);
+        self.begin_operation_with_profile(profile)
+    }
+
+    fn has_pending_capsule_locked(&self) -> Result<bool, ClientError> {
+        use taskveil_crypto::{LocalKeyCapsuleSlot, LocalKeyCapsuleStore};
+
+        PlatformLocalKeyCapsuleStore::new(&self.db_dir)
+            .load(LocalKeyCapsuleSlot::Pending)
+            .map(|capsule| capsule.is_some())
+            .map_err(ClientError::KeyStore)
+    }
+
+    fn recover_pending_capsule_locked(&self) -> Result<(), ClientError> {
+        if !self.has_pending_capsule_locked()? {
+            return Ok(());
+        }
+        let mut capsule_store = PlatformLocalKeyCapsuleStore::new(&self.db_dir);
+        let capsule = resolve_active_capsule(&mut capsule_store, &self.db_path)?;
+        self.replace_db_key(Zeroizing::new(derive_local_db_key(capsule.device_key())))?;
+        let runtime = SqliteProfileCoordinationRepository::new(open_encrypted(
+            &self.db_path,
+            &self.db_key(),
+        )?)
+        .publish_capsule_generation(
+            i64::try_from(capsule.generation()).map_err(|_| ClientError::LocalKeyState)?,
+            now_ms()?,
+        )?;
+        {
+            let mut account = self.account_state()?;
+            account.session = None;
+            account.session_restored = false;
+            account.loaded_credential_generation = None;
+            account.crypto = CryptoRuntimeState::Unloaded;
+        }
+        self.publish_runtime_generation(runtime.runtime_epoch, capsule.generation());
+        self.ensure_account_runtime_restored()
+    }
+
+    fn begin_operation_with_profile(
+        &self,
+        profile: ProfileOperationGuard,
+    ) -> Result<OperationGuard, ClientError> {
+        self.profile_coordinator
+            .validate_pinned_paths(&self.db_path)?;
+        self.refresh_profile_runtime_locked()?;
+        Ok(OperationGuard { _profile: profile })
+    }
+
+    fn refresh_profile_runtime_locked(&self) -> Result<(), ClientError> {
+        use taskveil_crypto::{LocalKeyCapsuleSlot, LocalKeyCapsuleStore};
+
+        let capsule_store = PlatformLocalKeyCapsuleStore::new(&self.db_dir);
+        let capsule = capsule_store
+            .load(LocalKeyCapsuleSlot::Active)
+            .map_err(ClientError::KeyStore)?;
+        #[cfg(test)]
+        if capsule.is_none() {
+            let runtime = SqliteProfileCoordinationRepository::new(open_encrypted(
+                &self.db_path,
+                &self.db_key(),
+            )?)
+            .load_runtime()?;
+            if runtime.runtime_epoch != self.runtime_epoch.load(Ordering::Acquire) {
+                let mut account = self.account_state()?;
+                account.session = None;
+                account.session_restored = false;
+                account.loaded_credential_generation = None;
+                account.crypto = CryptoRuntimeState::Unloaded;
+                self.runtime_epoch
+                    .store(runtime.runtime_epoch, Ordering::Release);
+                return Err(ClientError::LocalKeyState);
+            }
+            return Ok(());
+        }
+        let capsule = capsule.ok_or(ClientError::LocalKeyState)?;
+        if capsule.generation() != self.capsule_generation.load(Ordering::Acquire) {
+            self.replace_db_key(Zeroizing::new(derive_local_db_key(capsule.device_key())))?;
+        }
+        let runtime = SqliteProfileCoordinationRepository::new(open_encrypted(
+            &self.db_path,
+            &self.db_key(),
+        )?)
+        .load_runtime()?;
+        if runtime.runtime_epoch != self.runtime_epoch.load(Ordering::Acquire) {
+            {
+                let mut account = self.account_state()?;
+                account.session = None;
+                account.session_restored = false;
+                account.loaded_credential_generation = None;
+                account.crypto = CryptoRuntimeState::Unloaded;
+            }
+            self.runtime_epoch
+                .store(runtime.runtime_epoch, Ordering::Release);
+            self.capsule_generation
+                .store(capsule.generation(), Ordering::Release);
+            self.ensure_account_runtime_restored()?;
+        } else if self.capsule_generation.load(Ordering::Acquire) != capsule.generation() {
+            self.capsule_generation
+                .store(capsule.generation(), Ordering::Release);
+        }
+        Ok(())
+    }
+
+    pub(super) fn loaded_runtime_epoch(&self) -> i64 {
+        self.runtime_epoch.load(Ordering::Acquire)
+    }
+
+    pub(super) fn retry_runtime_epoch_once<T>(
+        &self,
+        mut operation: impl FnMut() -> Result<T, ClientError>,
+    ) -> Result<T, ClientError> {
+        match operation() {
+            Err(ClientError::Storage(
+                taskveil_storage::StorageError::ProfileRuntimeEpochChanged { .. },
+            )) => {
+                // Epoch assertions occur immediately after BEGIN IMMEDIATE and
+                // before the command writes anything, so replaying the full
+                // command once is exactly-once. A second mismatch is surfaced
+                // fail-closed instead of looping.
+                self.refresh_profile_runtime_locked()?;
+                operation()
+            }
+            result => result,
+        }
+    }
+
+    pub(super) fn publish_runtime_generation(&self, runtime_epoch: i64, capsule_generation: u64) {
+        self.runtime_epoch.store(runtime_epoch, Ordering::Release);
+        self.capsule_generation
+            .store(capsule_generation, Ordering::Release);
     }
 
     pub(super) fn with_task_repository<T>(
@@ -304,14 +478,14 @@ impl TaskveilClient {
     }
 }
 
-pub(super) struct OperationGuard<'a> {
-    running: &'a AtomicBool,
+pub(super) struct OperationGuard {
+    _profile: ProfileOperationGuard,
 }
 
-impl Drop for OperationGuard<'_> {
-    fn drop(&mut self) {
-        self.running.store(false, Ordering::Release);
-    }
+#[allow(dead_code)] // Variant payloads own the RAII locks until operation drop.
+enum ProfileOperationGuard {
+    Shared(ProfileSharedGuard),
+    Exclusive(ProfileExclusiveGuard),
 }
 
 pub(super) fn now_ms() -> Result<i64, ClientError> {
