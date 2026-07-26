@@ -2692,7 +2692,7 @@ async fn opaque_login_hides_account_existence_and_consumes_every_state_once() {
                 &[0x62; 32],
             )
             .await,
-        Err(AccountClientError::Opaque)
+        Err(AccountClientError::AuthRejected)
     ));
     assert!(matches!(
         client
@@ -2703,7 +2703,7 @@ async fn opaque_login_hides_account_existence_and_consumes_every_state_once() {
                 &[0x63; 32],
             )
             .await,
-        Err(AccountClientError::Opaque)
+        Err(AccountClientError::AuthRejected)
     ));
 
     let regular_login = client

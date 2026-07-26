@@ -10,6 +10,7 @@ import 'package:go_router/go_router.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:taskveil/src/core/bridge_service.dart';
 import 'package:taskveil/src/core/providers.dart';
+import 'package:taskveil/src/core/safe_startup_log.dart';
 import 'package:taskveil/src/generated/l10n/app_localizations.dart';
 import 'package:taskveil/src/notifications/reminder_notifications.dart';
 import 'package:taskveil/src/router.dart';
@@ -18,6 +19,7 @@ import 'package:taskveil/src/rust/frb_generated.dart';
 import 'package:taskveil/src/screens/onboarding_screen.dart';
 import 'package:taskveil/src/timer/timer_notifications.dart';
 import 'package:taskveil/src/ui/theme.dart';
+import 'package:taskveil/src/ui/bridge_error_messages.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -53,9 +55,7 @@ Future<void> main() async {
       await notificationService.initialize(notificationContent);
       reminderNotificationService = notificationService;
     } catch (error) {
-      debugPrint(
-        'Taskveil reminder notification initialization failed: $error',
-      );
+      logStartupFailure(StartupFailureEvent.reminderNotifications, error);
     }
     timerNotificationService = TimerNotificationService(
       FlutterLocalTimerNotificationGateway(plugin: localNotificationsPlugin),
@@ -68,13 +68,11 @@ Future<void> main() async {
         ),
       );
     } catch (error) {
-      debugPrint('Taskveil timer notification initialization failed: $error');
+      logStartupFailure(StartupFailureEvent.timerNotifications, error);
     }
-  } catch (error, stackTrace) {
+  } catch (error) {
     initializationError = error;
-    debugPrint(
-      'Taskveil native core initialization failed: $error\n$stackTrace',
-    );
+    logStartupFailure(StartupFailureEvent.nativeCore, error);
   }
 
   runApp(
@@ -152,9 +150,9 @@ class TaskveilApp extends StatelessWidget {
               padding: const EdgeInsets.all(24),
               child: Builder(
                 builder: (context) => Text(
-                  AppLocalizations.of(
-                    context,
-                  )!.failedToStartTaskveil(error.toString()),
+                  AppLocalizations.of(context)!.failedToStartTaskveil(
+                    bridgeErrorMessage(AppLocalizations.of(context)!, error),
+                  ),
                 ),
               ),
             ),

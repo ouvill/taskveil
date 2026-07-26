@@ -1449,6 +1449,53 @@ class AppLocalizationsJa extends AppLocalizations {
   String get templateSavedMessage => 'テンプレートを保存しました。';
 
   @override
+  String get bridgeErrorInvalidInput => '入力内容を確認してください。';
+
+  @override
+  String get bridgeErrorNotFound => '対象はすでに利用できません。';
+
+  @override
+  String get bridgeErrorConflict => '内容が更新されています。再読み込みしてもう一度お試しください。';
+
+  @override
+  String get bridgeErrorUnauthorized => '続行するには、もう一度サインインしてください。';
+
+  @override
+  String get bridgeErrorCredentialUnavailable =>
+      'サインイン情報を利用できません。もう一度サインインしてください。';
+
+  @override
+  String get bridgeErrorAccountBoundUnavailable =>
+      'この端末ではアカウントの暗号鍵を利用できません。もう一度サインインしてください。';
+
+  @override
+  String get bridgeErrorEntitlementRequired => 'この操作にはProプランが必要です。';
+
+  @override
+  String get bridgeErrorUpgradeRequired => 'Taskveilを更新してから、もう一度同期してください。';
+
+  @override
+  String get bridgeErrorBusy => '別の処理を実行中です。少し待ってからもう一度お試しください。';
+
+  @override
+  String get bridgeErrorLeaseLost => '同期の実行権が切り替わりました。もう一度同期してください。';
+
+  @override
+  String get bridgeErrorClockSkew => '端末の時計が進んでいます。時刻を確認してもう一度お試しください。';
+
+  @override
+  String get bridgeErrorCryptoUnavailable => 'この端末では安全なローカルデータを利用できません。';
+
+  @override
+  String get bridgeErrorStorageFailure => 'ローカルデータへアクセスできませんでした。';
+
+  @override
+  String get bridgeErrorSyncFailure => '同期できませんでした。もう一度お試しください。';
+
+  @override
+  String get bridgeErrorInternal => '処理を完了できませんでした。';
+
+  @override
   String failedToStartTaskveil(String error) {
     return 'Taskveilの起動に失敗しました: $error';
   }

@@ -1,41 +1,41 @@
-use std::fmt::Write as _;
-
 use super::*;
 
 pub(super) fn client_result<T>(
     result: Result<T, taskveil_client::ClientError>,
-) -> Result<T, String> {
-    result.map_err(|error| error.to_string())
+) -> Result<T, BridgeErrorDto> {
+    result.map_err(Into::into)
 }
 
-pub(super) fn parse_uuid(value: &str) -> Result<Uuid, String> {
-    value.parse::<Uuid>().map_err(|error| error.to_string())
+pub(super) fn parse_uuid(value: &str) -> Result<Uuid, BridgeErrorDto> {
+    value
+        .parse::<Uuid>()
+        .map_err(|_| BridgeErrorDto::invalid_input())
 }
 
-pub(super) fn parse_status(value: &str) -> Result<TaskStatus, String> {
+pub(super) fn parse_status(value: &str) -> Result<TaskStatus, BridgeErrorDto> {
     match value {
         "todo" => Ok(TaskStatus::Todo),
         "in_progress" => Ok(TaskStatus::InProgress),
         "done" => Ok(TaskStatus::Done),
         "wont_do" => Ok(TaskStatus::WontDo),
-        other => Err(format!("invalid task status: {other}")),
+        _ => Err(BridgeErrorDto::invalid_input()),
     }
 }
 
-pub(super) fn parse_task_due(input: TaskDueInput) -> Result<TaskDue, String> {
+pub(super) fn parse_task_due(input: TaskDueInput) -> Result<TaskDue, BridgeErrorDto> {
     match input {
         TaskDueInput::Date { due_on } => {
-            TaskDue::date(due_on).map_err(|_| "invalid date-only due value".to_string())
+            TaskDue::date(due_on).map_err(|_| BridgeErrorDto::invalid_input())
         }
         TaskDueInput::DateTime { due_at, time_zone } => {
             TaskDue::date_time(due_at.timestamp_millis(), time_zone)
-                .map_err(|_| "invalid datetime due value".to_string())
+                .map_err(|_| BridgeErrorDto::invalid_input())
         }
     }
 }
 
-pub(super) fn count_to_i32(count: usize) -> Result<i32, String> {
-    i32::try_from(count).map_err(|_| "count exceeds i32 range".to_string())
+pub(super) fn count_to_i32(count: usize) -> Result<i32, BridgeErrorDto> {
+    i32::try_from(count).map_err(|_| BridgeErrorDto::new(BridgeErrorCodeDto::Internal, false))
 }
 
 pub(super) fn status_to_string(status: TaskStatus) -> String {
@@ -137,7 +137,7 @@ pub(super) fn task_series_to_dto(series: TaskSeries) -> TaskSeriesDto {
 
 pub(super) fn blueprint_from_dtos(
     nodes: Vec<TaskBlueprintNodeDto>,
-) -> Result<TaskBlueprint, String> {
+) -> Result<TaskBlueprint, BridgeErrorDto> {
     let blueprint = TaskBlueprint {
         schema_revision: taskveil_client::TASK_BLUEPRINT_SCHEMA_REVISION,
         nodes: nodes
@@ -155,7 +155,9 @@ pub(super) fn blueprint_from_dtos(
             })
             .collect(),
     };
-    blueprint.validate().map_err(|error| error.to_string())?;
+    blueprint
+        .validate()
+        .map_err(|_| BridgeErrorDto::invalid_input())?;
     Ok(blueprint)
 }
 
@@ -234,7 +236,7 @@ pub(super) fn instant_to_datetime(instant: UtcInstant) -> DateTime<Utc> {
 
 pub(super) fn parse_active_timer(
     value: ActiveTimerSessionDto,
-) -> Result<ActiveTimerSession, String> {
+) -> Result<ActiveTimerSession, BridgeErrorDto> {
     Ok(ActiveTimerSession {
         session_id: parse_uuid(&value.session_id)?,
         task_id: value.task_id.as_deref().map(parse_uuid).transpose()?,
@@ -250,7 +252,7 @@ pub(super) fn parse_active_timer(
 
 pub(super) fn parse_completed_timer(
     value: CompletedTimerSessionDto,
-) -> Result<CompletedTimerSession, String> {
+) -> Result<CompletedTimerSession, BridgeErrorDto> {
     Ok(CompletedTimerSession {
         id: parse_uuid(&value.id)?,
         task_id: parse_uuid(&value.task_id)?,
@@ -441,7 +443,7 @@ pub(super) fn sync_status_to_dto(status: SyncStatus) -> SyncStatusDto {
         running: status.running,
         last_success_at: status.last_success_at,
         last_failure_at: status.last_failure_at,
-        last_error: status.last_error,
+        last_error: status.last_error.map(Into::into),
         pushed_count: saturating_i32(status.pushed_count),
         push_acked_count: saturating_i32(status.push_acked_count),
         push_superseded_count: saturating_i32(status.push_superseded_count),
@@ -459,26 +461,4 @@ pub(super) fn sync_status_to_dto(status: SyncStatus) -> SyncStatusDto {
 
 pub(super) fn saturating_i32(value: usize) -> i32 {
     i32::try_from(value).unwrap_or(i32::MAX)
-}
-
-pub(super) fn json_string(value: &str) -> String {
-    let mut encoded = String::with_capacity(value.len() + 2);
-    encoded.push('"');
-    for character in value.chars() {
-        match character {
-            '"' => encoded.push_str("\\\""),
-            '\\' => encoded.push_str("\\\\"),
-            '\u{08}' => encoded.push_str("\\b"),
-            '\u{0c}' => encoded.push_str("\\f"),
-            '\n' => encoded.push_str("\\n"),
-            '\r' => encoded.push_str("\\r"),
-            '\t' => encoded.push_str("\\t"),
-            control if control <= '\u{1f}' => {
-                write!(encoded, "\\u{:04x}", control as u32).expect("write to String")
-            }
-            other => encoded.push(other),
-        }
-    }
-    encoded.push('"');
-    encoded
 }

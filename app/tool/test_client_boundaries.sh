@@ -9,6 +9,10 @@ mkdir -p "$fixture/app/rust/src" "$fixture/app/lib" "$fixture/cli" "$fixture/mcp
 cp "$repo_root/app/rust/Cargo.toml" "$fixture/app/rust/Cargo.toml"
 cp "$repo_root/app/rust/src/api.rs" "$repo_root/app/rust/src/lib.rs" \
   "$repo_root/app/rust/src/client_handle.rs" "$fixture/app/rust/src/"
+mkdir -p "$fixture/app/rust/src/api"
+cp "$repo_root/app/rust/src/api/conversions.rs" \
+  "$fixture/app/rust/src/api/conversions.rs"
+cp -R "$repo_root/app/lib/src" "$fixture/app/lib/"
 cp "$repo_root/cli/Cargo.toml" "$fixture/cli/Cargo.toml"
 cp "$repo_root/mcp-server/Cargo.toml" "$fixture/mcp-server/Cargo.toml"
 
@@ -53,6 +57,26 @@ printf '%s\n' 'pub fn set_setting(key: String, value: String) {}' >> \
   "$fixture/app/rust/src/api.rs"
 expect_failure raw-settings-api
 cp "$repo_root/app/rust/src/api.rs" "$fixture/app/rust/src/api.rs"
+
+printf '%s\n' 'pub fn rogue_string_error() -> Result<(), String> { Ok(()) }' >> \
+  "$fixture/app/rust/src/api.rs"
+expect_failure raw-string-result
+cp "$repo_root/app/rust/src/api.rs" "$fixture/app/rust/src/api.rs"
+
+printf '%s\n' 'pub fn greet() -> Result<(), BridgeErrorDto> { Ok(()) }' >> \
+  "$fixture/app/rust/src/api.rs"
+expect_failure toy-api
+cp "$repo_root/app/rust/src/api.rs" "$fixture/app/rust/src/api.rs"
+
+printf '%s\n' "String leak(Object error) => '\$error';" > \
+  "$fixture/app/lib/src/rogue_error_interpolation.dart"
+expect_failure raw-dart-interpolation
+rm "$fixture/app/lib/src/rogue_error_interpolation.dart"
+
+rm "$fixture/app/rust/src/api/conversions.rs"
+expect_failure missing-boundary-input
+cp "$repo_root/app/rust/src/api/conversions.rs" \
+  "$fixture/app/rust/src/api/conversions.rs"
 
 printf '%s\n' "import '../../tool/design_lab.dart';" > \
   "$fixture/app/lib/rogue_design_import.dart"

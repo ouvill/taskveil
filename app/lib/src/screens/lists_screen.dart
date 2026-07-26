@@ -6,6 +6,7 @@ import 'package:taskveil/src/core/providers.dart';
 import 'package:taskveil/src/generated/l10n/app_localizations.dart';
 import 'package:taskveil/src/rust/api.dart';
 import 'package:taskveil/src/ui/dialogs.dart';
+import 'package:taskveil/src/ui/bridge_error_messages.dart';
 import 'package:taskveil/src/ui/header_actions.dart';
 import 'package:taskveil/src/ui/states.dart';
 import 'package:taskveil/src/ui/theme.dart';
@@ -27,8 +28,9 @@ class ListsScreen extends ConsumerWidget {
       body: SafeArea(
         child: listsAsync.when(
           loading: () => const AppLoadingState(),
-          error: (error, stackTrace) =>
-              AppErrorState(message: l10n.failedToLoadLists(error.toString())),
+          error: (error, stackTrace) => AppErrorState(
+            message: l10n.failedToLoadLists(bridgeErrorMessage(l10n, error)),
+          ),
           data: (lists) {
             return archivedListsAsync.when(
               loading: () => _ListsManagementView(
@@ -37,7 +39,9 @@ class ListsScreen extends ConsumerWidget {
                 onCreateList: () => _createList(context, ref),
               ),
               error: (error, stackTrace) => AppErrorState(
-                message: l10n.failedToLoadLists(error.toString()),
+                message: l10n.failedToLoadLists(
+                  bridgeErrorMessage(l10n, error),
+                ),
               ),
               data: (archivedLists) => _ListsManagementView(
                 lists: lists,

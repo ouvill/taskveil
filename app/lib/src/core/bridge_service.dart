@@ -153,9 +153,8 @@ class FrbBridgeService implements BridgeService {
   accountRegistrationState() async => rust_api.accountRegistrationState();
 
   @override
-  Future<void> accountRegistrationCancel() async {
-    rust_api.accountRegistrationCancel();
-  }
+  Future<void> accountRegistrationCancel() =>
+      rust_api.accountRegistrationCancel();
 
   @override
   Future<rust_api.AccountRegistrationPendingDto> accountRegistrationResend() =>
@@ -175,9 +174,8 @@ class FrbBridgeService implements BridgeService {
   );
 
   @override
-  Future<void> accountRegistrationAckRecoveryKey() async {
-    rust_api.accountRegistrationAckRecoveryKey();
-  }
+  Future<void> accountRegistrationAckRecoveryKey() =>
+      rust_api.accountRegistrationAckRecoveryKey();
 
   @override
   Future<String?> accountRegistrationRecoveryKey() async =>

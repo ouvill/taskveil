@@ -117,7 +117,7 @@ pub(super) struct SyncRuntimeState {
     pub(super) running: bool,
     pub(super) last_success_at: Option<i64>,
     pub(super) last_failure_at: Option<i64>,
-    pub(super) last_error: Option<String>,
+    pub(super) last_error: Option<crate::SyncFailure>,
     pub(super) last_summary: SyncRunSummary,
 }
 

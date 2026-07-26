@@ -1012,7 +1012,7 @@ impl TaskveilClient {
         let response = client
             .organization_safety_number(tenant_id, member_user_id, &session_token)
             .await
-            .map_err(|_| ClientError::AccountRequest)?;
+            .map_err(map_account_client_error)?;
         self.verify_local_safety_participant(&response)?;
         let locally_verified = self
             .load_organization_trust_pin(tenant_id, member_user_id)?
@@ -1040,7 +1040,7 @@ impl TaskveilClient {
         let current = client
             .organization_safety_number(tenant_id, member_user_id, &session_token)
             .await
-            .map_err(|_| ClientError::AccountRequest)?;
+            .map_err(map_account_client_error)?;
         self.verify_local_safety_participant(&current)?;
         if current.digest != digest {
             return Err(ClientError::AccountRequest);
@@ -1048,7 +1048,7 @@ impl TaskveilClient {
         let response = client
             .confirm_organization_safety_number(tenant_id, member_user_id, digest, &session_token)
             .await
-            .map_err(|_| ClientError::AccountRequest)?;
+            .map_err(map_account_client_error)?;
         self.verify_local_safety_participant(&response)?;
         if !OrganizationTrustPin::candidate(&current).matches(&response) {
             return Err(ClientError::AccountRequest);
@@ -1075,7 +1075,7 @@ impl TaskveilClient {
         let safety = client
             .organization_safety_number(tenant_id, member_user_id, &session_token)
             .await
-            .map_err(|_| ClientError::AccountRequest)?;
+            .map_err(map_account_client_error)?;
         self.verify_local_safety_participant(&safety)?;
         let mut pin = self
             .load_organization_trust_pin(tenant_id, member_user_id)?
@@ -1103,7 +1103,7 @@ impl TaskveilClient {
                 &session_token,
             )
             .await
-            .map_err(|_| ClientError::AccountRequest)?;
+            .map_err(map_account_client_error)?;
         let member = client
             .organization_member_devices(
                 tenant_id,
@@ -1117,7 +1117,7 @@ impl TaskveilClient {
                 &session_token,
             )
             .await
-            .map_err(|_| ClientError::AccountRequest)?;
+            .map_err(map_account_client_error)?;
         if owner.revision != pin.owner_roster_revision
             || owner.head_hash != decode_trust_hash(&pin.owner_roster_head_hash)?
             || member.revision != pin.member_roster_revision
@@ -1150,7 +1150,7 @@ impl TaskveilClient {
         let safety = client
             .organization_safety_number(tenant_id, member_user_id, &session_token)
             .await
-            .map_err(|_| ClientError::AccountRequest)?;
+            .map_err(map_account_client_error)?;
         self.verify_local_safety_participant(&safety)?;
         let mut pin = self
             .load_organization_trust_pin(tenant_id, member_user_id)?
@@ -1184,7 +1184,7 @@ impl TaskveilClient {
                 &session_token,
             )
             .await
-            .map_err(|_| ClientError::AccountRequest)?;
+            .map_err(map_account_client_error)?;
         let member_roster = client
             .organization_member_devices(
                 tenant_id,
@@ -1198,7 +1198,7 @@ impl TaskveilClient {
                 &session_token,
             )
             .await
-            .map_err(|_| ClientError::AccountRequest)?;
+            .map_err(map_account_client_error)?;
         if owner_roster.revision != pin.owner_roster_revision
             || owner_roster.head_hash != decode_trust_hash(&pin.owner_roster_head_hash)?
             || member_roster.revision != pin.member_roster_revision
@@ -1226,7 +1226,7 @@ impl TaskveilClient {
         let bundle = client
             .active_key_bundle(tenant_id, &session_token)
             .await
-            .map_err(|_| ClientError::AccountRequest)?;
+            .map_err(map_account_client_error)?;
         verify_organization_active_bundle(
             &bundle,
             tenant_id,
@@ -1268,7 +1268,7 @@ impl TaskveilClient {
         let safety = client
             .organization_safety_number(tenant_id, member_user_id, &session_token)
             .await
-            .map_err(|_| ClientError::AccountRequest)?;
+            .map_err(map_account_client_error)?;
         self.verify_local_safety_participant(&safety)?;
         let mut pin = self
             .load_organization_trust_pin(tenant_id, member_user_id)?
@@ -1298,7 +1298,7 @@ impl TaskveilClient {
                         &session_token,
                     )
                     .await
-                    .map_err(|_| ClientError::AccountRequest)?,
+                    .map_err(map_account_client_error)?,
                 true,
             )
         } else if safety.member_user_id == local_user_id {
@@ -1316,7 +1316,7 @@ impl TaskveilClient {
                         &session_token,
                     )
                     .await
-                    .map_err(|_| ClientError::AccountRequest)?,
+                    .map_err(map_account_client_error)?,
                 false,
             )
         } else {
@@ -1350,7 +1350,7 @@ impl TaskveilClient {
         client
             .revoke_organization_device(tenant_id, device_id, &statement, &session_token)
             .await
-            .map_err(|_| ClientError::AccountRequest)?;
+            .map_err(map_account_client_error)?;
         pin.required_generation = pin
             .minimum_generation
             .checked_add(1)
@@ -2136,7 +2136,7 @@ impl TaskveilClient {
                         .map_err(map_account_client_error)?;
                     delete_account_secret(&self.db_dir, AccountSecretKind::SessionTokens)
                         .map_err(ClientError::KeyStore)?;
-                    return Err(ClientError::AccountRequest);
+                    return Err(ClientError::Unauthorized);
                 }
                 Err(error) => return Err(map_account_client_error(error)),
             }
@@ -2467,7 +2467,7 @@ impl TaskveilClient {
         let bundle = client
             .active_key_bundle(tenant_id, &session_token)
             .await
-            .map_err(|_| ClientError::AccountRequest)?;
+            .map_err(map_account_client_error)?;
         let tenant_root_dek = unwrap_active_key_bundle(tenant_id, &bundle, &master_key)
             .map_err(|_| ClientError::AccountBoundUnavailable)?;
         let historical =
@@ -3077,9 +3077,25 @@ impl TaskveilClient {
     }
 }
 
-fn map_account_client_error(error: AccountClientError) -> ClientError {
+pub(super) fn map_account_client_error(error: AccountClientError) -> ClientError {
     match error {
         AccountClientError::EntitlementRequired => ClientError::EntitlementRequired,
+        AccountClientError::InvalidGrant
+        | AccountClientError::AuthRejected
+        | AccountClientError::Server(401 | 403) => ClientError::Unauthorized,
+        AccountClientError::EmptyServerUrl
+        | AccountClientError::InvalidServerOrigin
+        | AccountClientError::EmailVerificationExpired
+        | AccountClientError::Server(400 | 422) => ClientError::InvalidAccountInput,
+        AccountClientError::Server(404 | 410) => ClientError::AccountNotFound,
+        AccountClientError::Server(409) => ClientError::AccountConflict,
+        AccountClientError::EmailVerificationRetryAt(_) | AccountClientError::Server(429) => {
+            ClientError::Busy
+        }
+        AccountClientError::Transport(_) => ClientError::SyncRun,
+        AccountClientError::Server(status) if status == 408 || status >= 500 => {
+            ClientError::SyncRun
+        }
         _ => ClientError::AccountRequest,
     }
 }
@@ -3531,6 +3547,54 @@ mod tests {
 
     use super::*;
     use crate::{profile_coordination::ProfileCoordinator, SqliteSyncStore};
+
+    #[test]
+    fn account_transport_errors_are_classified_without_conflating_authentication() {
+        assert!(matches!(
+            map_account_client_error(AccountClientError::InvalidGrant),
+            ClientError::Unauthorized
+        ));
+        assert!(matches!(
+            map_account_client_error(AccountClientError::Server(401)),
+            ClientError::Unauthorized
+        ));
+        assert!(matches!(
+            map_account_client_error(AccountClientError::AuthRejected),
+            ClientError::Unauthorized
+        ));
+        assert!(matches!(
+            map_account_client_error(AccountClientError::Opaque),
+            ClientError::AccountRequest
+        ));
+        assert!(matches!(
+            map_account_client_error(AccountClientError::EntitlementRequired),
+            ClientError::EntitlementRequired
+        ));
+        assert!(matches!(
+            map_account_client_error(AccountClientError::Server(500)),
+            ClientError::SyncRun
+        ));
+        assert!(matches!(
+            map_account_client_error(AccountClientError::InvalidServerOrigin),
+            ClientError::InvalidAccountInput
+        ));
+        assert!(matches!(
+            map_account_client_error(AccountClientError::EmailVerificationExpired),
+            ClientError::InvalidAccountInput
+        ));
+        assert!(matches!(
+            map_account_client_error(AccountClientError::EmailVerificationRetryAt(42)),
+            ClientError::Busy
+        ));
+        assert!(matches!(
+            map_account_client_error(AccountClientError::Server(404)),
+            ClientError::AccountNotFound
+        ));
+        assert!(matches!(
+            map_account_client_error(AccountClientError::Server(409)),
+            ClientError::AccountConflict
+        ));
+    }
 
     fn open_test_client(db_dir: &std::path::Path, db_key: [u8; 32]) -> TaskveilClient {
         let db_path = db_dir.join("taskveil.db");

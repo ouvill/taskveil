@@ -1,36 +1,81 @@
-import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
+import 'package:taskveil/src/core/bridge_service.dart';
 import 'package:taskveil/src/rust/api.dart';
 import 'package:taskveil/src/rust/frb_generated.dart';
 
 void main() {
+  late Directory profileDirectory;
+
   setUpAll(() async {
     await RustLib.init(
       externalLibrary: ExternalLibrary.open(
         'rust/target/release/libtaskveil_app_bridge.dylib',
       ),
     );
+    profileDirectory = await Directory.systemTemp.createTemp(
+      'taskveil-frb-profile-',
+    );
+    await initCore(dbDir: profileDirectory.path, defaultInboxName: 'Inbox');
   });
 
-  tearDownAll(RustLib.dispose);
-
-  test('greet calls Rust through flutter_rust_bridge', () async {
-    final message = await greet(name: 'Taskveil');
-
-    expect(message, 'Hello Taskveil from taskveil-core');
+  tearDownAll(() async {
+    RustLib.dispose();
+    await profileDirectory.delete(recursive: true);
   });
 
-  test('createDraftTask returns a taskveil-domain task JSON string', () async {
-    final json = await createDraftTask(title: 'Write bridge test');
-    final task = jsonDecode(json) as Map<String, Object?>;
+  test('encrypted profile supports real list and task CRUD', () async {
+    final list = await createList(name: 'Bridge list', sortOrder: 'ignored');
+    final task = await createTask(listId: list.id, title: 'Bridge task');
 
-    expect(task['title'], 'Write bridge test');
-    expect(task['status'], 'todo');
-    expect(task['note'], '');
-    expect(task['sort_order'], 'a0');
-    expect(task['id'], isA<String>());
-    expect(task['list_id'], isA<String>());
+    final tasks = await getTasks(listId: list.id);
+    expect(tasks.map((value) => value.id), contains(task.id));
+    expect(tasks.single.title, 'Bridge task');
+
+    await deleteTask(taskId: task.id);
+    expect(await getTasks(listId: list.id), isEmpty);
+  });
+
+  test('typed bridge error redacts invalid input', () async {
+    await expectLater(
+      deleteTask(taskId: 'not-a-uuid secret/input'),
+      throwsA(
+        isA<BridgeErrorDto>()
+            .having(
+              (error) => error.code,
+              'code',
+              BridgeErrorCodeDto.invalidInput,
+            )
+            .having((error) => error.arguments, 'arguments', isEmpty)
+            .having((error) => error.retryable, 'retryable', isFalse),
+      ),
+    );
+  });
+
+  test('FrbBridgeService propagates typed registration errors', () async {
+    const bridge = FrbBridgeService();
+
+    await expectLater(
+      bridge.accountRegistrationCancel(),
+      throwsA(
+        isA<BridgeErrorDto>().having(
+          (error) => error.code,
+          'code',
+          BridgeErrorCodeDto.busy,
+        ),
+      ),
+    );
+    await expectLater(
+      bridge.accountRegistrationAckRecoveryKey(),
+      throwsA(
+        isA<BridgeErrorDto>().having(
+          (error) => error.code,
+          'code',
+          BridgeErrorCodeDto.credentialUnavailable,
+        ),
+      ),
+    );
   });
 }

@@ -11,6 +11,7 @@ import 'package:taskveil/src/core/task_due.dart';
 import 'package:taskveil/src/core/task_tree.dart';
 import 'package:taskveil/src/generated/l10n/app_localizations.dart';
 import 'package:taskveil/src/rust/api.dart';
+import 'package:taskveil/src/ui/bridge_error_messages.dart';
 import 'package:taskveil/src/ui/dialogs.dart';
 import 'package:taskveil/src/ui/header_actions.dart';
 import 'package:taskveil/src/ui/states.dart';
@@ -1467,15 +1468,22 @@ Future<void> _showLatestUndoSnackBar(BuildContext context) async {
         onPressed: () {
           messenger.hideCurrentSnackBar();
           unawaited(
-            container
-                .read(latestTaskUndoProvider.notifier)
-                .undo(undo.id)
-                .catchError((Object error) {
-                  messenger.showSnackBar(
-                    SnackBar(content: Text(l10n.undoFailedMessage('$error'))),
-                  );
-                  throw error;
-                }),
+            (() async {
+              try {
+                await container
+                    .read(latestTaskUndoProvider.notifier)
+                    .undo(undo.id);
+              } catch (error) {
+                if (!context.mounted) return;
+                messenger.showSnackBar(
+                  SnackBar(
+                    content: Text(
+                      l10n.undoFailedMessage(bridgeErrorMessage(l10n, error)),
+                    ),
+                  ),
+                );
+              }
+            })(),
           );
         },
       ),

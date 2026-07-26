@@ -1494,6 +1494,62 @@ class AppLocalizationsEn extends AppLocalizations {
   String get templateSavedMessage => 'Template saved.';
 
   @override
+  String get bridgeErrorInvalidInput => 'Check the information you entered.';
+
+  @override
+  String get bridgeErrorNotFound => 'That item is no longer available.';
+
+  @override
+  String get bridgeErrorConflict =>
+      'The item changed. Reload it and try again.';
+
+  @override
+  String get bridgeErrorUnauthorized => 'Sign in again to continue.';
+
+  @override
+  String get bridgeErrorCredentialUnavailable =>
+      'Your sign-in credentials are unavailable. Sign in again.';
+
+  @override
+  String get bridgeErrorAccountBoundUnavailable =>
+      'This device cannot access the account encryption keys. Sign in again.';
+
+  @override
+  String get bridgeErrorEntitlementRequired =>
+      'This action requires a Pro subscription.';
+
+  @override
+  String get bridgeErrorUpgradeRequired =>
+      'Update Taskveil before syncing again.';
+
+  @override
+  String get bridgeErrorBusy =>
+      'Taskveil is busy with another operation. Try again shortly.';
+
+  @override
+  String get bridgeErrorLeaseLost =>
+      'Sync ownership changed. Try syncing again.';
+
+  @override
+  String get bridgeErrorClockSkew =>
+      'This device\'s clock is ahead. Check the time and try again.';
+
+  @override
+  String get bridgeErrorCryptoUnavailable =>
+      'Secure local data is unavailable on this device.';
+
+  @override
+  String get bridgeErrorStorageFailure =>
+      'Taskveil could not access its local data.';
+
+  @override
+  String get bridgeErrorSyncFailure => 'Taskveil could not sync. Try again.';
+
+  @override
+  String get bridgeErrorInternal =>
+      'Taskveil could not complete the operation.';
+
+  @override
   String failedToStartTaskveil(String error) {
     return 'Failed to start Taskveil: $error';
   }
