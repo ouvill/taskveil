@@ -113,22 +113,37 @@ benchmarkでread性能とwrite amplificationを同時に管理する。
 
 | 経路 | Home | Calendar | 自動失敗閾値 |
 |---|---:|---:|---:|
-| Rust storage / SQLCipher / debug、5回median | 139ms（7,220 rows） | 33ms（5,836 rows） | 750ms / 250ms |
-| Flutter → 実FRB → release Rust → SQLCipher、5回median | 71ms（5,834 rows） | 33ms（7,169 occurrences） | 1,500ms / 750ms |
+| Rust storage / SQLCipher / debug、5回median | 137ms（7,220 rows） | 32ms（5,836 rows） | 750ms / 250ms |
+| Flutter → 実FRB → release Rust → SQLCipher、5回median | 75ms（5,834 rows） | 38ms（7,169 occurrences） | 1,500ms / 750ms |
 
 index write amplification:
 
 | 指標 | migration v1 baseline | migration v2 | 増分 | 自動失敗閾値 |
 |---|---:|---:|---:|---:|
-| 10,000件insert | 477ms | 498ms | +4.4% | baselineの150% + 500ms |
+| 10,000件insert | 439ms | 479ms | +9.1% | baselineの150% + 500ms |
 | DB論理サイズ | 7,057,408 bytes | 7,278,592 bytes | +3.1% | baselineの110% |
 
 - 証拠:
   `home_and_calendar_production_plans_use_partial_range_indexes`、
   `sqlcipher_10000_task_query_and_index_write_budgets_hold`、
   `home_calendar_native_performance_test.dart`
-- Commit: 未コミット
-- 未解決: なし
+- 品質ゲート:
+  `cargo fmt --all -- --check`、
+  `cargo clippy --workspace --all-targets -- -D warnings`、
+  `cargo test --workspace`、
+  `flutter analyze`、
+  release Rust build後の`flutter test --reporter expanded`（302 passed、
+  visual QA 1 skipped）、
+  hardcoded string check、client boundary check / regression test、
+  `git diff --check`が統合HEADで成功した。
+- 実装担当セルフレビュー:
+  production SQL定数を直接`EXPLAIN QUERY PLAN`へ渡すこと、v1 databaseから
+  forward-only migrationすること、旧indexをdropしたv2と旧indexを持つv1で
+  write amplificationを比較すること、通常の`flutter test`が実FRB testを
+  discoverして実行することを再確認し、要修正指摘はなかった。
+- Commit: `68e2d0a`（実装、`112cfd7`へrebase後）
+- 未解決: 機能上のblockerなし。wall-clock閾値はrunner負荷の影響を受けるため、
+  初回GitHub Actions結果も継続観測する。
 
 ### 独立検証
 

@@ -1,5 +1,9 @@
 use crate::*;
 
+// `INDEXED BY` is intentional: fresh databases have no planner statistics and
+// otherwise choose the generic deleted_at index. Migration v2 makes these index
+// names part of the latest-schema contract, so production and EXPLAIN use the
+// same stable plan.
 pub(crate) const LIST_HOME_QUERY: &str = "
     WITH RECURSIVE
     home_candidates(id) AS (
