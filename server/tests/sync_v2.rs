@@ -413,6 +413,31 @@ impl Fixture {
     }
 }
 
+async fn wait_for_lock_waiters(pool: &PgPool, expected: i64) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: i64 = query(
+                "SELECT count(*) AS count
+                 FROM pg_stat_activity
+                 WHERE datname = current_database()
+                   AND pid <> pg_backend_pid()
+                   AND wait_event_type = 'Lock'",
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap()
+            .try_get("count")
+            .unwrap();
+            if waiting >= expected {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("concurrent sync request did not reach the expected row-lock wait");
+}
+
 struct TestKeyRefresher {
     calls: usize,
     keys: LocalSyncKeys,
@@ -3473,6 +3498,170 @@ async fn server_trusted_continuity_binds_proofs_and_guards_all_writes() {
     )
     .await
     .is_err());
+}
+
+#[tokio::test]
+async fn concurrent_pull_then_ack_obeys_continuity_proof_session_lock_order() {
+    let fixture = Fixture::setup().await;
+    let initial = sync::pull(
+        &fixture.pool,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+        0,
+        Some(100),
+        None,
+    )
+    .await
+    .unwrap();
+    let proof = initial.closure_proof.unwrap();
+
+    let mut blocker = fixture.admin_pool.begin().await.unwrap();
+    query(
+        "SELECT 1
+         FROM tenant_device_continuity
+         WHERE tenant_id = $1 AND device_id = $2
+         FOR UPDATE",
+    )
+    .bind(fixture.tenant_id)
+    .bind(fixture.auth.device_id)
+    .fetch_one(&mut *blocker)
+    .await
+    .unwrap();
+
+    let pull_pool = fixture.pool.clone();
+    let pull_auth = fixture.auth.clone();
+    let tenant_id = fixture.tenant_id;
+    let pull_task = tokio::spawn(async move {
+        sync::pull(&pull_pool, tenant_id, pull_auth, 0, Some(100), None).await
+    });
+    wait_for_lock_waiters(&fixture.admin_pool, 1).await;
+
+    let ack_pool = fixture.pool.clone();
+    let ack_auth = fixture.auth.clone();
+    let ack_proof = proof.clone();
+    let ack_task = tokio::spawn(async move {
+        sync::ack_continuity(
+            &ack_pool,
+            tenant_id,
+            ack_auth,
+            taskveil_sync::protocol::ContinuityAckRequest { proof: ack_proof },
+        )
+        .await
+    });
+    wait_for_lock_waiters(&fixture.admin_pool, 2).await;
+    blocker.commit().await.unwrap();
+
+    let (pulled, acknowledged) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        (pull_task.await.unwrap(), ack_task.await.unwrap())
+    })
+    .await
+    .expect("pull and ACK must serialize without a deadlock");
+    assert_eq!(
+        pulled.unwrap().closure_proof.unwrap().proof_id,
+        proof.proof_id
+    );
+    acknowledged.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_ack_then_completion_replay_obeys_lock_order_without_deadlock() {
+    let fixture = Fixture::setup().await;
+    fixture.close_continuity().await;
+    let start = sync::begin_full_resync(
+        &fixture.pool,
+        &fixture.resync_tokens,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+    )
+    .await
+    .unwrap();
+    let base = sync::scan_base(
+        &fixture.pool,
+        &fixture.resync_tokens,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+        &start.page_token,
+        Some(100),
+    )
+    .await
+    .unwrap();
+    let completion_token = base.completion_token.unwrap();
+    sync::complete_base(
+        &fixture.pool,
+        &fixture.resync_tokens,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+        &completion_token,
+    )
+    .await
+    .unwrap();
+    let proof = sync::pull(
+        &fixture.pool,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+        start.base_seq,
+        Some(100),
+        Some(start.generation),
+    )
+    .await
+    .unwrap()
+    .closure_proof
+    .unwrap();
+
+    let mut blocker = fixture.admin_pool.begin().await.unwrap();
+    query(
+        "SELECT 1
+         FROM tenant_device_continuity
+         WHERE tenant_id = $1 AND device_id = $2
+         FOR UPDATE",
+    )
+    .bind(fixture.tenant_id)
+    .bind(fixture.auth.device_id)
+    .fetch_one(&mut *blocker)
+    .await
+    .unwrap();
+
+    let ack_pool = fixture.pool.clone();
+    let ack_auth = fixture.auth.clone();
+    let tenant_id = fixture.tenant_id;
+    let ack_task = tokio::spawn(async move {
+        sync::ack_continuity(
+            &ack_pool,
+            tenant_id,
+            ack_auth,
+            taskveil_sync::protocol::ContinuityAckRequest { proof },
+        )
+        .await
+    });
+    wait_for_lock_waiters(&fixture.admin_pool, 1).await;
+
+    let complete_pool = fixture.pool.clone();
+    let complete_auth = fixture.auth.clone();
+    let token_keys = fixture.resync_tokens.clone();
+    let complete_task = tokio::spawn(async move {
+        sync::complete_base(
+            &complete_pool,
+            &token_keys,
+            tenant_id,
+            complete_auth,
+            &completion_token,
+        )
+        .await
+    });
+    wait_for_lock_waiters(&fixture.admin_pool, 2).await;
+    blocker.commit().await.unwrap();
+
+    let (acknowledged, completion_replay) =
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            (ack_task.await.unwrap(), complete_task.await.unwrap())
+        })
+        .await
+        .expect("ACK and completion replay must serialize without a deadlock");
+    acknowledged.unwrap();
+    assert!(
+        completion_replay.is_err(),
+        "the serialized stale completion replay must observe the ACK-deleted session"
+    );
 }
 
 #[tokio::test]

@@ -414,7 +414,7 @@ async fn continuity_retention_migration_compacts_existing_proofs_before_unique_i
          VALUES
              ('00000000-0000-0000-0000-000000000003',
               '00000000-0000-0000-0000-000000000020',
-              10, 1, 1, true);
+              10, 1, 3, true);
 
          INSERT INTO continuity_closure_proofs
              (proof_id, tenant_id, device_id, high_water, generation,
@@ -427,7 +427,24 @@ async fn continuity_retention_migration_compacts_existing_proofs_before_unique_i
              ('00000000-0000-0000-0000-000000000022',
               '00000000-0000-0000-0000-000000000003',
               '00000000-0000-0000-0000-000000000020',
-              10, 1, now() - interval '1 day', now() - interval '1 day');",
+              10, 1, now() - interval '1 day', now() - interval '1 day');
+
+         INSERT INTO device_resync_sessions
+             (tenant_id, device_id, generation, base_seq, base_complete,
+              created_at, updated_at)
+         VALUES
+             ('00000000-0000-0000-0000-000000000003',
+              '00000000-0000-0000-0000-000000000002',
+              1, 8, true, now() - interval '3 days', now() - interval '3 days'),
+             ('00000000-0000-0000-0000-000000000003',
+              '00000000-0000-0000-0000-000000000002',
+              2, 10, false, now() - interval '1 day', now() - interval '1 day'),
+             ('00000000-0000-0000-0000-000000000003',
+              '00000000-0000-0000-0000-000000000020',
+              1, 8, true, now() - interval '3 days', now() - interval '3 days'),
+             ('00000000-0000-0000-0000-000000000003',
+              '00000000-0000-0000-0000-000000000020',
+              2, 10, false, now() - interval '1 day', now() - interval '1 day');",
     )
     .execute(&fixture.pool)
     .await
@@ -474,6 +491,35 @@ async fn continuity_retention_migration_compacts_existing_proofs_before_unique_i
         "00000000-0000-0000-0000-000000000022"
     );
 
+    let sessions = query(
+        "SELECT device_id::text AS device_id, generation
+         FROM device_resync_sessions
+         WHERE tenant_id = '00000000-0000-0000-0000-000000000003'
+         ORDER BY device_id",
+    )
+    .fetch_all(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(
+        sessions[0].try_get::<String, _>("device_id").unwrap(),
+        "00000000-0000-0000-0000-000000000002"
+    );
+    assert_eq!(
+        sessions[0].try_get::<i64, _>("generation").unwrap(),
+        1,
+        "the required generation is retained even when an older schema has a newer row"
+    );
+    assert_eq!(
+        sessions[1].try_get::<String, _>("device_id").unwrap(),
+        "00000000-0000-0000-0000-000000000020"
+    );
+    assert_eq!(
+        sessions[1].try_get::<i64, _>("generation").unwrap(),
+        2,
+        "the greatest generation is retained when required_generation has no session"
+    );
+
     let duplicate = query(
         "INSERT INTO continuity_closure_proofs
              (proof_id, tenant_id, device_id, high_water, generation)
@@ -488,5 +534,20 @@ async fn continuity_retention_migration_compacts_existing_proofs_before_unique_i
     assert!(
         duplicate.is_err(),
         "the migration must enforce one current proof per tenant/device"
+    );
+
+    let duplicate_session = query(
+        "INSERT INTO device_resync_sessions
+             (tenant_id, device_id, generation, base_seq)
+         VALUES
+             ('00000000-0000-0000-0000-000000000003',
+              '00000000-0000-0000-0000-000000000002',
+              3, 12)",
+    )
+    .execute(&fixture.pool)
+    .await;
+    assert!(
+        duplicate_session.is_err(),
+        "the migration must enforce one current resync session per tenant/device"
     );
 }

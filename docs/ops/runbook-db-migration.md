@@ -91,6 +91,65 @@ GRANT taskveil_app TO <RUNTIME_LOGIN>;
 
 ローカルの `tool/dev_server.sh` もowner接続と`taskveil_runtime` loginを分離する。
 
+### 6.1 continuity retention migrationの事前確認
+
+`202607260004_continuity_retention.sql`は既存rowをdeviceごとにcompactし、
+`continuity_closure_proofs`と`device_resync_sessions`へtenant / device単位の
+unique indexを追加する。通常のSQLx migration transactionでは
+`lock_timeout = 5s`を設定し、schema lockを無期限に待たない。
+
+適用前にownerのread-only sessionで次を採取し、同程度のrow数を持つ検証branchで
+所要時間をリハーサルする。個別のtenant / device IDは記録せず集計値だけを残す。
+
+```sql
+SELECT
+  'continuity_closure_proofs' AS relation,
+  count(*) AS rows,
+  count(DISTINCT (tenant_id, device_id)) AS devices,
+  count(*) - count(DISTINCT (tenant_id, device_id)) AS rows_to_compact,
+  pg_total_relation_size('continuity_closure_proofs') AS total_bytes
+FROM continuity_closure_proofs
+UNION ALL
+SELECT
+  'device_resync_sessions',
+  count(*),
+  count(DISTINCT (tenant_id, device_id)),
+  count(*) - count(DISTINCT (tenant_id, device_id)),
+  pg_total_relation_size('device_resync_sessions')
+FROM device_resync_sessions;
+```
+
+release担当は適用前に、同期writeを停止できる時間とmigrationのlock取得許容時間を
+明示する。標準migrationのlock取得budgetは5秒である。検証branchでindex buildが
+maintenance window内に完了しない、または本番row数・table sizeがリハーサル上限を
+超える場合は標準migrationを直接実行せず、次のstaged手順へ切り替える。
+
+1. edgeで同期write pathをquiesceし、旧serverが新しいproof / session rowを追加しない
+   状態を確認する。read-only health確認は継続してよい。
+2. ownerのautocommit sessionでmigrationと同じ順位規則により重複rowをcompactする。
+3. 次を**transaction block外**で1文ずつ実行する。
+
+   ```sql
+   CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS
+     continuity_closure_proofs_current_device_idx
+     ON continuity_closure_proofs(tenant_id, device_id);
+
+   CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS
+     device_resync_sessions_current_device_idx
+     ON device_resync_sessions(tenant_id, device_id);
+   ```
+
+4. `pg_index.indisvalid`と上記aggregate queryの`rows = devices`を確認する。失敗して
+   `indisvalid = false`のindexが残った場合は、同期writeを再開せず人間判断で
+   `DROP INDEX CONCURRENTLY`して原因を解消後に再実行する。
+5. 同期writeをquiesceしたまま`taskveil-migrate`を実行する。migration側は同名indexを
+   `IF NOT EXISTS`で認識し、cleanupを再確認してSQLx ledgerへchecksumを記録する。
+   対応serverをdeployしてreadinessを確認した後にwrite pathを再開する。
+
+`CREATE INDEX CONCURRENTLY`はSQLx migration transaction内では実行できないため、
+migration SQLへ直接追加しない。write quiesce、staged index作成、再開はcredentialと
+本番影響を扱う人間承認付き作業である。
+
 ## 7. 検証
 
 最低限の検証:

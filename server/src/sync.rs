@@ -130,6 +130,25 @@ struct StoredRecordRow {
     key_generation: Option<i64>,
 }
 
+struct LockedDeviceContinuity {
+    continuity_seq: i64,
+    continuity_generation: i64,
+    required_generation: i64,
+    initialized: bool,
+}
+
+struct LockedClosureProof {
+    proof_id: Uuid,
+    high_water: i64,
+    generation: i64,
+}
+
+struct LockedResyncSession {
+    generation: i64,
+    base_seq: i64,
+    base_complete: bool,
+}
+
 pub async fn preflight(
     pool: &PgPool,
     tenant_id: Uuid,
@@ -219,22 +238,21 @@ pub async fn begin_full_resync(
 ) -> Result<ResyncStartResponse, AppError> {
     let mut tx = db::begin_tenant_transaction(pool, tenant_id).await?;
     ensure_device_continuity(&mut tx, tenant_id, auth.device_id).await?;
-    let row = sqlx::query!(
-        "SELECT seq.last_seq, continuity.required_generation
-         FROM tenant_seq AS seq
-         JOIN tenant_device_continuity AS continuity
-           ON continuity.tenant_id = seq.tenant_id
-          AND continuity.device_id = $2
-         WHERE seq.tenant_id = $1
-         FOR UPDATE OF seq, continuity",
-        tenant_id,
-        auth.device_id
+    let continuity = lock_device_continuity(&mut tx, tenant_id, auth.device_id)
+        .await?
+        .ok_or_else(AppError::forbidden)?;
+    let base_seq = sqlx::query_scalar::<_, i64>(
+        "SELECT last_seq
+         FROM tenant_seq
+         WHERE tenant_id = $1
+         FOR UPDATE",
     )
+    .bind(tenant_id)
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(AppError::forbidden)?;
-    let base_seq = row.last_seq;
-    let generation = row
+    let _current_session = lock_current_resync_session(&mut tx, tenant_id, auth.device_id).await?;
+    let generation = continuity
         .required_generation
         .checked_add(1)
         .ok_or_else(AppError::internal)?;
@@ -248,26 +266,23 @@ pub async fn begin_full_resync(
     )
     .execute(&mut *tx)
     .await?;
-    // Only required_generation is resumable. Older signed tokens are already
-    // invalid, so retaining their session rows would create unbounded growth
-    // when a client repeatedly restarts after losing the start response.
+    // Only required_generation is resumable. Replace the one current device
+    // session so repeated restarts cannot grow storage.
     sqlx::query(
-        "DELETE FROM device_resync_sessions
-         WHERE tenant_id = $1 AND device_id = $2",
+        "INSERT INTO device_resync_sessions
+         (tenant_id, device_id, generation, base_seq)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (tenant_id, device_id) DO UPDATE
+         SET generation = EXCLUDED.generation,
+             base_seq = EXCLUDED.base_seq,
+             base_complete = false,
+             created_at = now(),
+             updated_at = now()",
     )
     .bind(tenant_id)
     .bind(auth.device_id)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query!(
-        "INSERT INTO device_resync_sessions
-         (tenant_id, device_id, generation, base_seq)
-         VALUES ($1, $2, $3, $4)",
-        tenant_id,
-        auth.device_id,
-        generation,
-        base_seq
-    )
+    .bind(generation)
+    .bind(base_seq)
     .execute(&mut *tx)
     .await?;
     let token_now = Utc::now().timestamp();
@@ -311,24 +326,17 @@ pub async fn scan_base(
     }
     let limit = validated_page_limit(limit)?;
     let mut tx = db::begin_tenant_transaction(pool, tenant_id).await?;
-    let session = sqlx::query_as::<_, (i64, bool, i64)>(
-        "SELECT session.base_seq, session.base_complete,
-                continuity.required_generation
-         FROM device_resync_sessions AS session
-         JOIN tenant_device_continuity AS continuity
-           ON continuity.tenant_id = session.tenant_id
-          AND continuity.device_id = session.device_id
-         WHERE session.tenant_id = $1 AND session.device_id = $2
-           AND session.generation = $3
-         FOR UPDATE OF session, continuity",
-    )
-    .bind(tenant_id)
-    .bind(auth.device_id)
-    .bind(claims.generation)
-    .fetch_optional(&mut *tx)
-    .await?
-    .ok_or_else(|| AppError::conflict("invalid resync generation"))?;
-    if session.1 || session.2 != claims.generation || session.0 != claims.base_seq {
+    let continuity = lock_device_continuity(&mut tx, tenant_id, auth.device_id)
+        .await?
+        .ok_or_else(|| AppError::conflict("invalid resync generation"))?;
+    let session = lock_current_resync_session(&mut tx, tenant_id, auth.device_id)
+        .await?
+        .ok_or_else(|| AppError::conflict("invalid resync generation"))?;
+    if session.base_complete
+        || continuity.required_generation != claims.generation
+        || session.generation != claims.generation
+        || session.base_seq != claims.base_seq
+    {
         return Err(AppError::conflict("invalid resync page token"));
     }
     let rows = if let Some(cursor) = claims.cursor.as_ref() {
@@ -429,23 +437,16 @@ pub async fn complete_base(
         return Err(AppError::conflict("invalid resync completion token"));
     }
     let mut tx = db::begin_tenant_transaction(pool, tenant_id).await?;
-    let session = sqlx::query_as::<_, (i64, i64)>(
-        "SELECT session.base_seq, continuity.required_generation
-         FROM device_resync_sessions AS session
-         JOIN tenant_device_continuity AS continuity
-           ON continuity.tenant_id = session.tenant_id
-          AND continuity.device_id = session.device_id
-         WHERE session.tenant_id = $1 AND session.device_id = $2
-           AND session.generation = $3
-         FOR UPDATE OF session, continuity",
-    )
-    .bind(tenant_id)
-    .bind(auth.device_id)
-    .bind(claims.generation)
-    .fetch_optional(&mut *tx)
-    .await?
-    .ok_or_else(|| AppError::conflict("invalid resync completion token"))?;
-    if session.1 != claims.generation || session.0 != claims.base_seq {
+    let continuity = lock_device_continuity(&mut tx, tenant_id, auth.device_id)
+        .await?
+        .ok_or_else(|| AppError::conflict("invalid resync completion token"))?;
+    let session = lock_current_resync_session(&mut tx, tenant_id, auth.device_id)
+        .await?
+        .ok_or_else(|| AppError::conflict("invalid resync completion token"))?;
+    if continuity.required_generation != claims.generation
+        || session.generation != claims.generation
+        || session.base_seq != claims.base_seq
+    {
         return Err(AppError::conflict("invalid resync completion token"));
     }
     sqlx::query(
@@ -520,37 +521,26 @@ pub async fn pull(
 
     let mut tx = db::begin_tenant_transaction(pool, tenant_id).await?;
     ensure_device_continuity(&mut tx, tenant_id, auth.device_id).await?;
-    let (continuity_generation, required_generation) = sqlx::query_as::<_, (i64, i64)>(
-        "SELECT continuity_generation, required_generation
-         FROM tenant_device_continuity
-         WHERE tenant_id = $1 AND device_id = $2
-         FOR UPDATE",
-    )
-    .bind(tenant_id)
-    .bind(auth.device_id)
-    .fetch_one(&mut *tx)
-    .await?;
-    let proof_generation = if let Some(generation) = generation {
-        let base_complete = sqlx::query_scalar!(
-            "SELECT base_complete
-             FROM device_resync_sessions
-             WHERE tenant_id = $1 AND device_id = $2 AND generation = $3",
-            tenant_id,
-            auth.device_id,
-            generation
-        )
-        .fetch_optional(&mut *tx)
+    let continuity = lock_device_continuity(&mut tx, tenant_id, auth.device_id)
         .await?
-        .ok_or_else(|| AppError::conflict("invalid resync generation"))?;
-        if generation != required_generation || !base_complete {
+        .ok_or_else(AppError::forbidden)?;
+    let _current_proof = lock_current_closure_proof(&mut tx, tenant_id, auth.device_id).await?;
+    let proof_generation = if let Some(generation) = generation {
+        let session = lock_current_resync_session(&mut tx, tenant_id, auth.device_id)
+            .await?
+            .ok_or_else(|| AppError::conflict("invalid resync generation"))?;
+        if generation != continuity.required_generation
+            || generation != session.generation
+            || !session.base_complete
+        {
             return Err(AppError::conflict("resync base is incomplete"));
         }
         generation
     } else {
-        if continuity_generation != required_generation {
+        if continuity.continuity_generation != continuity.required_generation {
             return Err(AppError::gone("full resync required"));
         }
-        required_generation
+        continuity.required_generation
     };
     let high_water = sqlx::query_scalar!(
         "SELECT last_seq FROM tenant_seq WHERE tenant_id = $1",
@@ -1380,26 +1370,17 @@ pub async fn ack_continuity(
     }
     let mut tx = db::begin_tenant_transaction(pool, tenant_id).await?;
     ensure_device_continuity(&mut tx, tenant_id, auth.device_id).await?;
-    let row = sqlx::query!(
-        "SELECT proof.high_water, proof.generation, proof.acknowledged_at,
-                continuity.continuity_seq, continuity.continuity_generation,
-                continuity.required_generation
-         FROM continuity_closure_proofs AS proof
-         JOIN tenant_device_continuity AS continuity
-           ON continuity.tenant_id = proof.tenant_id
-          AND continuity.device_id = proof.device_id
-         WHERE proof.proof_id = $1 AND proof.tenant_id = $2 AND proof.device_id = $3
-         FOR UPDATE OF proof, continuity",
-        proof.proof_id,
-        tenant_id,
-        auth.device_id
-    )
-    .fetch_optional(&mut *tx)
-    .await?
-    .ok_or_else(AppError::forbidden)?;
-    if row.high_water != proof.high_water
-        || row.generation != proof.generation
-        || proof.generation != row.required_generation
+    let continuity = lock_device_continuity(&mut tx, tenant_id, auth.device_id)
+        .await?
+        .ok_or_else(AppError::forbidden)?;
+    let locked_proof = lock_current_closure_proof(&mut tx, tenant_id, auth.device_id)
+        .await?
+        .ok_or_else(AppError::forbidden)?;
+    let _current_session = lock_current_resync_session(&mut tx, tenant_id, auth.device_id).await?;
+    if locked_proof.proof_id != proof.proof_id
+        || locked_proof.high_water != proof.high_water
+        || locked_proof.generation != proof.generation
+        || proof.generation != continuity.required_generation
     {
         return Err(AppError::conflict("invalid continuity proof"));
     }
@@ -1433,7 +1414,7 @@ pub async fn ack_continuity(
     .bind(proof.generation)
     .execute(&mut *tx)
     .await?;
-    let continuity_seq = std::cmp::max(row.continuity_seq, proof.high_water);
+    let continuity_seq = std::cmp::max(continuity.continuity_seq, proof.high_water);
     tx.commit().await?;
     Ok(ContinuityAckResponse {
         continuity_seq,
@@ -1505,32 +1486,107 @@ async fn ensure_device_continuity(
     Ok(())
 }
 
+// Every sync transaction acquires the current device rows in this order:
+// continuity -> closure proof -> resync session. Operations may skip a row
+// they never touch, but must not acquire a later row before an earlier one.
+async fn lock_device_continuity(
+    tx: &mut PgTransaction<'_>,
+    tenant_id: Uuid,
+    device_id: Uuid,
+) -> Result<Option<LockedDeviceContinuity>, AppError> {
+    let row = sqlx::query_as::<_, (i64, i64, i64, bool)>(
+        "SELECT continuity_seq, continuity_generation, required_generation, initialized
+         FROM tenant_device_continuity
+         WHERE tenant_id = $1 AND device_id = $2
+         FOR UPDATE",
+    )
+    .bind(tenant_id)
+    .bind(device_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(row.map(
+        |(continuity_seq, continuity_generation, required_generation, initialized)| {
+            LockedDeviceContinuity {
+                continuity_seq,
+                continuity_generation,
+                required_generation,
+                initialized,
+            }
+        },
+    ))
+}
+
+async fn lock_current_closure_proof(
+    tx: &mut PgTransaction<'_>,
+    tenant_id: Uuid,
+    device_id: Uuid,
+) -> Result<Option<LockedClosureProof>, AppError> {
+    let row = sqlx::query_as::<_, (Uuid, i64, i64)>(
+        "SELECT proof_id, high_water, generation
+         FROM continuity_closure_proofs
+         WHERE tenant_id = $1 AND device_id = $2
+         FOR UPDATE",
+    )
+    .bind(tenant_id)
+    .bind(device_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(
+        row.map(|(proof_id, high_water, generation)| LockedClosureProof {
+            proof_id,
+            high_water,
+            generation,
+        }),
+    )
+}
+
+async fn lock_current_resync_session(
+    tx: &mut PgTransaction<'_>,
+    tenant_id: Uuid,
+    device_id: Uuid,
+) -> Result<Option<LockedResyncSession>, AppError> {
+    let row = sqlx::query_as::<_, (i64, i64, bool)>(
+        "SELECT generation, base_seq, base_complete
+         FROM device_resync_sessions
+         WHERE tenant_id = $1 AND device_id = $2
+         FOR UPDATE",
+    )
+    .bind(tenant_id)
+    .bind(device_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(row.map(
+        |(generation, base_seq, base_complete)| LockedResyncSession {
+            generation,
+            base_seq,
+            base_complete,
+        },
+    ))
+}
+
 async fn require_push_continuity(
     tx: &mut PgTransaction<'_>,
     tenant_id: Uuid,
     device_id: Uuid,
 ) -> Result<(), AppError> {
     ensure_device_continuity(tx, tenant_id, device_id).await?;
-    let row = sqlx::query!(
-        "SELECT seq.last_seq, seq.gc_horizon_seq, continuity.continuity_seq,
-                continuity.continuity_generation, continuity.required_generation,
-                continuity.initialized
-         FROM tenant_seq AS seq
-         JOIN tenant_device_continuity AS continuity
-           ON continuity.tenant_id = seq.tenant_id
-          AND continuity.device_id = $2
-         WHERE seq.tenant_id = $1
-         FOR UPDATE OF seq, continuity",
-        tenant_id,
-        device_id
+    let continuity = lock_device_continuity(tx, tenant_id, device_id)
+        .await?
+        .ok_or_else(AppError::forbidden)?;
+    let sequence = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT last_seq, gc_horizon_seq
+         FROM tenant_seq
+         WHERE tenant_id = $1
+         FOR UPDATE",
     )
+    .bind(tenant_id)
     .fetch_optional(&mut **tx)
     .await?
     .ok_or_else(AppError::forbidden)?;
-    if !row.initialized
-        || row.continuity_seq < row.gc_horizon_seq
-        || row.continuity_seq != row.last_seq
-        || row.continuity_generation != row.required_generation
+    if !continuity.initialized
+        || continuity.continuity_seq < sequence.1
+        || continuity.continuity_seq != sequence.0
+        || continuity.continuity_generation != continuity.required_generation
     {
         return Err(AppError::conflict("device continuity closure required"));
     }

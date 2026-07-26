@@ -53,12 +53,17 @@ continuity proofはACK response lossに対する冪等再送を維持する必�
 ### やること
 
 - `continuity_closure_proofs`へtenant / device単位のunique境界を追加する。
+- `device_resync_sessions`も既存rowをcompactし、tenant / device単位のunique境界を
+  schemaで強制する。
 - 既存rowは未ACKを優先し、なければ最新ACK済みrowを残してcompactする。
 - pull closureはcurrent proofをupsertし、同一high-water / generationではproof IDと
   ACK状態を再利用する。
 - ACK transactionでcontinuityを単調更新し、対応する完了済みresync sessionを削除する。
+- current rowへ触れる全同期経路のlock順をcontinuity、proof、sessionへ統一する。
 - 長期同期、ACK再送、full resync restart、migration cleanupの回帰testを追加する。
-- 技術仕様と運用ガイドへlifecycle retentionとaggregate監視指標を追記する。
+- 技術仕様と運用ガイドへlifecycle retentionとaggregate監視指標を追記し、
+  DB runbookへrow数preflight、lock-time budget、大規模環境向けstaged concurrent
+  index手順を追加する。
 
 ### やらないこと
 
@@ -70,13 +75,18 @@ continuity proofはACK response lossに対する冪等再送を維持する必�
 
 ## 5. 実装手順
 
-1. 前方migrationで既存proofをtenant / deviceごとにcompactし、unique indexを追加する。
-2. pullでcontinuity rowをlockし、current proofをupsertする。
-3. 同一closureは既存proofを再利用し、異なるhigh-water / generationだけを置換する。
-4. ACKのcontinuity更新、proof ACK、完了済みresync session削除を同一transactionに置く。
-5. migration cleanup、長期normal sync、ACK retry、resync restartのbounded testを追加する。
-6. retention契約とaggregate monitoring queryを仕様・運用文書へ記録する。
-7. focused testからworkspace品質ゲートへ進み、親統合後に独立検証する。
+1. 前方migrationで既存proof / sessionをtenant / deviceごとにcompactし、unique indexを
+   追加する。
+2. 全同期経路でcontinuity、proof、sessionの順にcurrent rowをlockする。
+3. pullはcurrent proofをupsertし、同一closureは既存proofを再利用し、異なる
+   high-water / generationだけを置換する。
+4. begin resyncはschemaで保証されたcurrent sessionをupsertする。
+5. ACKのcontinuity更新、proof ACK、完了済みresync session削除を同一transactionに置く。
+6. migration cleanup、長期normal sync、ACK retry、resync restart、ACK / pull /
+   completionの並行実行回帰testを追加する。
+7. retention契約、aggregate monitoring query、migration preflightを仕様・運用文書へ
+   記録する。
+8. focused testからworkspace品質ゲートへ進み、親統合後に独立再検証する。
 
 ## 6. 受け入れ基準
 
@@ -86,9 +96,15 @@ continuity proofはACK response lossに対する冪等再送を維持する必�
 - [x] 新しいhigh-waterまたはgenerationはcurrent proofを置換する。
 - [x] 既存蓄積proofは未ACK優先、次に最新作成時刻の規則で1行へcompactされる。
 - [x] resync sessionはrestart時に1行へ置換され、成功ACK時に削除される。
+- [x] resync sessionの既存複数rowがcompactされ、schemaでtenant / deviceごとに
+  最大1行を強制する。
+- [x] pull、ACK、scan、completion、beginがcontinuity、proof、sessionのlock順を守り、
+  ACK / pullとACK / completion replayの並行実行がdeadlockしない。
 - [x] continuity seq / generation、GC horizon、expired-device write guardを変更しない。
 - [x] 長期normal syncとfull resync restart後もrow数がdevice数に対して有界である。
 - [x] retention lifecycleとaggregate監視指標が運用文書に記録される。
+- [x] migrationのrow数preflight、5秒のlock取得budget、大規模環境向け
+  transaction外`CREATE UNIQUE INDEX CONCURRENTLY`手順がrunbookに記録される。
 - [x] wire / protocol version、client local schema、依存定義に差分がない。
 - [x] `cargo fmt --all -- --check`
 - [x] `cargo clippy --workspace -- -D warnings`
@@ -127,22 +143,32 @@ continuity proofはACK response lossに対する冪等再送を維持する必�
   proof ID / ACK状態再利用、異なるclosureでの置換、成功ACKと同一transactionでの
   完了済みresync session削除を実装した。既存proofは未ACK優先、なければ
   `created_at`と`proof_id`の降順で1件へcompactする前方migrationを追加した。
+  初回独立review後、全同期経路のcurrent row lock順をcontinuity、proof、sessionへ
+  統一し、legacy resync sessionのcompactとunique index、begin時upsertを追加した。
 - 証拠:
   `long_running_sync_and_resync_restarts_keep_continuity_rows_bounded`で通常同期64回後の
   proof 1行とresync restart 64回後のsession 1行を確認した。
   `continuity_retention_migration_compacts_existing_proofs_before_unique_index`で未ACK優先、
-  ACK済みのみの場合の最新row選択、unique境界を確認した。
+  ACK済みのみの場合の最新row選択、legacy sessionのrequired generation優先 /
+  最大generation fallback、proof / session双方のunique境界を確認した。
   `server_trusted_continuity_binds_proofs_and_guards_all_writes`で成功ACK後の完了session
-  削除を確認した。
+  削除を確認した。`concurrent_pull_then_ack_obeys_continuity_proof_session_lock_order`と
+  `concurrent_ack_then_completion_replay_obeys_lock_order_without_deadlock`では
+  continuity rowを外部transactionで保持して競合順を固定し、循環待ちせず5秒以内に
+  直列化することを確認した。
 - 品質ゲート: `cargo fmt --all -- --check`、
   `cargo clippy --workspace -- -D warnings`、`cargo test --workspace`、
   `sh app/tool/check_client_boundaries.sh`、`sh app/tool/test_client_boundaries.sh`、
   `git diff --check`はすべて成功した。Flutter変更がないためFlutter固有gateは対象外。
 - Commit: この実装結果を含むcommit（最終hashはGit履歴を正本とする）。
-- 未解決: 独立検証を親統合工程で実施する。実装・品質ゲート上の既知の未解決事項はない。
+- 未解決: 初回独立review指摘は修正し全品質ゲートを再実行済み。独立再検証を行う。
 
 ### 独立検証
 
-- 判定: 未実施
-- 根拠: 実装者とは別の検証枠が利用可能になった後、差分reviewと品質ゲート再実行を行う。
-- 検証者: 未割当
+- 判定: 初回不合格、修正確認待ち
+- 根拠: P1としてpull、ACK、scan、completion、begin間のrow lock取得順が明示的に
+  統一されていない点、P2としてlegacy resync sessionのDB compaction / unique境界と
+  大規模DB向けmigration preflightが不足している点を指摘された。実装側でlock helper、
+  並行回帰test、session unique migration、runbookのstaged concurrent index手順を
+  追加して再検証する。
+- 検証者: 実装を担当していない独立review agent
