@@ -85,6 +85,8 @@ pub enum ClientError {
     ActiveTimerConflict(Uuid),
     #[error("calendar range must contain increasing civil-date and instant bounds")]
     InvalidCalendarRange,
+    #[error("frontend setting value is invalid")]
+    InvalidFrontendSetting,
 }
 
 impl From<StorageError> for ClientError {
@@ -344,13 +346,13 @@ impl LocalMutationSyncStore for TransactionalMutationStore<'_, '_> {
 
     fn get_setting(&mut self, key: &str) -> Result<Option<String>, String> {
         self.transaction
-            .get_setting(key)
+            .get_internal_metadata(key)
             .map_err(mutation_storage_error)
     }
 
     fn set_setting(&mut self, key: &str, value: &str, updated_at: i64) -> Result<(), String> {
         self.transaction
-            .set_setting(key, value, updated_at)
+            .set_internal_metadata(key, value, updated_at)
             .map_err(mutation_storage_error)
     }
 
@@ -450,12 +452,12 @@ fn local_record_to_storage(
 mod tests {
     use taskveil_domain::{new_list, new_task};
     use taskveil_storage::{
-        ListRepository, SettingsRepository, SqliteListRepository, SqliteSettingsRepository,
-        SqliteSyncStateRepository, SqliteTaskRepository, SyncRecordSemanticState, SyncRecordState,
-        SyncStateRepository, TaskRepository,
+        InternalMetadataRepository, ListRepository, SqliteInternalMetadataRepository,
+        SqliteListRepository, SqliteSyncStateRepository, SqliteTaskRepository,
+        SyncRecordSemanticState, SyncRecordState, SyncStateRepository, TaskRepository,
     };
     use taskveil_sync::{
-        Hlc, LocalSyncKeys, SyncPlaintext, SYNC_LOCAL_HLC_SETTING_KEY, TASKS_COLLECTION,
+        Hlc, LocalSyncKeys, SyncPlaintext, SYNC_LOCAL_HLC_METADATA_KEY, TASKS_COLLECTION,
     };
     use tempfile::TempDir;
 
@@ -518,11 +520,11 @@ mod tests {
             serde_json::to_string(&SyncPlaintext::from_task(&task, baseline_clock).unwrap())
                 .unwrap();
         let connection = open_encrypted(&db_path, &DB_KEY).unwrap();
-        let mut settings = SqliteSettingsRepository::new(connection);
-        settings
-            .set_setting(SYNC_LOCAL_HLC_SETTING_KEY, &baseline_hlc, BASE_MS)
+        let mut metadata = SqliteInternalMetadataRepository::new(connection);
+        metadata
+            .set_internal_metadata(SYNC_LOCAL_HLC_METADATA_KEY, &baseline_hlc, BASE_MS)
             .unwrap();
-        drop(settings);
+        drop(metadata);
         let connection = open_encrypted(&db_path, &DB_KEY).unwrap();
         let mut sync_state = SqliteSyncStateRepository::new(connection);
         sync_state
@@ -586,12 +588,12 @@ mod tests {
         drop(tasks);
 
         let connection = open_encrypted(fixture.mutation_service.db_path(), &DB_KEY).unwrap();
-        let settings = SqliteSettingsRepository::new(connection);
-        assert!(settings
-            .get_setting(SYNC_LOCAL_HLC_SETTING_KEY)
+        let metadata = SqliteInternalMetadataRepository::new(connection);
+        assert!(metadata
+            .get_internal_metadata(SYNC_LOCAL_HLC_METADATA_KEY)
             .unwrap()
             .is_some());
-        drop(settings);
+        drop(metadata);
 
         let connection = open_encrypted(fixture.mutation_service.db_path(), &DB_KEY).unwrap();
         let sync = SqliteSyncStateRepository::new(connection);
@@ -643,13 +645,13 @@ mod tests {
         drop(tasks);
 
         let connection = open_encrypted(fixture.mutation_service.db_path(), &DB_KEY).unwrap();
-        let settings = SqliteSettingsRepository::new(connection);
-        let stored_hlc = settings
-            .get_setting(SYNC_LOCAL_HLC_SETTING_KEY)
+        let metadata = SqliteInternalMetadataRepository::new(connection);
+        let stored_hlc = metadata
+            .get_internal_metadata(SYNC_LOCAL_HLC_METADATA_KEY)
             .unwrap()
             .unwrap();
         assert_eq!(Hlc::decode(&stored_hlc).unwrap().wall_ms, BASE_MS - 1_000);
-        drop(settings);
+        drop(metadata);
 
         let connection = open_encrypted(fixture.mutation_service.db_path(), &DB_KEY).unwrap();
         let sync = SqliteSyncStateRepository::new(connection);

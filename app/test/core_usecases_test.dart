@@ -618,13 +618,12 @@ void main() {
   });
 
   test('settings roundtrip through Rust bridge', () async {
-    const key = 'ui_mode';
+    const key = FrontendSettingKeyDto.uiMode;
 
-    await setSetting(key: key, value: 'simple');
-    expect(await getSetting(key: key), 'simple');
+    await setFrontendSetting(key: key, value: 'simple');
+    expect(await getFrontendSetting(key: key), 'simple');
 
-    await setSetting(key: key, value: 'advanced');
-    expect(await getSetting(key: key), 'advanced');
-    expect(await getSetting(key: 'missing_bridge_setting'), isNull);
+    await setFrontendSetting(key: key, value: 'advanced');
+    expect(await getFrontendSetting(key: key), 'advanced');
   });
 }

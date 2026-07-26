@@ -2,6 +2,17 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Closed frontend setting surface. Internal metadata keys are intentionally
+/// not representable by this type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrontendSettingKey {
+    UiMode,
+    OnboardingCompleted,
+    CalendarWeekStart,
+    TimerSettings,
+    TimerRuntime,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountSessionState {
     pub logged_in: bool,

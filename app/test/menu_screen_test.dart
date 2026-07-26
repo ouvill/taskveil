@@ -5,6 +5,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:taskveil/main.dart';
 import 'package:taskveil/src/core/providers.dart';
 import 'package:taskveil/src/generated/l10n/app_localizations.dart';
+import 'package:taskveil/src/rust/api.dart' show FrontendSettingKeyDto;
 import 'package:taskveil/src/screens/menu_screen.dart';
 import 'package:taskveil/src/ui/theme.dart';
 
@@ -73,7 +74,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(
-      await fake.getSetting(key: calendarWeekStartSettingKey),
+      await fake.getFrontendSetting(key: calendarWeekStartSettingKey),
       mondayCalendarWeekStart,
     );
 
@@ -87,7 +88,7 @@ void main() {
     (tester) async {
       final fake = _FailingCalendarSettingsBridge();
       await fake.createDefaultList(name: 'Inbox', sortOrder: 'a0');
-      await fake.setSetting(
+      await fake.setFrontendSetting(
         key: calendarWeekStartSettingKey,
         value: mondayCalendarWeekStart,
       );
@@ -109,7 +110,7 @@ void main() {
         findsOneWidget,
       );
       expect(
-        await fake.getSetting(key: calendarWeekStartSettingKey),
+        await fake.getFrontendSetting(key: calendarWeekStartSettingKey),
         mondayCalendarWeekStart,
       );
       expect(
@@ -137,7 +138,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(
-        await fake.getSetting(key: calendarWeekStartSettingKey),
+        await fake.getFrontendSetting(key: calendarWeekStartSettingKey),
         sundayCalendarWeekStart,
       );
       await tester.tap(find.byTooltip('Back'));
@@ -201,10 +202,13 @@ class _FailingCalendarSettingsBridge extends FakeBridgeService {
   bool failCalendarWeekStartWrites = false;
 
   @override
-  Future<void> setSetting({required String key, required String value}) {
+  Future<void> setFrontendSetting({
+    required FrontendSettingKeyDto key,
+    required String value,
+  }) {
     if (key == calendarWeekStartSettingKey && failCalendarWeekStartWrites) {
       throw StateError('calendar setting write failed');
     }
-    return super.setSetting(key: key, value: value);
+    return super.setFrontendSetting(key: key, value: value);
   }
 }

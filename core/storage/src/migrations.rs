@@ -34,6 +34,11 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         name: "profile_coordination",
         sql: include_str!("../migrations/0004_profile_coordination.sql"),
     },
+    Migration {
+        version: 5,
+        name: "settings_metadata_boundary",
+        sql: include_str!("../migrations/0005_settings_metadata_boundary.sql"),
+    },
 ];
 
 #[derive(Clone, Copy)]
@@ -266,7 +271,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(version, LATEST_MIGRATION_VERSION);
-        assert_eq!(name, "profile_coordination");
+        assert_eq!(name, "settings_metadata_boundary");
         assert_eq!(checksum_length, 48);
         assert!(table_exists(&connection, "tasks").unwrap());
     }
@@ -542,6 +547,124 @@ mod tests {
     }
 
     #[test]
+    fn settings_boundary_migrates_v3_values_without_exposing_unknown_keys() {
+        let file = NamedTempFile::new().unwrap();
+        let mut connection = open_raw(file.path());
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        transaction.execute_batch(CREATE_MIGRATION_TABLE).unwrap();
+        for migration in &MIGRATIONS[..3] {
+            transaction.execute_batch(migration.sql).unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO _taskveil_migrations (version, name, checksum)
+                     VALUES (?1, ?2, ?3)",
+                    params![
+                        migration.version,
+                        migration.name,
+                        migration_checksum(migration)
+                    ],
+                )
+                .unwrap();
+        }
+        for (key, value, updated_at) in [
+            ("ui_mode", "advanced", 1),
+            ("onboarding_completed", "1", 2),
+            ("calendar_week_start", "monday", 3),
+            ("timer_settings_v1", r#"{"version":1}"#, 4),
+            ("timer_runtime_v1", r#"{"completedWorkCycles":2}"#, 5),
+            ("sync_local_hlc", "encoded-hlc", 6),
+            ("sync_server_url", "https://sync.example.com", 7),
+            ("future_internal_marker", "preserved", 8),
+        ] {
+            transaction
+                .execute(
+                    "INSERT INTO settings (key, value, updated_at)
+                     VALUES (?1, ?2, ?3)",
+                    params![key, value, updated_at],
+                )
+                .unwrap();
+        }
+        transaction.commit().unwrap();
+        drop(connection);
+
+        let connection = open_encrypted(file.path(), &KEY).unwrap();
+        let app_values = {
+            let mut statement = connection
+                .prepare("SELECT key, value, updated_at FROM app_settings ORDER BY updated_at")
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        let internal_values = {
+            let mut statement = connection
+                .prepare("SELECT key, value, updated_at FROM internal_metadata ORDER BY updated_at")
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+
+        assert_eq!(
+            app_values,
+            vec![
+                ("ui_mode".to_string(), "advanced".to_string(), 1),
+                ("onboarding_completed".to_string(), "1".to_string(), 2),
+                ("calendar_week_start".to_string(), "monday".to_string(), 3),
+                (
+                    "timer_settings_v1".to_string(),
+                    r#"{"version":1}"#.to_string(),
+                    4,
+                ),
+            ]
+        );
+        assert_eq!(
+            internal_values,
+            vec![
+                (
+                    "timer_runtime_v1".to_string(),
+                    r#"{"completedWorkCycles":2}"#.to_string(),
+                    5,
+                ),
+                ("sync_local_hlc".to_string(), "encoded-hlc".to_string(), 6),
+                (
+                    "sync_server_url".to_string(),
+                    "https://sync.example.com".to_string(),
+                    7,
+                ),
+                (
+                    "future_internal_marker".to_string(),
+                    "preserved".to_string(),
+                    8,
+                ),
+            ]
+        );
+        assert!(!table_exists(&connection, "settings").unwrap());
+        assert_eq!(
+            ledger_count(&connection),
+            i64::from(LATEST_MIGRATION_VERSION)
+        );
+    }
+
+    #[test]
     fn checksum_mismatch_is_rejected_without_database_changes() {
         let file = NamedTempFile::new().unwrap();
         drop(open_encrypted(file.path(), &KEY).unwrap());
@@ -661,18 +784,23 @@ mod tests {
             },
             Migration {
                 version: 3,
+                name: "prelude",
+                sql: "CREATE TABLE prelude (id INTEGER);",
+            },
+            Migration {
+                version: 4,
                 name: "failing",
                 sql: "CREATE TABLE partial (id INTEGER);
                       SELECT value FROM missing_failure_injection_table;",
             },
         ];
 
-        let result = ensure_schema_at_version(&mut connection, &failing, 3);
+        let result = ensure_schema_at_version(&mut connection, &failing, 4);
 
         assert!(matches!(
             result,
             Err(StorageError::MigrationFailed {
-                target_version: 3,
+                target_version: 4,
                 migration: "failing",
                 ..
             })

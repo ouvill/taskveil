@@ -991,15 +991,27 @@ fn new_database_is_created_from_initial_migration() {
         Some(("INTEGER".to_string(), 1, "0".to_string()))
     );
     assert_eq!(
-        setting_column(&connection, "key"),
-        Some(("TEXT".to_string(), 0))
-    );
-    assert_eq!(
-        setting_column(&connection, "value"),
+        app_setting_column(&connection, "key"),
         Some(("TEXT".to_string(), 1))
     );
     assert_eq!(
-        setting_column(&connection, "updated_at"),
+        app_setting_column(&connection, "value"),
+        Some(("TEXT".to_string(), 1))
+    );
+    assert_eq!(
+        app_setting_column(&connection, "updated_at"),
+        Some(("INTEGER".to_string(), 1))
+    );
+    assert_eq!(
+        internal_metadata_column(&connection, "key"),
+        Some(("TEXT".to_string(), 1))
+    );
+    assert_eq!(
+        internal_metadata_column(&connection, "value"),
+        Some(("TEXT".to_string(), 1))
+    );
+    assert_eq!(
+        internal_metadata_column(&connection, "updated_at"),
         Some(("INTEGER".to_string(), 1))
     );
     assert_eq!(
@@ -1029,54 +1041,74 @@ fn new_database_is_created_from_initial_migration() {
 }
 
 #[test]
-fn sqlite_settings_repository_returns_none_for_missing_key() {
+fn sqlite_app_settings_repository_returns_none_for_missing_key() {
     let file = NamedTempFile::new().unwrap();
     let connection = open_encrypted(file.path(), &KEY).unwrap();
-    let repository = SqliteSettingsRepository::new(connection);
+    let repository = SqliteAppSettingsRepository::new(connection);
 
-    assert_eq!(repository.get_setting("ui_mode").unwrap(), None);
+    assert_eq!(
+        repository.get_app_setting(AppSettingKey::UiMode).unwrap(),
+        None
+    );
 }
 
 #[test]
-fn sqlite_settings_repository_roundtrips_setting() {
+fn sqlite_app_settings_repository_roundtrips_setting() {
     let file = NamedTempFile::new().unwrap();
     let connection = open_encrypted(file.path(), &KEY).unwrap();
-    let mut repository = SqliteSettingsRepository::new(connection);
+    let mut repository = SqliteAppSettingsRepository::new(connection);
 
     repository
-        .set_setting("ui_mode", "simple", 1_799_000_000_000)
+        .set_app_setting(AppSettingKey::UiMode, "simple", 1_799_000_000_000)
         .unwrap();
 
     assert_eq!(
-        repository.get_setting("ui_mode").unwrap(),
+        repository.get_app_setting(AppSettingKey::UiMode).unwrap(),
         Some("simple".to_string())
     );
 }
 
 #[test]
-fn sqlite_settings_repository_overwrites_existing_setting() {
+fn sqlite_app_settings_repository_overwrites_existing_setting() {
     let file = NamedTempFile::new().unwrap();
     let connection = open_encrypted(file.path(), &KEY).unwrap();
-    let mut repository = SqliteSettingsRepository::new(connection);
+    let mut repository = SqliteAppSettingsRepository::new(connection);
 
     repository
-        .set_setting("ui_mode", "simple", 1_799_000_000_000)
+        .set_app_setting(AppSettingKey::UiMode, "simple", 1_799_000_000_000)
         .unwrap();
     repository
-        .set_setting("ui_mode", "advanced", 1_799_000_001_000)
+        .set_app_setting(AppSettingKey::UiMode, "advanced", 1_799_000_001_000)
         .unwrap();
 
     assert_eq!(
-        repository.get_setting("ui_mode").unwrap(),
+        repository.get_app_setting(AppSettingKey::UiMode).unwrap(),
         Some("advanced".to_string())
     );
     let updated_at: i64 = repository
         .connection()
         .query_row(
-            "SELECT updated_at FROM settings WHERE key = ?1",
+            "SELECT updated_at FROM app_settings WHERE key = ?1",
             ["ui_mode"],
             |row| row.get(0),
         )
         .unwrap();
     assert_eq!(updated_at, 1_799_000_001_000);
+}
+
+#[test]
+fn app_settings_table_rejects_reserved_internal_key() {
+    let file = NamedTempFile::new().unwrap();
+    let connection = open_encrypted(file.path(), &KEY).unwrap();
+
+    let result = connection.execute(
+        "INSERT INTO app_settings (key, value, updated_at) VALUES (?1, ?2, ?3)",
+        params!["sync_local_hlc", "forbidden", 1],
+    );
+
+    assert!(matches!(
+        result,
+        Err(rusqlite::Error::SqliteFailure(error, _))
+            if error.code == rusqlite::ErrorCode::ConstraintViolation
+    ));
 }

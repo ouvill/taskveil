@@ -2,10 +2,7 @@ import 'package:taskveil/src/core/bridge_service.dart';
 import 'package:taskveil/src/core/civil_time.dart';
 import 'package:taskveil/src/core/task_due.dart';
 import 'package:taskveil/src/core/providers.dart'
-    show
-        defaultSyncServerUrl,
-        onboardingCompletedSettingKey,
-        syncServerUrlSettingKey;
+    show defaultSyncServerUrl, onboardingCompletedSettingKey;
 import 'package:taskveil/src/rust/api.dart';
 
 TaskDueDto testDateOnlyDueFromMillis(int value) =>
@@ -33,7 +30,8 @@ class FakeBridgeService implements BridgeService {
   final List<ReminderDto> _reminders = [];
   final List<CompletedTimerSessionDto> _completedTimerSessions = [];
   final List<FakeTaskUndoEntry> _undoEntries = [];
-  final Map<String, String> _settings;
+  final Map<FrontendSettingKeyDto, String> _settings;
+  String _syncServerUrl = defaultSyncServerUrl;
   final List<void Function()> _pendingSyncMutations = [];
   final List<FakeReorderCall> reorderCalls = [];
   final List<String> updateTaskCalls = [];
@@ -406,12 +404,12 @@ class FakeBridgeService implements BridgeService {
 
   @override
   Future<String> getSyncServerUrl() async {
-    return _settings[syncServerUrlSettingKey] ?? defaultSyncServerUrl;
+    return _syncServerUrl;
   }
 
   @override
   Future<void> setSyncServerUrl({required String serverUrl}) async {
-    _settings[syncServerUrlSettingKey] = serverUrl;
+    _syncServerUrl = serverUrl;
   }
 
   @override
@@ -1431,12 +1429,17 @@ class FakeBridgeService implements BridgeService {
   }
 
   @override
-  Future<String?> getSetting({required String key}) async {
+  Future<String?> getFrontendSetting({
+    required FrontendSettingKeyDto key,
+  }) async {
     return _settings[key];
   }
 
   @override
-  Future<void> setSetting({required String key, required String value}) async {
+  Future<void> setFrontendSetting({
+    required FrontendSettingKeyDto key,
+    required String value,
+  }) async {
     _settings[key] = value;
   }
 

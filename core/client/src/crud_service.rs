@@ -401,12 +401,13 @@ mod tests {
 
     use taskveil_domain::{new_list, new_task};
     use taskveil_storage::{
-        ListRepository, OwnedSqliteWriteTx, SettingsRepository, SqliteListRepository,
-        SqliteSettingsRepository, SqliteSyncStateRepository, SqliteTaskRepository,
-        SyncRecordSemanticState, SyncRecordState, SyncStateRepository, TaskRepository,
+        InternalMetadataRepository, ListRepository, OwnedSqliteWriteTx,
+        SqliteInternalMetadataRepository, SqliteListRepository, SqliteSyncStateRepository,
+        SqliteTaskRepository, SyncRecordSemanticState, SyncRecordState, SyncStateRepository,
+        TaskRepository,
     };
     use taskveil_sync::{
-        Hlc, LocalSyncKeys, SyncPlaintext, LISTS_COLLECTION, SYNC_LOCAL_HLC_SETTING_KEY,
+        Hlc, LocalSyncKeys, SyncPlaintext, LISTS_COLLECTION, SYNC_LOCAL_HLC_METADATA_KEY,
         TASKS_COLLECTION,
     };
     use tempfile::TempDir;
@@ -449,9 +450,9 @@ mod tests {
             .insert(task.clone())
             .unwrap();
         let connection = open_encrypted(&db_path, &DB_KEY).unwrap();
-        SqliteSettingsRepository::new(connection)
-            .set_setting(
-                SYNC_LOCAL_HLC_SETTING_KEY,
+        SqliteInternalMetadataRepository::new(connection)
+            .set_internal_metadata(
+                SYNC_LOCAL_HLC_METADATA_KEY,
                 &Hlc {
                     wall_ms: BASE_MS - 1,
                     counter: 0,
@@ -1080,8 +1081,8 @@ mod tests {
 
     fn local_hlc(fixture: &Fixture) -> Option<String> {
         let connection = open_encrypted(fixture.mutation_service.db_path(), &DB_KEY).unwrap();
-        SqliteSettingsRepository::new(connection)
-            .get_setting(SYNC_LOCAL_HLC_SETTING_KEY)
+        SqliteInternalMetadataRepository::new(connection)
+            .get_internal_metadata(SYNC_LOCAL_HLC_METADATA_KEY)
             .unwrap()
     }
 

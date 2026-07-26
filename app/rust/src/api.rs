@@ -4,12 +4,12 @@ use taskveil_client::{
     AccountSessionState, ActiveTimerSession, BillingState, CalendarOccurrenceKind,
     CalendarOccurrenceView, CalendarRange, CivilDate, ClientError, CompletedTimerSession,
     CreateTaskCommand, CreateTaskSeriesFromTaskCommand, CreateTaskSeriesFromTemplateCommand,
-    CreateTemplateCommand, HomeTaskView, List, OrganizationSafetyState, RealtimeTicket,
-    ReminderView, ReorderTaskCommand, ReplaceTaskBlueprintCommand, SaveTemplateCommand,
-    SetTaskStatusCommand, SettlementSummary, Streak, SyncStatus, Task, TaskBlueprint,
-    TaskBlueprintNode, TaskContent, TaskDue, TaskSeries, TaskStatus, TaskTemplate, TaskUndoKind,
-    TaskUndoView, TimerFinishKind, TimerMode, TimerPhase, TimerRunState, UpdateTaskCommand,
-    UpdateTaskSeriesCommand, UpdateTemplateCommand, UtcInstant, Uuid,
+    CreateTemplateCommand, FrontendSettingKey, HomeTaskView, List, OrganizationSafetyState,
+    RealtimeTicket, ReminderView, ReorderTaskCommand, ReplaceTaskBlueprintCommand,
+    SaveTemplateCommand, SetTaskStatusCommand, SettlementSummary, Streak, SyncStatus, Task,
+    TaskBlueprint, TaskBlueprintNode, TaskContent, TaskDue, TaskSeries, TaskStatus, TaskTemplate,
+    TaskUndoKind, TaskUndoView, TimerFinishKind, TimerMode, TimerPhase, TimerRunState,
+    UpdateTaskCommand, UpdateTaskSeriesCommand, UpdateTemplateCommand, UtcInstant, Uuid,
 };
 
 use crate::client_handle::{client, init_client};
@@ -180,6 +180,26 @@ pub enum TimerRunStateDto {
 pub enum TimerFinishKindDto {
     Completed,
     Interrupted,
+}
+
+pub enum FrontendSettingKeyDto {
+    UiMode,
+    OnboardingCompleted,
+    CalendarWeekStart,
+    TimerSettings,
+    TimerRuntime,
+}
+
+impl From<FrontendSettingKeyDto> for FrontendSettingKey {
+    fn from(value: FrontendSettingKeyDto) -> Self {
+        match value {
+            FrontendSettingKeyDto::UiMode => Self::UiMode,
+            FrontendSettingKeyDto::OnboardingCompleted => Self::OnboardingCompleted,
+            FrontendSettingKeyDto::CalendarWeekStart => Self::CalendarWeekStart,
+            FrontendSettingKeyDto::TimerSettings => Self::TimerSettings,
+            FrontendSettingKeyDto::TimerRuntime => Self::TimerRuntime,
+        }
+    }
 }
 
 pub enum ActiveTimerStartOutcomeDto {
@@ -812,12 +832,12 @@ pub fn undo_task_operation(undo_id: String) -> Result<TaskDto, String> {
     client_result(client()?.undo_task_operation(undo_id)).map(task_to_dto)
 }
 
-pub fn get_setting(key: String) -> Result<Option<String>, String> {
-    client_result(client()?.get_setting(&key))
+pub fn get_frontend_setting(key: FrontendSettingKeyDto) -> Result<Option<String>, String> {
+    client_result(client()?.get_frontend_setting(key.into()))
 }
 
-pub fn set_setting(key: String, value: String) -> Result<(), String> {
-    client_result(client()?.set_setting(&key, &value))
+pub fn set_frontend_setting(key: FrontendSettingKeyDto, value: String) -> Result<(), String> {
+    client_result(client()?.set_frontend_setting(key.into(), &value))
 }
 
 pub fn create_task_reminder(task_id: String, remind_at: i64) -> Result<ReminderDto, String> {
@@ -989,8 +1009,8 @@ mod tests {
         let _: fn(String) -> Result<(), String> = delete_list;
         let _: fn() -> Result<Option<TaskUndoDto>, String> = get_latest_task_undo;
         let _: fn(String) -> Result<TaskDto, String> = undo_task_operation;
-        let _: fn(String) -> Result<Option<String>, String> = get_setting;
-        let _: fn(String, String) -> Result<(), String> = set_setting;
+        let _: fn(FrontendSettingKeyDto) -> Result<Option<String>, String> = get_frontend_setting;
+        let _: fn(FrontendSettingKeyDto, String) -> Result<(), String> = set_frontend_setting;
         let _: fn(String, i64) -> Result<ReminderDto, String> = create_task_reminder;
         let _: fn(String, i64) -> Result<ReminderDto, String> = update_reminder;
         let _: fn(String) -> Result<ReminderDto, String> = delete_reminder;

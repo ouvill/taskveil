@@ -880,7 +880,7 @@ fn sqlite_write_tx_commits_domain_and_sync_state_together() {
         )
         .unwrap();
     write_tx
-        .set_setting("sync_local_hlc", "encoded-hlc", edited.updated_at)
+        .set_internal_metadata("sync_local_hlc", "encoded-hlc", edited.updated_at)
         .unwrap();
     let op_id = Uuid::now_v7();
     write_tx
@@ -914,9 +914,12 @@ fn sqlite_write_tx_commits_domain_and_sync_state_together() {
     drop(repository);
 
     let connection = open_encrypted(file.path(), &KEY).unwrap();
-    let settings = SqliteSettingsRepository::new(connection);
+    let settings = SqliteInternalMetadataRepository::new(connection);
     assert_eq!(
-        settings.get_setting("sync_local_hlc").unwrap().as_deref(),
+        settings
+            .get_internal_metadata("sync_local_hlc")
+            .unwrap()
+            .as_deref(),
         Some("encoded-hlc")
     );
     drop(settings);
@@ -965,7 +968,7 @@ fn sqlite_write_tx_drop_rolls_back_domain_and_sync_state_together() {
             )
             .unwrap();
         write_tx
-            .set_setting("sync_local_hlc", "rolled-back-hlc", edited.updated_at)
+            .set_internal_metadata("sync_local_hlc", "rolled-back-hlc", edited.updated_at)
             .unwrap();
         write_tx
             .put_outbox_head(new_live_outbox(
@@ -998,8 +1001,11 @@ fn sqlite_write_tx_drop_rolls_back_domain_and_sync_state_together() {
     drop(repository);
 
     let connection = open_encrypted(file.path(), &KEY).unwrap();
-    let settings = SqliteSettingsRepository::new(connection);
-    assert_eq!(settings.get_setting("sync_local_hlc").unwrap(), None);
+    let settings = SqliteInternalMetadataRepository::new(connection);
+    assert_eq!(
+        settings.get_internal_metadata("sync_local_hlc").unwrap(),
+        None
+    );
     drop(settings);
 
     let connection = open_encrypted(file.path(), &KEY).unwrap();
@@ -1021,7 +1027,7 @@ fn owned_sqlite_write_tx_commits_domain_hlc_record_state_and_outbox() {
     let connection = open_encrypted(file.path(), &KEY).unwrap();
     let mut transaction = OwnedSqliteWriteTx::begin(connection).unwrap();
     transaction
-        .set_setting("sync_local_hlc", "owned-hlc", task.updated_at)
+        .set_internal_metadata("sync_local_hlc", "owned-hlc", task.updated_at)
         .unwrap();
     transaction.upsert_list_for_sync(list.clone()).unwrap();
     transaction.upsert_task_for_sync(task.clone()).unwrap();
@@ -1058,7 +1064,7 @@ fn owned_sqlite_write_tx_commits_domain_hlc_record_state_and_outbox() {
     let connection = transaction.commit().unwrap();
 
     assert_eq!(
-        get_setting_on(&connection, "sync_local_hlc")
+        get_internal_metadata_on(&connection, "sync_local_hlc")
             .unwrap()
             .as_deref(),
         Some("owned-hlc")
@@ -1087,7 +1093,7 @@ fn owned_sqlite_write_tx_drop_rolls_back_domain_hlc_record_state_and_outbox() {
         let connection = open_encrypted(file.path(), &KEY).unwrap();
         let mut transaction = OwnedSqliteWriteTx::begin(connection).unwrap();
         transaction
-            .set_setting("sync_local_hlc", "rolled-back-owned-hlc", task.updated_at)
+            .set_internal_metadata("sync_local_hlc", "rolled-back-owned-hlc", task.updated_at)
             .unwrap();
         transaction.upsert_list_for_sync(list.clone()).unwrap();
         transaction.upsert_task_for_sync(task.clone()).unwrap();
@@ -1118,7 +1124,10 @@ fn owned_sqlite_write_tx_drop_rolls_back_domain_hlc_record_state_and_outbox() {
     }
 
     let connection = open_encrypted(file.path(), &KEY).unwrap();
-    assert_eq!(get_setting_on(&connection, "sync_local_hlc").unwrap(), None);
+    assert_eq!(
+        get_internal_metadata_on(&connection, "sync_local_hlc").unwrap(),
+        None
+    );
     assert!(matches!(
         get_list_on(&connection, list.id),
         Err(StorageError::NotFound(id)) if id == list.id

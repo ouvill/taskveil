@@ -227,8 +227,18 @@ fn is_default_column(connection: &Connection) -> Option<(String, i32, String)> {
     list_column(connection, "is_default")
 }
 
-fn setting_column(connection: &Connection, target: &str) -> Option<(String, i32)> {
-    let mut statement = connection.prepare("PRAGMA table_info(settings)").unwrap();
+fn app_setting_column(connection: &Connection, target: &str) -> Option<(String, i32)> {
+    key_value_column(connection, "app_settings", target)
+}
+
+fn internal_metadata_column(connection: &Connection, target: &str) -> Option<(String, i32)> {
+    key_value_column(connection, "internal_metadata", target)
+}
+
+fn key_value_column(connection: &Connection, table: &str, target: &str) -> Option<(String, i32)> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .unwrap();
     statement
         .query_map([], |row| {
             Ok((

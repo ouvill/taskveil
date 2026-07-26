@@ -88,7 +88,7 @@ where
     .map_err(|_| "sync failed".to_string())?;
     let mut summary = SyncRunSummary::default();
 
-    let durable_upgrade_block = store.get_setting(SYNC_UPGRADE_REQUIRED_SETTING_KEY)?;
+    let durable_upgrade_block = store.get_setting(SYNC_UPGRADE_REQUIRED_METADATA_KEY)?;
     if durable_upgrade_block
         .as_deref()
         .is_some_and(upgrade_block_is_active)
@@ -100,7 +100,7 @@ where
     let preflight = match engine.preflight(since).await {
         Ok(preflight) => {
             if durable_upgrade_block.is_some() {
-                store.set_setting(SYNC_UPGRADE_REQUIRED_SETTING_KEY, "0:0", now_ms()?)?;
+                store.set_setting(SYNC_UPGRADE_REQUIRED_METADATA_KEY, "0:0", now_ms()?)?;
             }
             preflight
         }
@@ -109,7 +109,7 @@ where
             envelope_version,
         }) => {
             store.set_setting(
-                SYNC_UPGRADE_REQUIRED_SETTING_KEY,
+                SYNC_UPGRADE_REQUIRED_METADATA_KEY,
                 &upgrade_block_value(protocol_version, envelope_version),
                 now_ms()?,
             )?;
@@ -175,7 +175,7 @@ where
         if let Err(error) = replay_quarantine(&context, store, now_ms, &mut summary) {
             if let Some(envelope_version) = replay_upgrade_version(&error) {
                 store.set_setting(
-                    SYNC_UPGRADE_REQUIRED_SETTING_KEY,
+                    SYNC_UPGRADE_REQUIRED_METADATA_KEY,
                     &upgrade_block_value(crate::protocol::SYNC_PROTOCOL_VERSION, envelope_version),
                     now_ms()?,
                 )?;
@@ -553,7 +553,7 @@ where
                 if let Err(error) = replay_quarantine(context, store, now_ms, summary) {
                     if let Some(envelope_version) = replay_upgrade_version(&error) {
                         store.set_setting(
-                            SYNC_UPGRADE_REQUIRED_SETTING_KEY,
+                            SYNC_UPGRADE_REQUIRED_METADATA_KEY,
                             &upgrade_block_value(
                                 crate::protocol::SYNC_PROTOCOL_VERSION,
                                 envelope_version,
@@ -570,7 +570,7 @@ where
             }
             Err(PageApplyError::UpgradeRequired(envelope_version)) => {
                 store.set_setting(
-                    SYNC_UPGRADE_REQUIRED_SETTING_KEY,
+                    SYNC_UPGRADE_REQUIRED_METADATA_KEY,
                     &upgrade_block_value(crate::protocol::SYNC_PROTOCOL_VERSION, envelope_version),
                     now_ms()?,
                 )?;

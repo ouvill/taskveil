@@ -25,10 +25,10 @@ use std::{
 
 use taskveil_crypto::{derive_local_db_key, PlatformLocalKeyCapsuleStore};
 use taskveil_storage::{
-    open_encrypted, ListRepository, LocalCryptoRepository, SettingsRepository,
-    SqliteListRepository, SqliteLocalCryptoRepository, SqliteProfileCoordinationRepository,
-    SqliteReminderRepository, SqliteSettingsRepository, SqliteTaskRepository,
-    SqliteTemplateSeriesRepository, SqliteTimerSessionRepository,
+    open_encrypted, InternalMetadataRepository, ListRepository, LocalCryptoRepository,
+    SqliteAppSettingsRepository, SqliteInternalMetadataRepository, SqliteListRepository,
+    SqliteLocalCryptoRepository, SqliteProfileCoordinationRepository, SqliteReminderRepository,
+    SqliteTaskRepository, SqliteTemplateSeriesRepository, SqliteTimerSessionRepository,
 };
 use taskveil_sync::SyncRunSummary;
 use zeroize::Zeroizing;
@@ -39,15 +39,17 @@ use crate::{
     LocalCryptoContext, LocalCryptoUnavailable, LocalMutationContext,
 };
 
-pub(super) const SYNC_SERVER_URL_SETTING_KEY: &str = "sync_server_url";
+pub(super) const SYNC_SERVER_URL_METADATA_KEY: &str = "sync_server_url";
 pub(super) const DEFAULT_SYNC_SERVER_URL: &str = "http://localhost:3000";
-pub(super) const ACCOUNT_EMAIL_SETTING_KEY: &str = "account_email";
-pub(super) const ACCOUNT_USER_ID_SETTING_KEY: &str = "account_user_id";
-pub(super) const ACCOUNT_TENANT_ID_SETTING_KEY: &str = "account_tenant_id";
-pub(super) const ACCOUNT_DEVICE_ID_SETTING_KEY: &str = "account_device_id";
-pub(super) const ACCOUNT_SESSION_EXPIRES_AT_SETTING_KEY: &str = "account_session_expires_at";
-pub(super) const ACCOUNT_ROOT_PUBLIC_SETTING_KEY: &str = "account_root_public";
-pub(super) const ACCOUNT_MK_GENERATION_SETTING_KEY: &str = "account_mk_generation";
+pub(super) const ACCOUNT_EMAIL_METADATA_KEY: &str = "account_email";
+pub(super) const ACCOUNT_USER_ID_METADATA_KEY: &str = "account_user_id";
+pub(super) const ACCOUNT_TENANT_ID_METADATA_KEY: &str = "account_tenant_id";
+pub(super) const ACCOUNT_DEVICE_ID_METADATA_KEY: &str = "account_device_id";
+pub(super) const ACCOUNT_SESSION_EXPIRES_AT_METADATA_KEY: &str = "account_session_expires_at";
+pub(super) const ACCOUNT_ROOT_PUBLIC_METADATA_KEY: &str = "account_root_public";
+pub(super) const ACCOUNT_MK_GENERATION_METADATA_KEY: &str = "account_mk_generation";
+const TIMER_RUNTIME_METADATA_KEY: &str = "timer_runtime_v1";
+const MAX_FRONTEND_SETTING_BYTES: usize = 16 * 1024;
 pub(super) const INITIAL_BACKFILL_CURSOR_NAME: &str = "initial_backfill";
 
 #[derive(Debug, Clone)]
@@ -183,14 +185,24 @@ impl TaskveilClient {
 
     pub fn sync_server_url(&self) -> Result<String, ClientError> {
         let _operation = self.begin_operation()?;
+        let _session_lock = account::acquire_session_token_set_lock(&self.db_dir)?;
         self.sync_server_url_unlocked()
     }
 
     pub(super) fn sync_server_url_unlocked(&self) -> Result<String, ClientError> {
-        let stored = self.setting(SYNC_SERVER_URL_SETTING_KEY)?;
-        Ok(stored
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| DEFAULT_SYNC_SERVER_URL.to_string()))
+        let stored = self.non_empty_internal_metadata(SYNC_SERVER_URL_METADATA_KEY)?;
+        let requested = stored.as_deref().unwrap_or(DEFAULT_SYNC_SERVER_URL);
+        let canonical = taskveil_sync::canonical_server_origin(requested)
+            .map_err(|_| ClientError::AccountRequest)?;
+        if let Some(issuer) = account::stored_session_credential_issuer(&self.db_dir)? {
+            let bound = taskveil_sync::canonical_server_origin(&issuer)
+                .map_err(|_| ClientError::AccountRequest)?;
+            if stored.is_some() && canonical != bound {
+                return Err(ClientError::AccountRequest);
+            }
+            return Ok(bound);
+        }
+        Ok(canonical)
     }
 
     pub fn set_sync_server_url(&self, server_url: String) -> Result<(), ClientError> {
@@ -203,7 +215,7 @@ impl TaskveilClient {
         {
             return Err(ClientError::AccountRequest);
         }
-        self.set_setting_value(SYNC_SERVER_URL_SETTING_KEY, &server_url)
+        self.set_internal_metadata_value(SYNC_SERVER_URL_METADATA_KEY, &server_url)
     }
 
     #[allow(dead_code)] // Consumed by the CRUD migration phase of task-92.
@@ -466,12 +478,20 @@ impl TaskveilClient {
         f(&mut SqliteListRepository::new(connection))
     }
 
-    pub(super) fn with_settings_repository<T>(
+    pub(super) fn with_app_settings_repository<T>(
         &self,
-        f: impl FnOnce(&mut SqliteSettingsRepository) -> Result<T, ClientError>,
+        f: impl FnOnce(&mut SqliteAppSettingsRepository) -> Result<T, ClientError>,
     ) -> Result<T, ClientError> {
         let connection = open_encrypted(&self.db_path, &self.db_key())?;
-        f(&mut SqliteSettingsRepository::new(connection))
+        f(&mut SqliteAppSettingsRepository::new(connection))
+    }
+
+    pub(super) fn with_internal_metadata_repository<T>(
+        &self,
+        f: impl FnOnce(&mut SqliteInternalMetadataRepository) -> Result<T, ClientError>,
+    ) -> Result<T, ClientError> {
+        let connection = open_encrypted(&self.db_path, &self.db_key())?;
+        f(&mut SqliteInternalMetadataRepository::new(connection))
     }
 
     #[allow(dead_code)] // Consumed by the reminder migration phase of task-92.
@@ -499,20 +519,31 @@ impl TaskveilClient {
         f(&mut SqliteTemplateSeriesRepository::new(connection))
     }
 
-    pub(super) fn setting(&self, key: &str) -> Result<Option<String>, ClientError> {
-        self.with_settings_repository(|repository| Ok(repository.get_setting(key)?))
+    pub(super) fn internal_metadata(&self, key: &str) -> Result<Option<String>, ClientError> {
+        self.with_internal_metadata_repository(|repository| {
+            Ok(repository.get_internal_metadata(key)?)
+        })
     }
 
-    pub(super) fn set_setting_value(&self, key: &str, value: &str) -> Result<(), ClientError> {
+    pub(super) fn set_internal_metadata_value(
+        &self,
+        key: &str,
+        value: &str,
+    ) -> Result<(), ClientError> {
         let updated_at = now_ms()?;
-        self.with_settings_repository(|repository| {
-            repository.set_setting(key, value, updated_at)?;
+        self.with_internal_metadata_repository(|repository| {
+            repository.set_internal_metadata(key, value, updated_at)?;
             Ok(())
         })
     }
 
-    pub(super) fn non_empty_setting(&self, key: &str) -> Result<Option<String>, ClientError> {
-        Ok(self.setting(key)?.filter(|value| !value.trim().is_empty()))
+    pub(super) fn non_empty_internal_metadata(
+        &self,
+        key: &str,
+    ) -> Result<Option<String>, ClientError> {
+        Ok(self
+            .internal_metadata(key)?
+            .filter(|value| !value.trim().is_empty()))
     }
 
     pub(super) fn has_profile_binding(&self) -> Result<bool, ClientError> {

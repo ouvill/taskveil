@@ -246,9 +246,14 @@ abstract interface class TimerBridgePort {
 
 /// Durable application setting operations.
 abstract interface class SettingsBridgePort {
-  Future<String?> getSetting({required String key});
+  Future<String?> getFrontendSetting({
+    required rust_api.FrontendSettingKeyDto key,
+  });
 
-  Future<void> setSetting({required String key, required String value});
+  Future<void> setFrontendSetting({
+    required rust_api.FrontendSettingKeyDto key,
+    required String value,
+  });
 }
 
 /// Task reminder lifecycle, lookup, and snooze operations.

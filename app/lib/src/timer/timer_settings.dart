@@ -3,9 +3,10 @@ import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart' show ProviderListenable;
 import 'package:taskveil/src/core/bridge_service.dart';
+import 'package:taskveil/src/rust/api.dart' show FrontendSettingKeyDto;
 import 'package:taskveil/src/timer/timer_notifications.dart';
 
-const timerSettingsKey = 'timer_settings_v1';
+const timerSettingsKey = FrontendSettingKeyDto.timerSettings;
 
 class TimerSettingsValidationException implements Exception {
   const TimerSettingsValidationException(this.field);
@@ -140,7 +141,7 @@ class TimerSettingsNotifier extends AsyncNotifier<TimerSettings> {
   Future<TimerSettings> build() async {
     final persisted = await ref
         .watch(_bridgeProvider)
-        .getSetting(key: timerSettingsKey);
+        .getFrontendSetting(key: timerSettingsKey);
     if (persisted == null) {
       return const TimerSettings();
     }
@@ -164,7 +165,7 @@ class TimerSettingsNotifier extends AsyncNotifier<TimerSettings> {
     }
     await ref
         .read(_bridgeProvider)
-        .setSetting(key: timerSettingsKey, value: valid.encode());
+        .setFrontendSetting(key: timerSettingsKey, value: valid.encode());
     state = AsyncData(valid);
   }
 }

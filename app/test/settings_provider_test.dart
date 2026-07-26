@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:taskveil/src/core/bridge_ports.dart';
 import 'package:taskveil/src/core/providers.dart';
+import 'package:taskveil/src/rust/api.dart' show FrontendSettingKeyDto;
 
 import 'support/fake_bridge_service.dart';
 
@@ -40,7 +41,10 @@ void main() {
 
       await container.read(uiModeProvider.notifier).setUiMode(advancedUiMode);
 
-      expect(await fake.getSetting(key: uiModeSettingKey), advancedUiMode);
+      expect(
+        await fake.getFrontendSetting(key: uiModeSettingKey),
+        advancedUiMode,
+      );
       expect(await container.read(uiModeProvider.future), advancedUiMode);
     },
   );
@@ -80,7 +84,7 @@ void main() {
         .setWeekStart(mondayCalendarWeekStart);
 
     expect(
-      await fake.getSetting(key: calendarWeekStartSettingKey),
+      await fake.getFrontendSetting(key: calendarWeekStartSettingKey),
       mondayCalendarWeekStart,
     );
     expect(
@@ -112,19 +116,27 @@ void main() {
       await container.read(onboardingStatusProvider.notifier).complete();
 
       expect(await container.read(onboardingStatusProvider.future), isTrue);
-      expect(await fake.getSetting(key: onboardingCompletedSettingKey), '1');
+      expect(
+        await fake.getFrontendSetting(key: onboardingCompletedSettingKey),
+        '1',
+      );
     },
   );
 }
 
 class _InMemorySettingsPort implements SettingsBridgePort {
-  final values = <String, String>{};
+  final values = <FrontendSettingKeyDto, String>{};
 
   @override
-  Future<String?> getSetting({required String key}) async => values[key];
+  Future<String?> getFrontendSetting({
+    required FrontendSettingKeyDto key,
+  }) async => values[key];
 
   @override
-  Future<void> setSetting({required String key, required String value}) async {
+  Future<void> setFrontendSetting({
+    required FrontendSettingKeyDto key,
+    required String value,
+  }) async {
     values[key] = value;
   }
 }

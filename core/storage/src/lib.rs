@@ -61,14 +61,17 @@ pub use profile_coordination::{
     ProfileRuntimeState, SqliteProfileCoordinationRepository, SyncLease,
 };
 pub use reminder_repository::SqliteReminderRepository;
-pub use settings_repository::SqliteSettingsRepository;
+pub use settings_repository::{
+    AppSettingKey, SqliteAppSettingsRepository, SqliteInternalMetadataRepository,
+};
 pub use sync_state_repository::SqliteSyncStateRepository;
 pub use task_repository::SqliteTaskRepository;
 pub use template_series_repository::SqliteTemplateSeriesRepository;
 pub use timer_repository::SqliteTimerSessionRepository;
 pub use traits::{
-    ListRepository, LocalCryptoRepository, ReminderRepository, SettingsRepository,
-    SyncStateRepository, TaskRepository, TemplateSeriesRepository, TimerSessionRepository,
+    AppSettingsRepository, InternalMetadataRepository, ListRepository, LocalCryptoRepository,
+    ReminderRepository, SyncStateRepository, TaskRepository, TemplateSeriesRepository,
+    TimerSessionRepository,
 };
 pub use transaction::{OwnedSqliteWriteTx, SqliteWriteTx};
 
@@ -76,7 +79,7 @@ pub use transaction::{OwnedSqliteWriteTx, SqliteWriteTx};
 use migrations::ensure_schema_at_version;
 use migrations::{ensure_schema, MIGRATIONS};
 
-pub const LATEST_MIGRATION_VERSION: i32 = 4;
+pub const LATEST_MIGRATION_VERSION: i32 = 5;
 const LOCAL_DB_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[cfg(test)]

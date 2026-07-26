@@ -297,17 +297,30 @@ impl<'connection> SqliteWriteTx<'connection> {
         undo_task_operation_on(&self.transaction, undo_id, consumed_at)
     }
 
-    pub fn get_setting(&self, key: &str) -> Result<Option<String>, StorageError> {
-        get_setting_on(&self.transaction, key)
+    pub fn get_app_setting(&self, key: AppSettingKey) -> Result<Option<String>, StorageError> {
+        get_app_setting_on(&self.transaction, key)
     }
 
-    pub fn set_setting(
+    pub fn set_app_setting(
+        &mut self,
+        key: AppSettingKey,
+        value: &str,
+        updated_at: i64,
+    ) -> Result<(), StorageError> {
+        set_app_setting_on(&self.transaction, key, value, updated_at)
+    }
+
+    pub fn get_internal_metadata(&self, key: &str) -> Result<Option<String>, StorageError> {
+        get_internal_metadata_on(&self.transaction, key)
+    }
+
+    pub fn set_internal_metadata(
         &mut self,
         key: &str,
         value: &str,
         updated_at: i64,
     ) -> Result<(), StorageError> {
-        set_setting_on(&self.transaction, key, value, updated_at)
+        set_internal_metadata_on(&self.transaction, key, value, updated_at)
     }
 
     pub fn create_task_reminder(
@@ -431,17 +444,17 @@ impl OwnedSqliteWriteTx {
             .expect("active owned transaction always has a connection")
     }
 
-    pub fn get_setting(&self, key: &str) -> Result<Option<String>, StorageError> {
-        get_setting_on(self.connection(), key)
+    pub fn get_internal_metadata(&self, key: &str) -> Result<Option<String>, StorageError> {
+        get_internal_metadata_on(self.connection(), key)
     }
 
-    pub fn set_setting(
+    pub fn set_internal_metadata(
         &mut self,
         key: &str,
         value: &str,
         updated_at: i64,
     ) -> Result<(), StorageError> {
-        set_setting_on(self.connection(), key, value, updated_at)
+        set_internal_metadata_on(self.connection(), key, value, updated_at)
     }
 
     pub fn put_outbox_head(

@@ -887,7 +887,7 @@ async fn production_pull_refreshes_once_then_atomically_applies_and_quarantines(
         }
         let (hlc_count, hlc_value): (i64, String) = connection
             .query_row(
-                "SELECT count(*), max(value) FROM settings
+                "SELECT count(*), max(value) FROM internal_metadata
                  WHERE key = 'sync_local_hlc'",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
@@ -1158,7 +1158,7 @@ async fn unsupported_preflight_durably_blocks_outbox_before_push() {
         .unwrap());
     assert!(store.get_cursor_seq(SYNC_CURSOR_NAME).unwrap().is_none());
     assert!(store
-        .get_setting(taskveil_sync::SYNC_UPGRADE_REQUIRED_SETTING_KEY)
+        .get_setting(taskveil_sync::SYNC_UPGRADE_REQUIRED_METADATA_KEY)
         .unwrap()
         .is_some());
 
@@ -1372,7 +1372,7 @@ async fn continuity_410_still_enforces_protocol_upgrade_before_resync() {
     assert_eq!(preflight_count.load(Ordering::SeqCst), 1);
     assert_eq!(start_count.load(Ordering::SeqCst), 0);
     assert!(store
-        .get_setting(taskveil_sync::SYNC_UPGRADE_REQUIRED_SETTING_KEY)
+        .get_setting(taskveil_sync::SYNC_UPGRADE_REQUIRED_METADATA_KEY)
         .unwrap()
         .is_some());
 }
@@ -1713,14 +1713,14 @@ async fn expired_terminal_token_restarts_once_and_converges_on_new_generation() 
     assert!(store.load_full_resync().unwrap().is_none());
     assert_eq!(
         store
-            .get_setting(taskveil_sync::SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY)
+            .get_setting(taskveil_sync::SYNC_FULL_RESYNC_PAGE_TOKEN_METADATA_KEY)
             .unwrap()
             .as_deref(),
         Some("")
     );
     assert_eq!(
         store
-            .get_setting(taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY)
+            .get_setting(taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_METADATA_KEY)
             .unwrap()
             .as_deref(),
         Some("")

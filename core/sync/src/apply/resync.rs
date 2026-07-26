@@ -34,12 +34,12 @@ where
                 .start_full_resync(Uuid::now_v7(), start.generation, start.base_seq, now_ms()?)
                 .map_err(normalize_local_sync_error)?;
             transaction.set_setting(
-                SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY,
+                SYNC_FULL_RESYNC_PAGE_TOKEN_METADATA_KEY,
                 &start.page_token,
                 now_ms()?,
             )?;
             transaction.set_setting(
-                SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY,
+                SYNC_FULL_RESYNC_COMPLETION_TOKEN_METADATA_KEY,
                 "",
                 now_ms()?,
             )?;
@@ -52,7 +52,7 @@ where
         match progress.phase {
             LocalFullResyncPhase::Base => {
                 let page_token = store
-                    .get_setting(SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY)?
+                    .get_setting(SYNC_FULL_RESYNC_PAGE_TOKEN_METADATA_KEY)?
                     .filter(|token| !token.is_empty())
                     .ok_or_else(|| "sync failed".to_string())?;
                 store.preflight_network_request()?;
@@ -91,20 +91,20 @@ where
                         )?;
                         if let Some(next_page_token) = page.next_page_token.as_deref() {
                             transaction.set_setting(
-                                SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY,
+                                SYNC_FULL_RESYNC_PAGE_TOKEN_METADATA_KEY,
                                 next_page_token,
                                 page_updated_at,
                             )?;
                         } else {
                             transaction.set_setting(
-                                SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY,
+                                SYNC_FULL_RESYNC_PAGE_TOKEN_METADATA_KEY,
                                 "",
                                 page_updated_at,
                             )?;
                         }
                         if let Some(completion_token) = page.completion_token.as_deref() {
                             transaction.set_setting(
-                                SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY,
+                                SYNC_FULL_RESYNC_COMPLETION_TOKEN_METADATA_KEY,
                                 completion_token,
                                 page_updated_at,
                             )?;
@@ -133,20 +133,20 @@ where
                                 )?;
                                 if let Some(next_page_token) = page.next_page_token.as_deref() {
                                     transaction.set_setting(
-                                        SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY,
+                                        SYNC_FULL_RESYNC_PAGE_TOKEN_METADATA_KEY,
                                         next_page_token,
                                         page_updated_at,
                                     )?;
                                 } else {
                                     transaction.set_setting(
-                                        SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY,
+                                        SYNC_FULL_RESYNC_PAGE_TOKEN_METADATA_KEY,
                                         "",
                                         page_updated_at,
                                     )?;
                                 }
                                 if let Some(completion_token) = page.completion_token.as_deref() {
                                     transaction.set_setting(
-                                        SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY,
+                                        SYNC_FULL_RESYNC_COMPLETION_TOKEN_METADATA_KEY,
                                         completion_token,
                                         page_updated_at,
                                     )?;
@@ -172,7 +172,7 @@ where
             }
             LocalFullResyncPhase::BaseAwaitingAck => {
                 let completion_token = store
-                    .get_setting(SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY)?
+                    .get_setting(SYNC_FULL_RESYNC_COMPLETION_TOKEN_METADATA_KEY)?
                     .filter(|token| !token.is_empty())
                     .ok_or_else(|| "sync failed".to_string())?;
                 store.preflight_network_request()?;
@@ -186,7 +186,7 @@ where
                 }
                 let mut transaction = store.begin_write_transaction()?;
                 transaction.set_setting(
-                    SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY,
+                    SYNC_FULL_RESYNC_COMPLETION_TOKEN_METADATA_KEY,
                     "",
                     now_ms()?,
                 )?;
@@ -336,8 +336,8 @@ where
     let reset_at = now_ms()?;
     let mut transaction = store.begin_write_transaction()?;
     transaction.reset_full_resync()?;
-    transaction.set_setting(SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY, "", reset_at)?;
-    transaction.set_setting(SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY, "", reset_at)?;
+    transaction.set_setting(SYNC_FULL_RESYNC_PAGE_TOKEN_METADATA_KEY, "", reset_at)?;
+    transaction.set_setting(SYNC_FULL_RESYNC_COMPLETION_TOKEN_METADATA_KEY, "", reset_at)?;
     transaction.commit()?;
     *resync_restart_performed = true;
     Ok(())
@@ -353,7 +353,7 @@ where
     N: FnMut() -> Result<i64, String>,
 {
     store.set_setting(
-        SYNC_UPGRADE_REQUIRED_SETTING_KEY,
+        SYNC_UPGRADE_REQUIRED_METADATA_KEY,
         &upgrade_block_value(crate::protocol::SYNC_PROTOCOL_VERSION, envelope_version),
         now_ms()?,
     )

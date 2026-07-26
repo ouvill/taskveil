@@ -43,7 +43,9 @@ void main() {
           .notificationsEnabled,
       isFalse,
     );
-    final persisted = await harness.bridge.getSetting(key: timerSettingsKey);
+    final persisted = await harness.bridge.getFrontendSetting(
+      key: timerSettingsKey,
+    );
     expect(jsonDecode(persisted!)['notificationsEnabled'], isFalse);
   });
 
@@ -457,7 +459,7 @@ void main() {
       final gateway = _FakeTimerNotificationGateway(throwOnSchedule: true);
       final harness = await _Harness.create(gateway: gateway);
       addTearDown(harness.dispose);
-      await harness.bridge.setSetting(
+      await harness.bridge.setFrontendSetting(
         key: timerSettingsKey,
         value: const TimerSettings(notificationsEnabled: true).encode(),
       );
@@ -686,7 +688,10 @@ class _FailingRuntimeBridge extends FakeBridgeService {
   bool failBreakCommit = false;
 
   @override
-  Future<void> setSetting({required String key, required String value}) async {
+  Future<void> setFrontendSetting({
+    required FrontendSettingKeyDto key,
+    required String value,
+  }) async {
     if (key == timerRuntimeKey &&
         failRuntimeCommit &&
         value.contains('"pending":null')) {
@@ -699,6 +704,6 @@ class _FailingRuntimeBridge extends FakeBridgeService {
       failBreakCommit = false;
       throw StateError('simulated break commit failure');
     }
-    await super.setSetting(key: key, value: value);
+    await super.setFrontendSetting(key: key, value: value);
   }
 }

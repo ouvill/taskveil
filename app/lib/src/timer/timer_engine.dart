@@ -10,7 +10,7 @@ import 'package:taskveil/src/rust/api.dart';
 import 'package:taskveil/src/timer/timer_notifications.dart';
 import 'package:taskveil/src/timer/timer_settings.dart';
 
-const timerRuntimeKey = 'timer_runtime_v1';
+const timerRuntimeKey = FrontendSettingKeyDto.timerRuntime;
 const _maximumActiveDuration = Duration(days: 7);
 
 class TimerActiveConflictException implements Exception {
@@ -806,7 +806,7 @@ ActiveTimerSessionDto _copyActive(
 }
 
 Future<TimerSettings> _loadSettings(BridgeService bridge) async {
-  final persisted = await bridge.getSetting(key: timerSettingsKey);
+  final persisted = await bridge.getFrontendSetting(key: timerSettingsKey);
   if (persisted == null) {
     return const TimerSettings();
   }
@@ -818,7 +818,7 @@ Future<TimerSettings> _loadSettings(BridgeService bridge) async {
 }
 
 Future<_TimerRuntime> _loadRuntime(BridgeService bridge) async {
-  final persisted = await bridge.getSetting(key: timerRuntimeKey);
+  final persisted = await bridge.getFrontendSetting(key: timerRuntimeKey);
   if (persisted == null) {
     return const _TimerRuntime();
   }
@@ -830,7 +830,10 @@ Future<_TimerRuntime> _loadRuntime(BridgeService bridge) async {
 }
 
 Future<void> _saveRuntime(BridgeService bridge, _TimerRuntime runtime) {
-  return bridge.setSetting(key: timerRuntimeKey, value: runtime.encode());
+  return bridge.setFrontendSetting(
+    key: timerRuntimeKey,
+    value: runtime.encode(),
+  );
 }
 
 class _TimerRuntime {

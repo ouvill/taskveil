@@ -8,7 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'api.freezed.dart';
 
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `from`
 
 Future<String> greet({required String name}) =>
     RustLib.instance.api.crateApiGreet(name: name);
@@ -376,11 +376,13 @@ Future<TaskUndoDto?> getLatestTaskUndo() =>
 Future<TaskDto> undoTaskOperation({required String undoId}) =>
     RustLib.instance.api.crateApiUndoTaskOperation(undoId: undoId);
 
-Future<String?> getSetting({required String key}) =>
-    RustLib.instance.api.crateApiGetSetting(key: key);
+Future<String?> getFrontendSetting({required FrontendSettingKeyDto key}) =>
+    RustLib.instance.api.crateApiGetFrontendSetting(key: key);
 
-Future<void> setSetting({required String key, required String value}) =>
-    RustLib.instance.api.crateApiSetSetting(key: key, value: value);
+Future<void> setFrontendSetting({
+  required FrontendSettingKeyDto key,
+  required String value,
+}) => RustLib.instance.api.crateApiSetFrontendSetting(key: key, value: value);
 
 Future<ReminderDto> createTaskReminder({
   required String taskId,
@@ -709,6 +711,14 @@ class CompletedTimerSessionDto {
           endedAt == other.endedAt &&
           activeDurationMs == other.activeDurationMs &&
           createdAt == other.createdAt;
+}
+
+enum FrontendSettingKeyDto {
+  uiMode,
+  onboardingCompleted,
+  calendarWeekStart,
+  timerSettings,
+  timerRuntime,
 }
 
 class HomeTaskDto {

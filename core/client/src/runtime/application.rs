@@ -6,10 +6,10 @@ use taskveil_domain::{
     CompletedTimerSession, List, Task, TaskDue, TaskStatus, Uuid,
 };
 use taskveil_storage::{
-    open_encrypted, CalendarOccurrence, CalendarOccurrenceKind as StorageCalendarOccurrenceKind,
-    CalendarRange as StorageCalendarRange, HomeTask, ListRepository, Reminder, ReminderRepository,
-    SqliteWriteTx, StorageError, TaskRepository, TaskUndoEntry, TaskUndoOperation,
-    TimerSessionRepository,
+    open_encrypted, AppSettingKey, AppSettingsRepository, CalendarOccurrence,
+    CalendarOccurrenceKind as StorageCalendarOccurrenceKind, CalendarRange as StorageCalendarRange,
+    HomeTask, ListRepository, Reminder, ReminderRepository, SqliteWriteTx, StorageError,
+    TaskRepository, TaskUndoEntry, TaskUndoOperation, TimerSessionRepository,
 };
 use zeroize::Zeroizing;
 
@@ -17,12 +17,15 @@ use crate::mutation_service::{
     enqueue_list_in_transaction, enqueue_task_in_transaction, enqueue_timer_session_in_transaction,
 };
 use crate::{
-    load_local_crypto_context, ClientError, CreateTaskInput, LocalCryptoAvailability,
-    LocalMutationContext, ReorderTaskInput, SetTaskStatusInput, SqliteMutationService,
-    UpdateTaskInput,
+    load_local_crypto_context, ClientError, CreateTaskInput, FrontendSettingKey,
+    LocalCryptoAvailability, LocalMutationContext, ReorderTaskInput, SetTaskStatusInput,
+    SqliteMutationService, UpdateTaskInput,
 };
 
-use super::{now_ms, CryptoRuntimeState, LocalMutationState, TaskveilClient};
+use super::{
+    now_ms, CryptoRuntimeState, LocalMutationState, TaskveilClient, MAX_FRONTEND_SETTING_BYTES,
+    TIMER_RUNTIME_METADATA_KEY,
+};
 
 #[derive(Debug, Clone)]
 pub struct CreateTaskCommand {
@@ -570,17 +573,37 @@ impl TaskveilClient {
         })
     }
 
-    pub fn get_setting(&self, key: &str) -> Result<Option<String>, ClientError> {
+    pub fn get_frontend_setting(
+        &self,
+        key: FrontendSettingKey,
+    ) -> Result<Option<String>, ClientError> {
         let _guard = self.operation_guard()?;
-        self.setting(key)
+        match app_setting_key(key) {
+            Some(key) => {
+                self.with_app_settings_repository(|repository| Ok(repository.get_app_setting(key)?))
+            }
+            None => self.internal_metadata(TIMER_RUNTIME_METADATA_KEY),
+        }
     }
 
-    pub fn set_setting(&self, key: &str, value: &str) -> Result<(), ClientError> {
+    pub fn set_frontend_setting(
+        &self,
+        key: FrontendSettingKey,
+        value: &str,
+    ) -> Result<(), ClientError> {
+        validate_frontend_setting(key, value)?;
         let _guard = self.operation_guard()?;
         self.retry_runtime_epoch_once(|| {
             let updated_at = now_ms()?;
             self.write_with_runtime_epoch(|transaction| {
-                transaction.set_setting(key, value, updated_at)?;
+                match app_setting_key(key) {
+                    Some(key) => transaction.set_app_setting(key, value, updated_at)?,
+                    None => transaction.set_internal_metadata(
+                        TIMER_RUNTIME_METADATA_KEY,
+                        value,
+                        updated_at,
+                    )?,
+                }
                 Ok(())
             })
         })
@@ -702,6 +725,37 @@ impl TaskveilClient {
                     .into())
             })
         })
+    }
+}
+
+fn app_setting_key(key: FrontendSettingKey) -> Option<AppSettingKey> {
+    match key {
+        FrontendSettingKey::UiMode => Some(AppSettingKey::UiMode),
+        FrontendSettingKey::OnboardingCompleted => Some(AppSettingKey::OnboardingCompleted),
+        FrontendSettingKey::CalendarWeekStart => Some(AppSettingKey::CalendarWeekStart),
+        FrontendSettingKey::TimerSettings => Some(AppSettingKey::TimerSettings),
+        FrontendSettingKey::TimerRuntime => None,
+    }
+}
+
+fn validate_frontend_setting(key: FrontendSettingKey, value: &str) -> Result<(), ClientError> {
+    if value.len() > MAX_FRONTEND_SETTING_BYTES {
+        return Err(ClientError::InvalidFrontendSetting);
+    }
+    let valid = match key {
+        FrontendSettingKey::UiMode => matches!(value, "simple" | "advanced"),
+        FrontendSettingKey::OnboardingCompleted => value == "1",
+        FrontendSettingKey::CalendarWeekStart => {
+            matches!(value, "system" | "monday" | "sunday")
+        }
+        FrontendSettingKey::TimerSettings | FrontendSettingKey::TimerRuntime => {
+            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(value).is_ok()
+        }
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(ClientError::InvalidFrontendSetting)
     }
 }
 
@@ -1161,13 +1215,13 @@ mod tests {
         TimerPhase, TimerRunState,
     };
     use taskveil_storage::{
-        ListRepository, OwnedSqliteWriteTx, ReminderRepository, SettingsRepository,
-        SqliteListRepository, SqliteProfileCoordinationRepository, SqliteReminderRepository,
-        SqliteSettingsRepository, SqliteSyncStateRepository, SqliteTaskRepository,
-        SqliteTimerSessionRepository, SyncOutboxState, SyncStateRepository, TaskRepository,
-        TimerSessionRepository,
+        InternalMetadataRepository, ListRepository, OwnedSqliteWriteTx, ReminderRepository,
+        SqliteInternalMetadataRepository, SqliteListRepository,
+        SqliteProfileCoordinationRepository, SqliteReminderRepository, SqliteSyncStateRepository,
+        SqliteTaskRepository, SqliteTimerSessionRepository, SyncOutboxState, SyncStateRepository,
+        TaskRepository, TimerSessionRepository,
     };
-    use taskveil_sync::{LocalSyncKeys, SYNC_LOCAL_HLC_SETTING_KEY};
+    use taskveil_sync::{LocalSyncKeys, SYNC_LOCAL_HLC_METADATA_KEY};
     use tempfile::TempDir;
 
     use super::*;
@@ -1179,6 +1233,21 @@ mod tests {
 
     const DB_KEY: [u8; 32] = [0xd2; 32];
     const BASE_MS: i64 = 1_799_500_000_000;
+
+    #[test]
+    fn frontend_setting_values_are_validated_per_typed_capability() {
+        assert!(validate_frontend_setting(FrontendSettingKey::UiMode, "advanced").is_ok());
+        assert!(
+            validate_frontend_setting(FrontendSettingKey::CalendarWeekStart, "friday").is_err()
+        );
+        assert!(validate_frontend_setting(FrontendSettingKey::OnboardingCompleted, "0").is_err());
+        assert!(validate_frontend_setting(FrontendSettingKey::TimerSettings, "[]").is_err());
+        assert!(validate_frontend_setting(
+            FrontendSettingKey::TimerRuntime,
+            &"x".repeat(MAX_FRONTEND_SETTING_BYTES + 1),
+        )
+        .is_err());
+    }
 
     #[test]
     fn local_write_epoch_fence_runs_before_the_command_side_effect() {
@@ -1207,7 +1276,7 @@ mod tests {
 
         let result = client.write_with_runtime_epoch(|transaction| {
             command_side_effects += 1;
-            transaction.set_setting("must_not_commit", "stale", BASE_MS)?;
+            transaction.set_internal_metadata("must_not_commit", "stale", BASE_MS)?;
             Ok(())
         });
 
@@ -1222,8 +1291,8 @@ mod tests {
         ));
         assert_eq!(command_side_effects, 0);
         assert_eq!(
-            SqliteSettingsRepository::new(open_encrypted(&db_path, &DB_KEY).unwrap())
-                .get_setting("must_not_commit")
+            SqliteInternalMetadataRepository::new(open_encrypted(&db_path, &DB_KEY).unwrap())
+                .get_internal_metadata("must_not_commit")
                 .unwrap(),
             None
         );
@@ -2024,9 +2093,12 @@ mod tests {
         let sync = SqliteSyncStateRepository::new(open_encrypted(&db_path, &DB_KEY).unwrap());
         assert!(sync.list_outbox_heads(10).unwrap().is_empty());
         drop(sync);
-        let settings = SqliteSettingsRepository::new(open_encrypted(&db_path, &DB_KEY).unwrap());
+        let metadata =
+            SqliteInternalMetadataRepository::new(open_encrypted(&db_path, &DB_KEY).unwrap());
         assert_eq!(
-            settings.get_setting(SYNC_LOCAL_HLC_SETTING_KEY).unwrap(),
+            metadata
+                .get_internal_metadata(SYNC_LOCAL_HLC_METADATA_KEY)
+                .unwrap(),
             None
         );
     }

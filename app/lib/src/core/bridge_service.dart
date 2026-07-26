@@ -526,12 +526,15 @@ class FrbBridgeService implements BridgeService {
       rust_api.undoTaskOperation(undoId: undoId);
 
   @override
-  Future<String?> getSetting({required String key}) =>
-      rust_api.getSetting(key: key);
+  Future<String?> getFrontendSetting({
+    required rust_api.FrontendSettingKeyDto key,
+  }) => rust_api.getFrontendSetting(key: key);
 
   @override
-  Future<void> setSetting({required String key, required String value}) =>
-      rust_api.setSetting(key: key, value: value);
+  Future<void> setFrontendSetting({
+    required rust_api.FrontendSettingKeyDto key,
+    required String value,
+  }) => rust_api.setFrontendSetting(key: key, value: value);
 
   @override
   Future<rust_api.ReminderDto> createTaskReminder({

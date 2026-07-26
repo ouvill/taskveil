@@ -13,7 +13,7 @@ fn encrypted_connections_have_finite_busy_timeout_and_write_tx_locks_immediately
 
     let _write_tx = SqliteWriteTx::begin(&mut first).unwrap();
     let result = second.execute(
-        "INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, ?3)",
+        "INSERT INTO internal_metadata (key, value, updated_at) VALUES (?1, ?2, ?3)",
         params!["other_writer", "blocked", 1],
     );
     assert!(matches!(

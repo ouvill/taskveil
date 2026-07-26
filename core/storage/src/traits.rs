@@ -93,12 +93,29 @@ pub trait ListRepository {
     fn delete_and_rehome_tasks(&mut self, list_id: Uuid) -> Result<usize, StorageError>;
 }
 
-/// 設定値の永続化を担うリポジトリ。
+/// Frontend-owned application preferences.
+pub trait AppSettingsRepository {
+    fn get_app_setting(&self, key: AppSettingKey) -> Result<Option<String>, StorageError>;
+    fn set_app_setting(
+        &mut self,
+        key: AppSettingKey,
+        value: &str,
+        updated_at: i64,
+    ) -> Result<(), StorageError>;
+}
+
+/// Account, sync, migration, and runtime metadata.
 ///
-/// 値はSQLCipher暗号化DB内に保存し、キーごとの最新値だけを保持する。
-pub trait SettingsRepository {
-    fn get_setting(&self, key: &str) -> Result<Option<String>, StorageError>;
-    fn set_setting(&mut self, key: &str, value: &str, updated_at: i64) -> Result<(), StorageError>;
+/// This repository is internal to the Rust client boundary and must not be
+/// exposed as an arbitrary key/value frontend API.
+pub trait InternalMetadataRepository {
+    fn get_internal_metadata(&self, key: &str) -> Result<Option<String>, StorageError>;
+    fn set_internal_metadata(
+        &mut self,
+        key: &str,
+        value: &str,
+        updated_at: i64,
+    ) -> Result<(), StorageError>;
 }
 
 /// リマインダーの永続化を担うリポジトリ。
