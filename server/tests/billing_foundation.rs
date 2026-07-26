@@ -13,6 +13,7 @@ use sqlx_core::{query::query, raw_sql::raw_sql, row::Row};
 use sqlx_postgres::PgPool;
 use taskveil_protocol::sync::{SYNC_PROTOCOL_VERSION, SYNC_PROTOCOL_VERSION_HEADER};
 use taskveil_server::{
+    auth_protection::AuthProtection,
     billing::{
         BillingEnvironment, BillingProvider, BillingService, ProviderError, ProviderFuture,
         ProviderSnapshot, ProviderSubscriptionSnapshot, SubscriptionStatus, MONTHLY_PRODUCT_ID,
@@ -187,6 +188,8 @@ impl Fixture {
             billing,
             auth_issuer: "http://localhost".to_string(),
             resync_tokens: taskveil_server::resync_token::ResyncTokenKeyring::for_tests(),
+            auth_protection: AuthProtection::new([0xA7; 32]),
+            trust_source_ip_header: false,
         });
         Self {
             app,

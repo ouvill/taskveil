@@ -3,7 +3,10 @@
 //! Lambda-specific adapters stay outside this binary. The reusable router and
 //! services live in the library crate.
 
-use taskveil_server::{build_router_with_realtime, config::RuntimeConfig, db, AppState};
+use taskveil_server::{
+    auth_protection::AuthProtection, build_router_with_realtime, config::RuntimeConfig, db,
+    AppState,
+};
 use tokio::signal;
 
 #[tokio::main]
@@ -18,6 +21,10 @@ async fn main() {
 
 async fn run() -> Result<(), ()> {
     let config = RuntimeConfig::load().await.map_err(|_| ())?;
+    tracing::info!(
+        event = "auth_limit_key_loaded",
+        auth_limit_key_generation = config.auth_limit_hmac_key_generation.get()
+    );
     let pool = db::connect_application(&config.database_url)
         .await
         .map_err(|_| ())?;
@@ -28,6 +35,8 @@ async fn run() -> Result<(), ()> {
             billing: config.billing,
             auth_issuer: config.auth_issuer,
             resync_tokens: config.resync_tokens,
+            auth_protection: AuthProtection::new(config.auth_limit_hmac_key),
+            trust_source_ip_header: config.trust_source_ip_header,
         },
         config.realtime,
     );
@@ -40,10 +49,13 @@ async fn run() -> Result<(), ()> {
         .map_err(|_| ())?;
 
     tracing::info!("taskveil-server listening on port {port}");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .map_err(|_| ())?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .map_err(|_| ())?;
     Ok(())
 }
 

@@ -26,6 +26,10 @@ variable "github_oidc_provider_arn" {
 variable "budget_notification_email" {
   type = string
 }
+variable "auth_limit_hmac_key_generation" {
+  type    = number
+  default = 1
+}
 
 check "staging_inventory" {
   assert {

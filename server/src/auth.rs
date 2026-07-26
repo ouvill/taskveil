@@ -34,6 +34,8 @@ const AUTH_GC_REFRESH_TOKEN_BATCH_SIZE: i64 = 128;
 const AUTH_GC_SESSION_FAMILY_BATCH_SIZE: i64 = 16;
 const AUTH_GC_PENDING_DEVICE_BATCH_SIZE: i64 = 16;
 const AUTH_GC_OPAQUE_STATE_BATCH_SIZE: i64 = 128;
+const MAX_ACTIVE_OPAQUE_STATES: i32 = 4096;
+const MAX_ACTIVE_OPAQUE_STATES_PER_IDENTIFIER: i32 = 32;
 pub const NATIVE_CLIENT_ID: &str = "taskveil-native";
 
 type TaskveilServerSetup = ServerSetup<TaskveilCipherSuite>;
@@ -153,6 +155,7 @@ pub struct AuthContext {
 pub async fn register_start(
     pool: &PgPool,
     request: OpaqueStartRequest,
+    identifier_key: &[u8; 32],
 ) -> Result<RegistrationStartResponse, AppError> {
     validate_opaque_suite(request.opaque_suite_id)?;
     let email = normalize_email(&request.email)?;
@@ -161,7 +164,8 @@ pub async fn register_start(
     let registration_request =
         RegistrationRequest::<TaskveilCipherSuite>::deserialize(&client_message)
             .map_err(|_| AppError::bad_request("invalid opaque message"))?;
-    cleanup_expired_auth_state(pool).await?;
+    cleanup_expired_opaque_states(pool).await?;
+    ensure_opaque_state_capacity_available(pool, identifier_key).await?;
     let server_setup = get_or_create_server_setup(pool).await?;
     let server_start =
         ServerRegistration::start(&server_setup, registration_request, email.as_bytes())
@@ -173,23 +177,27 @@ pub async fn register_start(
     let device_challenge = random_device_challenge();
     let expires_at = Utc::now() + Duration::minutes(OPAQUE_STATE_TTL_MINUTES);
 
-    sqlx::query!(
+    let mut tx = pool.begin().await?;
+    sqlx::query(
         "INSERT INTO opaque_registration_states
             (id, user_id, tenant_id, device_id, device_challenge, email, device_name,
-             opaque_suite_id, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
-        state_id,
-        user_id,
-        tenant_id,
-        device_id,
-        device_challenge.as_slice(),
-        &email,
-        &device_name,
-        i16::try_from(CRYPTO_SUITE_ID).map_err(|_| AppError::internal())?,
-        expires_at,
+             opaque_suite_id, expires_at, identifier_key)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
     )
-    .execute(pool)
-    .await?;
+    .bind(state_id)
+    .bind(user_id)
+    .bind(tenant_id)
+    .bind(device_id)
+    .bind(device_challenge.as_slice())
+    .bind(&email)
+    .bind(&device_name)
+    .bind(i16::try_from(CRYPTO_SUITE_ID).map_err(|_| AppError::internal())?)
+    .bind(expires_at)
+    .bind(identifier_key.as_slice())
+    .execute(&mut *tx)
+    .await
+    .map_err(map_opaque_state_insert_error)?;
+    tx.commit().await?;
 
     Ok(RegistrationStartResponse {
         state_id,
@@ -292,6 +300,7 @@ pub async fn register_finish(
 pub async fn login_start(
     pool: &PgPool,
     request: OpaqueStartRequest,
+    identifier_key: &[u8; 32],
 ) -> Result<LoginStartResponse, AppError> {
     validate_opaque_suite(request.opaque_suite_id)?;
     let email = normalize_email(&request.email)?;
@@ -299,7 +308,8 @@ pub async fn login_start(
     let client_message = decode_opaque_message(&request.message)?;
     let credential_request = CredentialRequest::<TaskveilCipherSuite>::deserialize(&client_message)
         .map_err(|_| AppError::bad_request("invalid opaque message"))?;
-    cleanup_expired_auth_state(pool).await?;
+    cleanup_expired_opaque_states(pool).await?;
+    ensure_opaque_state_capacity_available(pool, identifier_key).await?;
 
     let account = sqlx::query!(
         "SELECT u.id, u.opaque_record, u.opaque_suite_id
@@ -353,11 +363,12 @@ pub async fn login_start(
     let device_id = Uuid::now_v7();
     let device_challenge = random_device_challenge();
     let expires_at = Utc::now() + Duration::minutes(OPAQUE_STATE_TTL_MINUTES);
+    let mut tx = pool.begin().await?;
     sqlx::query(
         "INSERT INTO opaque_login_states
             (id, user_id, tenant_id, device_id, device_challenge, device_name,
-             opaque_suite_id, server_login_state, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+             opaque_suite_id, server_login_state, expires_at, identifier_key)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
     )
     .bind(state_id)
     .bind(user_id)
@@ -368,8 +379,11 @@ pub async fn login_start(
     .bind(i16::try_from(CRYPTO_SUITE_ID).map_err(|_| AppError::internal())?)
     .bind(login_start.state.serialize().to_vec())
     .bind(expires_at)
-    .execute(pool)
-    .await?;
+    .bind(identifier_key.as_slice())
+    .execute(&mut *tx)
+    .await
+    .map_err(map_opaque_state_insert_error)?;
+    tx.commit().await?;
 
     Ok(LoginStartResponse {
         state_id,
@@ -833,8 +847,34 @@ fn validate_native_client(client_id: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+async fn ensure_opaque_state_capacity_available(
+    pool: &PgPool,
+    identifier_key: &[u8; 32],
+) -> Result<(), AppError> {
+    let available = sqlx::query_scalar::<_, bool>(
+        "SELECT
+             global.active_count < $1
+             AND coalesce(identifier.active_count, 0) < $2
+         FROM opaque_state_global_capacity global
+         LEFT JOIN opaque_state_identifier_capacity identifier
+           ON identifier.identifier_key = $3
+         WHERE global.singleton = TRUE",
+    )
+    .bind(MAX_ACTIVE_OPAQUE_STATES)
+    .bind(MAX_ACTIVE_OPAQUE_STATES_PER_IDENTIFIER)
+    .bind(identifier_key.as_slice())
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or(false);
+    if !available {
+        return Err(AppError::rate_limited(None));
+    }
+    Ok(())
+}
+
 pub async fn cleanup_expired_opaque_states(pool: &PgPool) -> Result<u64, AppError> {
-    let registration = sqlx::query!(
+    let mut tx = pool.begin().await?;
+    let registration_ids = sqlx::query_scalar::<_, Uuid>(
         "WITH expired AS (
              SELECT id FROM opaque_registration_states
              WHERE expires_at <= now()
@@ -843,13 +883,13 @@ pub async fn cleanup_expired_opaque_states(pool: &PgPool) -> Result<u64, AppErro
          )
          DELETE FROM opaque_registration_states
          USING expired
-         WHERE opaque_registration_states.id = expired.id",
-        AUTH_GC_OPAQUE_STATE_BATCH_SIZE,
+         WHERE opaque_registration_states.id = expired.id
+         RETURNING opaque_registration_states.id",
     )
-    .execute(pool)
-    .await?
-    .rows_affected();
-    let login = sqlx::query!(
+    .bind(AUTH_GC_OPAQUE_STATE_BATCH_SIZE)
+    .fetch_all(&mut *tx)
+    .await?;
+    let login_ids = sqlx::query_scalar::<_, Uuid>(
         "WITH expired AS (
              SELECT id FROM opaque_login_states
              WHERE expires_at <= now()
@@ -858,13 +898,27 @@ pub async fn cleanup_expired_opaque_states(pool: &PgPool) -> Result<u64, AppErro
          )
          DELETE FROM opaque_login_states
          USING expired
-         WHERE opaque_login_states.id = expired.id",
-        AUTH_GC_OPAQUE_STATE_BATCH_SIZE,
+         WHERE opaque_login_states.id = expired.id
+         RETURNING opaque_login_states.id",
     )
-    .execute(pool)
-    .await?
-    .rows_affected();
-    Ok(registration + login)
+    .bind(AUTH_GC_OPAQUE_STATE_BATCH_SIZE)
+    .fetch_all(&mut *tx)
+    .await?;
+    let removed = registration_ids.len() + login_ids.len();
+    tx.commit().await?;
+    u64::try_from(removed).map_err(|_| AppError::internal())
+}
+
+fn map_opaque_state_insert_error(error: sqlx_core::Error) -> AppError {
+    if error
+        .as_database_error()
+        .and_then(|database_error| database_error.code())
+        .is_some_and(|code| code == "P0429")
+    {
+        AppError::rate_limited(None)
+    } else {
+        error.into()
+    }
 }
 
 pub async fn cleanup_expired_auth_state(pool: &PgPool) -> Result<u64, AppError> {
@@ -973,9 +1027,9 @@ pub async fn cleanup_expired_auth_state(pool: &PgPool) -> Result<u64, AppError> 
         + cleanup_expired_opaque_states(pool).await?)
 }
 
-fn normalize_email(email: &str) -> Result<String, AppError> {
+pub(crate) fn normalize_email(email: &str) -> Result<String, AppError> {
     let email = email.trim().to_ascii_lowercase();
-    if email.is_empty() || email.len() > 320 || !email.contains('@') {
+    if email.is_empty() || email.len() > 320 || !email.is_ascii() || !email.contains('@') {
         return Err(AppError::bad_request("invalid email"));
     }
     Ok(email)
@@ -1506,4 +1560,19 @@ fn map_insert_user_error(error: sqlx_core::Error) -> AppError {
         }
     }
     AppError::from(error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_email;
+
+    #[test]
+    fn email_canonicalization_rejects_unicode_case_variants() {
+        assert_eq!(
+            normalize_email(" Alice@Example.COM ").expect("ASCII email"),
+            "alice@example.com"
+        );
+        assert!(normalize_email("élise@example.com").is_err());
+        assert!(normalize_email("ÉLISE@example.com").is_err());
+    }
 }

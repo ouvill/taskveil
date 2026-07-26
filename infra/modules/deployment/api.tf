@@ -17,6 +17,11 @@ resource "aws_apigatewayv2_integration" "server" {
   integration_method     = "POST"
   payload_format_version = "2.0"
   timeout_milliseconds   = 30000
+  request_parameters = {
+    # The application trusts this header only when the matching runtime flag
+    # is enabled. Overwrite prevents a public caller from choosing its bucket.
+    "overwrite:header.x-taskveil-source-ip" = "$context.identity.sourceIp"
+  }
 }
 
 resource "aws_apigatewayv2_route" "default" {

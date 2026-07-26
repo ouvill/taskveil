@@ -29,6 +29,7 @@ jobs:
       TF_VAR_cloudflare_zone_id: ${{ vars.CLOUDFLARE_ZONE_ID }}
       TF_VAR_neon_project_id: ${{ vars.NEON_PROJECT_ID }}
       TF_VAR_lambda_image_uri: ${{ vars.LAMBDA_BOOTSTRAP_IMAGE_URI }}
+      TF_VAR_auth_limit_hmac_key_generation: ${{ vars.AUTH_LIMIT_HMAC_KEY_GENERATION }}
       TF_VAR_github_repository: ${{ github.repository }}
       TF_VAR_github_oidc_provider_arn: ${{ vars.OIDC_PROVIDER_ARN }}
       TF_VAR_budget_notification_email: ${{ vars.BUDGET_NOTIFICATION_EMAIL }}

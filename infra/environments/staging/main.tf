@@ -1,17 +1,18 @@
 module "deployment" {
   source = "../../modules/deployment"
 
-  environment               = "staging"
-  aws_account_id            = var.aws_account_id
-  base_domain               = var.base_domain
-  cloudflare_account_id     = var.cloudflare_account_id
-  cloudflare_zone_id        = var.cloudflare_zone_id
-  lambda_image_uri          = var.lambda_image_uri
-  github_repository         = var.github_repository
-  github_oidc_provider_arn  = var.github_oidc_provider_arn
-  enable_github_deploy_role = true
-  budget_notification_email = var.budget_notification_email
-  budget_limit_usd          = 5
+  environment                    = "staging"
+  aws_account_id                 = var.aws_account_id
+  base_domain                    = var.base_domain
+  cloudflare_account_id          = var.cloudflare_account_id
+  cloudflare_zone_id             = var.cloudflare_zone_id
+  lambda_image_uri               = var.lambda_image_uri
+  github_repository              = var.github_repository
+  github_oidc_provider_arn       = var.github_oidc_provider_arn
+  enable_github_deploy_role      = true
+  budget_notification_email      = var.budget_notification_email
+  auth_limit_hmac_key_generation = var.auth_limit_hmac_key_generation
+  budget_limit_usd               = 5
 }
 
 output "deployment" {

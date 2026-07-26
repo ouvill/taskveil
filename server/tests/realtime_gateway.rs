@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use sqlx_core::{query::query, raw_sql::raw_sql};
 use sqlx_postgres::PgPool;
 use taskveil_server::{
+    auth_protection::AuthProtection,
     billing::{BillingEnvironment, BillingService},
     build_router, build_router_with_realtime, db,
     realtime::{RealtimeGateway, RealtimeSettings, RealtimeTicketResponse},
@@ -201,6 +202,8 @@ impl Fixture {
             billing: BillingService::unavailable_for_tests(BillingEnvironment::Sandbox),
             auth_issuer: "http://localhost".to_string(),
             resync_tokens: taskveil_server::resync_token::ResyncTokenKeyring::for_tests(),
+            auth_protection: AuthProtection::new([0xA7; 32]),
+            trust_source_ip_header: false,
         })
     }
 
@@ -211,6 +214,8 @@ impl Fixture {
                 billing: BillingService::unavailable_for_tests(BillingEnvironment::Sandbox),
                 auth_issuer: "http://localhost".to_string(),
                 resync_tokens: taskveil_server::resync_token::ResyncTokenKeyring::for_tests(),
+                auth_protection: AuthProtection::new([0xA7; 32]),
+                trust_source_ip_header: false,
             },
             RealtimeGateway::from_settings(settings()).unwrap(),
         )

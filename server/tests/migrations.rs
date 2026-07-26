@@ -283,6 +283,7 @@ async fn migrator_records_versions_skips_applied_sql_and_rejects_checksum_change
         .iter()
         .map(|path| migration_version(path))
         .collect::<Vec<_>>();
+    assert!(expected_versions.contains(&202607260005));
 
     db::run_migrations(&fixture.pool).await.unwrap();
 

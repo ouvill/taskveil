@@ -15,6 +15,9 @@ if grep -R -n -E 'secret_string|aws_secretsmanager_secret_version' infra --inclu
 fi
 
 grep -q 'TASKVEIL_RUNTIME_SECRET_ID' infra/modules/deployment/lambda.tf || fail "Lambda must receive the runtime secret ID"
+grep -Fq '"overwrite:header.x-taskveil-source-ip" = "$context.identity.sourceIp"' infra/modules/deployment/api.tf || fail "API Gateway must overwrite the trusted source IP header"
+grep -q 'TASKVEIL_TRUST_SOURCE_IP_HEADER[[:space:]]*= "true"' infra/modules/deployment/lambda.tf || fail "Lambda must trust the source IP header only with the overwrite mapping"
+grep -q 'TASKVEIL_AUTH_LIMIT_HMAC_KEY_GENERATION[[:space:]]*= tostring(var.auth_limit_hmac_key_generation)' infra/modules/deployment/lambda.tf || fail "Lambda must expose a nonsecret auth limit key generation"
 if grep -q 'DATABASE_MIGRATION_URL' infra/modules/deployment/lambda.tf; then
   fail "Lambda runtime must not receive migration credentials"
 fi

@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod auth_protection;
 pub mod billing;
 pub mod config;
 pub mod db;
@@ -16,7 +17,7 @@ use axum::{
 use realtime::RealtimeGateway;
 use serde::Serialize;
 use sqlx_postgres::PgPool;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -24,6 +25,8 @@ pub struct AppState {
     pub billing: billing::BillingService,
     pub auth_issuer: String,
     pub resync_tokens: resync_token::ResyncTokenKeyring,
+    pub auth_protection: auth_protection::AuthProtection,
+    pub trust_source_ip_header: bool,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -44,6 +47,7 @@ pub struct AppError {
     message: &'static str,
     bearer_challenge: bool,
     problem: Option<ProblemMetadata>,
+    retry_after: Option<Duration>,
 }
 
 #[derive(Debug)]
@@ -72,6 +76,7 @@ impl AppError {
             message,
             bearer_challenge: false,
             problem: None,
+            retry_after: None,
         }
     }
 
@@ -81,6 +86,7 @@ impl AppError {
             message: "unauthorized",
             bearer_challenge: false,
             problem: None,
+            retry_after: None,
         }
     }
 
@@ -90,6 +96,7 @@ impl AppError {
             message: "unauthorized",
             bearer_challenge: true,
             problem: None,
+            retry_after: None,
         }
     }
 
@@ -99,6 +106,7 @@ impl AppError {
             message: "invalid_grant",
             bearer_challenge: false,
             problem: None,
+            retry_after: None,
         }
     }
 
@@ -108,6 +116,7 @@ impl AppError {
             message: "forbidden",
             bearer_challenge: false,
             problem: None,
+            retry_after: None,
         }
     }
 
@@ -117,6 +126,7 @@ impl AppError {
             message,
             bearer_challenge: false,
             problem: None,
+            retry_after: None,
         }
     }
 
@@ -126,6 +136,7 @@ impl AppError {
             message,
             bearer_challenge: false,
             problem: None,
+            retry_after: None,
         }
     }
 
@@ -138,6 +149,7 @@ impl AppError {
                 problem_type: taskveil_protocol::sync::SYNC_CLOCK_SKEW_RETRYABLE_TYPE,
                 code: taskveil_protocol::sync::SYNC_CLOCK_SKEW_RETRYABLE_CODE,
             }),
+            retry_after: Some(Duration::from_secs(1)),
         }
     }
 
@@ -147,6 +159,7 @@ impl AppError {
             message,
             bearer_challenge: false,
             problem: None,
+            retry_after: None,
         }
     }
 
@@ -156,6 +169,7 @@ impl AppError {
             message: "internal server error",
             bearer_challenge: false,
             problem: None,
+            retry_after: None,
         }
     }
 
@@ -165,6 +179,7 @@ impl AppError {
             message,
             bearer_challenge: false,
             problem: None,
+            retry_after: None,
         }
     }
 
@@ -174,6 +189,17 @@ impl AppError {
             message,
             bearer_challenge: false,
             problem: None,
+            retry_after: None,
+        }
+    }
+
+    pub fn rate_limited(retry_after_seconds: Option<u64>) -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: "too many requests",
+            bearer_challenge: false,
+            problem: None,
+            retry_after: retry_after_seconds.map(Duration::from_secs),
         }
     }
 }
@@ -202,9 +228,11 @@ impl IntoResponse for AppError {
                 header::CONTENT_TYPE,
                 HeaderValue::from_static("application/problem+json"),
             );
-            response
-                .headers_mut()
-                .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+        }
+        if let Some(retry_after) = self.retry_after {
+            if let Ok(value) = HeaderValue::from_str(&retry_after.as_secs().to_string()) {
+                response.headers_mut().insert(header::RETRY_AFTER, value);
+            }
         }
         response
     }

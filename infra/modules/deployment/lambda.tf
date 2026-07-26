@@ -17,14 +17,16 @@ resource "aws_lambda_function" "server" {
 
   environment {
     variables = {
-      TASKVEIL_RUNTIME_SECRET_ID             = data.aws_secretsmanager_secret.runtime.arn
-      TASKVEIL_BILLING_ENVIRONMENT           = var.environment == "staging" ? "sandbox" : "production"
-      TASKVEIL_AUTH_ISSUER                   = "https://${local.api_domain}"
-      PARAMETERS_SECRETS_EXTENSION_HTTP_PORT = "2773"
-      PARAMETERS_SECRETS_EXTENSION_LOG_LEVEL = "ERROR"
-      SECRETS_MANAGER_TTL                    = "300"
-      PORT                                   = "8080"
-      RUST_LOG                               = "info,taskveil_server=info"
+      TASKVEIL_RUNTIME_SECRET_ID              = data.aws_secretsmanager_secret.runtime.arn
+      TASKVEIL_BILLING_ENVIRONMENT            = var.environment == "staging" ? "sandbox" : "production"
+      TASKVEIL_AUTH_ISSUER                    = "https://${local.api_domain}"
+      TASKVEIL_AUTH_LIMIT_HMAC_KEY_GENERATION = tostring(var.auth_limit_hmac_key_generation)
+      TASKVEIL_TRUST_SOURCE_IP_HEADER         = "true"
+      PARAMETERS_SECRETS_EXTENSION_HTTP_PORT  = "2773"
+      PARAMETERS_SECRETS_EXTENSION_LOG_LEVEL  = "ERROR"
+      SECRETS_MANAGER_TTL                     = "300"
+      PORT                                    = "8080"
+      RUST_LOG                                = "info,taskveil_server=info"
     }
   }
 

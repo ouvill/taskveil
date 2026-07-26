@@ -49,6 +49,7 @@ mod tests {
 
     use super::*;
     use crate::{
+        auth_protection::AuthProtection,
         billing::{BillingEnvironment, BillingService},
         AppState,
     };
@@ -64,6 +65,8 @@ mod tests {
             billing: BillingService::unavailable_for_tests(BillingEnvironment::Sandbox),
             auth_issuer: "http://localhost".to_string(),
             resync_tokens: crate::resync_token::ResyncTokenKeyring::for_tests(),
+            auth_protection: AuthProtection::new([0xA7; 32]),
+            trust_source_ip_header: false,
         });
         let (status, Json(body)) = ready(State(state)).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);

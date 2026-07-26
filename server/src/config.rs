@@ -1,5 +1,6 @@
-use std::{collections::HashMap, env, future::Future};
+use std::{collections::HashMap, env, fmt, future::Future, num::NonZeroU64};
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use reqwest::{header::HeaderValue, Url};
 use serde::Deserialize;
 use thiserror::Error;
@@ -13,6 +14,9 @@ use crate::{
 const DATABASE_URL: &str = "DATABASE_URL";
 const BILLING_ENVIRONMENT: &str = "TASKVEIL_BILLING_ENVIRONMENT";
 const AUTH_ISSUER: &str = "TASKVEIL_AUTH_ISSUER";
+const AUTH_LIMIT_HMAC_KEY: &str = "TASKVEIL_AUTH_LIMIT_HMAC_KEY";
+const AUTH_LIMIT_HMAC_KEY_GENERATION: &str = "TASKVEIL_AUTH_LIMIT_HMAC_KEY_GENERATION";
+const TRUST_SOURCE_IP_HEADER: &str = "TASKVEIL_TRUST_SOURCE_IP_HEADER";
 const RUNTIME_SECRET_ID: &str = "TASKVEIL_RUNTIME_SECRET_ID";
 const EXTENSION_PORT: &str = "PARAMETERS_SECRETS_EXTENSION_HTTP_PORT";
 const AWS_SESSION_TOKEN: &str = "AWS_SESSION_TOKEN";
@@ -23,6 +27,24 @@ pub struct RuntimeConfig {
     pub realtime: RealtimeGateway,
     pub auth_issuer: String,
     pub resync_tokens: ResyncTokenKeyring,
+    pub auth_limit_hmac_key: [u8; 32],
+    pub auth_limit_hmac_key_generation: AuthLimitKeyGeneration,
+    pub trust_source_ip_header: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuthLimitKeyGeneration(NonZeroU64);
+
+impl AuthLimitKeyGeneration {
+    pub fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+impl fmt::Display for AuthLimitKeyGeneration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -37,6 +59,12 @@ pub enum RuntimeConfigError {
     ResyncToken(#[from] ResyncTokenConfigError),
     #[error("authorization server issuer is invalid")]
     InvalidAuthIssuer,
+    #[error("authentication limit HMAC key is invalid")]
+    InvalidAuthLimitHmacKey,
+    #[error("authentication limit HMAC key generation is invalid")]
+    InvalidAuthLimitHmacKeyGeneration,
+    #[error("trusted source IP header setting is invalid")]
+    InvalidTrustedSourceIpHeader,
     #[error("runtime secret extension request failed")]
     ExtensionRequest,
     #[error("runtime secret payload is invalid")]
@@ -74,6 +102,12 @@ impl RuntimeConfig {
         if let Some(secret_id) = secret_id {
             let values = fetch(secret_id).await?;
             Self::from_values(environment, |name| {
+                if matches!(
+                    name,
+                    TRUST_SOURCE_IP_HEADER | AUTH_LIMIT_HMAC_KEY_GENERATION
+                ) {
+                    return local_lookup(name);
+                }
                 values.get(name).cloned().or_else(|| {
                     if name == AUTH_ISSUER {
                         local_lookup(name)
@@ -103,6 +137,22 @@ impl RuntimeConfig {
         let database_url = lookup(DATABASE_URL).ok_or(RuntimeConfigError::Missing(DATABASE_URL))?;
         let auth_issuer = lookup(AUTH_ISSUER).ok_or(RuntimeConfigError::Missing(AUTH_ISSUER))?;
         validate_auth_issuer(&auth_issuer)?;
+        let auth_limit_hmac_key = decode_auth_limit_hmac_key(
+            &lookup(AUTH_LIMIT_HMAC_KEY).ok_or(RuntimeConfigError::Missing(AUTH_LIMIT_HMAC_KEY))?,
+        )?;
+        let auth_limit_hmac_key_generation = lookup(AUTH_LIMIT_HMAC_KEY_GENERATION)
+            .ok_or(RuntimeConfigError::Missing(AUTH_LIMIT_HMAC_KEY_GENERATION))?
+            .parse::<NonZeroU64>()
+            .map(AuthLimitKeyGeneration)
+            .map_err(|_| RuntimeConfigError::InvalidAuthLimitHmacKeyGeneration)?;
+        let trust_source_ip_header = lookup(TRUST_SOURCE_IP_HEADER)
+            .map(|value| match value.as_str() {
+                "true" => Ok(true),
+                "false" => Ok(false),
+                _ => Err(RuntimeConfigError::InvalidTrustedSourceIpHeader),
+            })
+            .transpose()?
+            .unwrap_or(false);
         let billing = BillingService::from_values(environment, lookup)?;
         let realtime = RealtimeGateway::from_string_values(lookup)?;
         let resync_tokens = ResyncTokenKeyring::from_string_values(lookup)?;
@@ -112,8 +162,19 @@ impl RuntimeConfig {
             realtime,
             auth_issuer,
             resync_tokens,
+            auth_limit_hmac_key,
+            auth_limit_hmac_key_generation,
+            trust_source_ip_header,
         })
     }
+}
+
+fn decode_auth_limit_hmac_key(value: &str) -> Result<[u8; 32], RuntimeConfigError> {
+    STANDARD
+        .decode(value)
+        .map_err(|_| RuntimeConfigError::InvalidAuthLimitHmacKey)?
+        .try_into()
+        .map_err(|_| RuntimeConfigError::InvalidAuthLimitHmacKey)
 }
 
 fn validate_auth_issuer(issuer: &str) -> Result<(), RuntimeConfigError> {
@@ -172,6 +233,8 @@ mod tests {
             "TASKVEIL_AUTH_ISSUER":"https://api.staging.taskveil.example",
             "TASKVEIL_RESYNC_TOKEN_KEY_CURRENT_ID":"resync-2026-07",
             "TASKVEIL_RESYNC_TOKEN_KEY_CURRENT":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "TASKVEIL_AUTH_LIMIT_HMAC_KEY":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "TASKVEIL_AUTH_LIMIT_HMAC_KEY_GENERATION":"1",
             "REVENUECAT_SANDBOX_PROJECT_ID":"sandbox-project",
             "REVENUECAT_SANDBOX_APP_ID":"sandbox-app",
             "REVENUECAT_SANDBOX_SECRET_KEY":"sandbox-secret",
@@ -186,6 +249,8 @@ mod tests {
             "TASKVEIL_AUTH_ISSUER":"https://api.taskveil.example",
             "TASKVEIL_RESYNC_TOKEN_KEY_CURRENT_ID":"resync-2026-07",
             "TASKVEIL_RESYNC_TOKEN_KEY_CURRENT":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "TASKVEIL_AUTH_LIMIT_HMAC_KEY":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "TASKVEIL_AUTH_LIMIT_HMAC_KEY_GENERATION":"2",
             "REVENUECAT_PRODUCTION_PROJECT_ID":"production-project",
             "REVENUECAT_PRODUCTION_APP_ID":"production-app",
             "REVENUECAT_PRODUCTION_SECRET_KEY":"production-secret",
@@ -221,11 +286,17 @@ mod tests {
                 assert_eq!(secret_id, "taskveil-staging/runtime");
                 Ok(values)
             },
-            |_| panic!("local environment fallback must not run in Lambda mode"),
+            |name| match name {
+                TRUST_SOURCE_IP_HEADER => None,
+                AUTH_LIMIT_HMAC_KEY_GENERATION => Some("7".to_string()),
+                _ => panic!("unexpected local config lookup: {name}"),
+            },
         )
         .await
         .expect("extension-backed config");
         assert_eq!(config.billing.environment(), BillingEnvironment::Sandbox);
+        assert_eq!(config.auth_limit_hmac_key_generation.get(), 7);
+        assert!(!config.trust_source_ip_header);
     }
 
     #[tokio::test]
@@ -264,6 +335,61 @@ mod tests {
     }
 
     #[test]
+    fn authentication_limit_key_requires_exactly_32_base64_bytes() {
+        assert_eq!(
+            decode_auth_limit_hmac_key("not-base64")
+                .unwrap_err()
+                .to_string(),
+            "authentication limit HMAC key is invalid"
+        );
+        assert_eq!(
+            decode_auth_limit_hmac_key("c2hvcnQ=")
+                .unwrap_err()
+                .to_string(),
+            "authentication limit HMAC key is invalid"
+        );
+        decode_auth_limit_hmac_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+            .expect("32-byte key");
+    }
+
+    #[tokio::test]
+    async fn trusted_source_header_requires_an_explicit_boolean_setting() {
+        let values: HashMap<String, String> = serde_json::from_str(sandbox_secret()).unwrap();
+        let config = RuntimeConfig::load_from_sources(
+            BillingEnvironment::Sandbox,
+            Some("taskveil-staging/runtime".to_string()),
+            move |_| async move { Ok(values) },
+            |name| match name {
+                TRUST_SOURCE_IP_HEADER => Some("true".to_string()),
+                AUTH_LIMIT_HMAC_KEY_GENERATION => Some("1".to_string()),
+                _ => None,
+            },
+        )
+        .await
+        .expect("trusted ingress config");
+        assert!(config.trust_source_ip_header);
+
+        let values: HashMap<String, String> = serde_json::from_str(sandbox_secret()).unwrap();
+        let error = RuntimeConfig::load_from_sources(
+            BillingEnvironment::Sandbox,
+            Some("taskveil-staging/runtime".to_string()),
+            move |_| async move { Ok(values) },
+            |name| match name {
+                TRUST_SOURCE_IP_HEADER => Some("yes".to_string()),
+                AUTH_LIMIT_HMAC_KEY_GENERATION => Some("1".to_string()),
+                _ => None,
+            },
+        )
+        .await
+        .err()
+        .expect("non-boolean trust setting must fail");
+        assert!(matches!(
+            error,
+            RuntimeConfigError::InvalidTrustedSourceIpHeader
+        ));
+    }
+
+    #[test]
     fn authorization_server_issuer_rejects_insecure_remote_and_non_root_urls() {
         assert!(matches!(
             validate_auth_issuer("http://api.taskveil.example"),
@@ -275,5 +401,20 @@ mod tests {
         ));
         validate_auth_issuer("https://api.taskveil.example").expect("production issuer");
         validate_auth_issuer("http://127.0.0.1:3000").expect("local development issuer");
+    }
+
+    #[test]
+    fn authentication_limit_key_generation_is_positive_and_nonsecret() {
+        let mut values: HashMap<String, String> = serde_json::from_str(sandbox_secret()).unwrap();
+        values.insert(AUTH_LIMIT_HMAC_KEY_GENERATION.to_string(), "0".to_string());
+        let error = RuntimeConfig::from_values(BillingEnvironment::Sandbox, |name| {
+            values.get(name).cloned()
+        })
+        .err()
+        .expect("zero generation must fail");
+        assert!(matches!(
+            error,
+            RuntimeConfigError::InvalidAuthLimitHmacKeyGeneration
+        ));
     }
 }

@@ -26,6 +26,7 @@ use taskveil_client::test_support::{
 use taskveil_crypto::{key_hierarchy::wrap_tenant_root_dek_with_master_key, CRYPTO_SUITE_ID};
 use taskveil_server::{
     auth::AuthContext,
+    auth_protection::AuthProtection,
     billing::{BillingEnvironment, BillingService},
     build_router, db,
     sync::{self, gc_tombstones},
@@ -287,6 +288,8 @@ impl Fixture {
             billing: BillingService::unavailable_for_tests(BillingEnvironment::Sandbox),
             auth_issuer: "http://localhost".to_string(),
             resync_tokens: resync_tokens.clone(),
+            auth_protection: AuthProtection::new([0xA7; 32]),
+            trust_source_ip_header: false,
         });
         Self {
             app,

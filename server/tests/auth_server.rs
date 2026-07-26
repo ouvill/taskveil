@@ -1,11 +1,12 @@
 use axum::{
     body::Body,
     http::{Method, Request, StatusCode},
+    response::IntoResponse,
     Router,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::Utc;
-use opaque_ke::{ClientLogin, CredentialResponse};
+use opaque_ke::{ClientLogin, ClientRegistration, CredentialResponse};
 use rand::rngs::OsRng;
 use serde_json::Value;
 use sqlx_core::{query::query, raw_sql::raw_sql, row::Row};
@@ -13,6 +14,7 @@ use sqlx_postgres::{PgPool, Postgres};
 use taskveil_crypto::{opaque_login_parameters, TaskveilCipherSuite, CRYPTO_SUITE_ID};
 use taskveil_server::{
     auth,
+    auth_protection::AuthProtection,
     billing::{BillingEnvironment, BillingService},
     build_router, db, AppState,
 };
@@ -29,6 +31,7 @@ use uuid::Uuid;
 struct TestApp {
     app: Router,
     pool: PgPool,
+    application_pool: PgPool,
     _postgres: ContainerAsync<postgres::Postgres>,
 }
 
@@ -54,14 +57,17 @@ async fn setup() -> TestApp {
         format!("postgres://taskveil_runtime_test:taskveil-runtime-test@{host}:{port}/postgres");
     let application_pool = db::connect_application(&application_url).await.unwrap();
     let app = build_router(AppState {
-        pool: application_pool,
+        pool: application_pool.clone(),
         billing: BillingService::unavailable_for_tests(BillingEnvironment::Sandbox),
         auth_issuer: "http://localhost".to_string(),
         resync_tokens: taskveil_server::resync_token::ResyncTokenKeyring::for_tests(),
+        auth_protection: AuthProtection::new([0xA7; 32]),
+        trust_source_ip_header: false,
     });
     TestApp {
         app,
         pool,
+        application_pool,
         _postgres: postgres,
     }
 }
@@ -563,6 +569,432 @@ async fn account_register_login_refresh_reuse_and_revocation_are_enforced() {
     .try_get("count")
     .unwrap();
     assert_eq!(obsolete_public_key_columns, 0);
+    assert_opaque_capacity_matches_states(&test.pool).await;
+}
+
+#[tokio::test]
+async fn opaque_capacity_claims_rollback_serialize_and_cleanup_in_bounded_batches() {
+    let test = setup().await;
+    let direct_counter_write = query::<Postgres>(
+        "UPDATE opaque_state_global_capacity SET active_count = 1 WHERE singleton = TRUE",
+    )
+    .execute(&test.application_pool)
+    .await
+    .expect_err("runtime role must not write capacity counters directly");
+    assert_eq!(
+        direct_counter_write
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("42501")
+    );
+    let function_privileges = query::<Postgres>(
+        "SELECT
+             bool_and(owner.rolname <> 'taskveil_app') AS owner_is_not_app,
+             bool_and(NOT has_function_privilege(
+                 'taskveil_app',
+                 format('%I.%I()', namespace.nspname, function.proname),
+                 'EXECUTE'
+             )) AS app_cannot_execute
+         FROM pg_proc function
+         JOIN pg_namespace namespace ON namespace.oid = function.pronamespace
+         JOIN pg_roles owner ON owner.oid = function.proowner
+         WHERE namespace.nspname = 'public'
+           AND function.proname IN (
+               'taskveil_claim_opaque_state_capacity',
+               'taskveil_release_opaque_state_capacity'
+           )",
+    )
+    .fetch_one(&test.pool)
+    .await
+    .unwrap();
+    assert!(function_privileges
+        .try_get::<bool, _>("owner_is_not_app")
+        .unwrap());
+    assert!(function_privileges
+        .try_get::<bool, _>("app_cannot_execute")
+        .unwrap());
+    raw_sql("DROP TRIGGER opaque_registration_state_capacity_claim ON opaque_registration_states")
+        .execute(&test.application_pool)
+        .await
+        .expect_err("runtime role must not tamper with capacity triggers");
+
+    let legacy_state_id = Uuid::now_v7();
+    query::<Postgres>(
+        "INSERT INTO opaque_registration_states
+            (id, user_id, tenant_id, device_id, device_challenge, email, device_name,
+             opaque_suite_id, expires_at)
+         VALUES ($1, $2, $3, $4, $5, 'legacy@example.com', 'legacy deployment', 2,
+                 now() + interval '10 minutes')",
+    )
+    .bind(legacy_state_id)
+    .bind(Uuid::now_v7())
+    .bind(Uuid::now_v7())
+    .bind(Uuid::now_v7())
+    .bind(vec![0x91u8; 32])
+    .execute(&test.application_pool)
+    .await
+    .expect("old code insert without identifier_key must remain globally bounded");
+    assert_eq!(global_opaque_capacity(&test.pool).await, 1);
+    assert_eq!(opaque_capacity_lease_count(&test.pool).await, 1);
+    query::<Postgres>("DELETE FROM opaque_registration_states WHERE id = $1")
+        .bind(legacy_state_id)
+        .execute(&test.application_pool)
+        .await
+        .expect("old code delete must release its database-owned lease");
+    assert_eq!(global_opaque_capacity(&test.pool).await, 0);
+    assert_eq!(opaque_capacity_lease_count(&test.pool).await, 0);
+    query::<Postgres>("UPDATE opaque_registration_states SET identifier_key = $2 WHERE id = $1")
+        .bind(Uuid::now_v7())
+        .bind([0x95u8; 32].as_slice())
+        .execute(&test.application_pool)
+        .await
+        .expect_err("runtime role must not mutate trigger-accounted state");
+
+    let saturated_identifier = [0x61; 32];
+    query::<Postgres>(
+        "INSERT INTO opaque_state_identifier_capacity (identifier_key, active_count)
+         VALUES ($1, 32)",
+    )
+    .bind(saturated_identifier.as_slice())
+    .execute(&test.pool)
+    .await
+    .unwrap();
+
+    let identifier_limited = auth::register_start(
+        &test.application_pool,
+        registration_start_request("identifier-limit@example.com"),
+        &saturated_identifier,
+    )
+    .await
+    .expect_err("identifier capacity must reject");
+    let identifier_limited = identifier_limited.into_response();
+    assert_eq!(identifier_limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(identifier_limited
+        .headers()
+        .get(axum::http::header::RETRY_AFTER)
+        .is_none());
+    assert_eq!(global_opaque_capacity(&test.pool).await, 0);
+    assert_eq!(opaque_capacity_lease_count(&test.pool).await, 0);
+    query::<Postgres>("DELETE FROM opaque_state_identifier_capacity")
+        .execute(&test.pool)
+        .await
+        .unwrap();
+
+    let keyed_identifier = [0x65u8; 32];
+    for index in 0..32 {
+        query::<Postgres>(
+            "INSERT INTO opaque_registration_states
+                (id, user_id, tenant_id, device_id, device_challenge, email, device_name,
+                 opaque_suite_id, expires_at, identifier_key)
+             VALUES ($1, $2, $3, $4, $5, $6, 'keyed cap', 2,
+                     now() + interval '10 minutes', $7)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(Uuid::now_v7())
+        .bind(Uuid::now_v7())
+        .bind(Uuid::now_v7())
+        .bind(vec![0x92u8; 32])
+        .bind(format!("keyed-cap-{index}@example.com"))
+        .bind(keyed_identifier.as_slice())
+        .execute(&test.application_pool)
+        .await
+        .unwrap();
+    }
+    let keyed_cap = query::<Postgres>(
+        "INSERT INTO opaque_registration_states
+            (id, user_id, tenant_id, device_id, device_challenge, email, device_name,
+             opaque_suite_id, expires_at, identifier_key)
+         VALUES ($1, $2, $3, $4, $5, 'keyed-cap-rejected@example.com', 'keyed cap', 2,
+                 now() + interval '10 minutes', $6)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(Uuid::now_v7())
+    .bind(Uuid::now_v7())
+    .bind(Uuid::now_v7())
+    .bind(vec![0x93u8; 32])
+    .bind(keyed_identifier.as_slice())
+    .execute(&test.application_pool)
+    .await
+    .expect_err("database trigger must enforce the keyed cap");
+    assert_eq!(
+        keyed_cap
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("P0429")
+    );
+    query::<Postgres>("DELETE FROM opaque_registration_states WHERE device_name = 'keyed cap'")
+        .execute(&test.application_pool)
+        .await
+        .unwrap();
+    assert_opaque_capacity_matches_states(&test.pool).await;
+
+    raw_sql(
+        "CREATE FUNCTION reject_opaque_registration_state() RETURNS trigger
+         LANGUAGE plpgsql AS $$
+         BEGIN
+             RAISE EXCEPTION 'injected insert failure';
+         END;
+         $$;
+         CREATE TRIGGER reject_opaque_registration_state
+         BEFORE INSERT ON opaque_registration_states
+         FOR EACH ROW EXECUTE FUNCTION reject_opaque_registration_state();",
+    )
+    .execute(&test.pool)
+    .await
+    .unwrap();
+    let failed_insert = auth::register_start(
+        &test.application_pool,
+        registration_start_request("rollback@example.com"),
+        &[0x62; 32],
+    )
+    .await
+    .expect_err("injected state insert must fail");
+    assert_eq!(
+        failed_insert.into_response().status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(global_opaque_capacity(&test.pool).await, 0);
+    assert_eq!(opaque_capacity_lease_count(&test.pool).await, 0);
+    let identifier_capacity_count: i64 =
+        query::<Postgres>("SELECT count(*) AS count FROM opaque_state_identifier_capacity")
+            .fetch_one(&test.pool)
+            .await
+            .unwrap()
+            .try_get("count")
+            .unwrap();
+    assert_eq!(identifier_capacity_count, 0);
+    raw_sql(
+        "DROP TRIGGER reject_opaque_registration_state ON opaque_registration_states;
+         DROP FUNCTION reject_opaque_registration_state();",
+    )
+    .execute(&test.pool)
+    .await
+    .unwrap();
+
+    raw_sql(
+        "INSERT INTO opaque_registration_states
+            (id, user_id, tenant_id, device_id, device_challenge, email, device_name,
+             opaque_suite_id, expires_at)
+         SELECT
+             lpad(to_hex(sequence), 32, '0')::uuid,
+             '00000000-0000-0000-0000-000000000001'::uuid,
+             '00000000-0000-0000-0000-000000000002'::uuid,
+             '00000000-0000-0000-0000-000000000003'::uuid,
+             decode(repeat('94', 32), 'hex'),
+             'concurrency-fill-' || sequence || '@example.com',
+             'legacy concurrency fill',
+             2,
+             now() + interval '10 minutes'
+         FROM generate_series(1, 4095) AS sequence",
+    )
+    .execute(&test.pool)
+    .await
+    .unwrap();
+    assert_opaque_capacity_matches_states(&test.pool).await;
+    let first = auth::register_start(
+        &test.application_pool,
+        registration_start_request("concurrent-a@example.com"),
+        &[0x63; 32],
+    );
+    let second = auth::register_start(
+        &test.application_pool,
+        registration_start_request("concurrent-b@example.com"),
+        &[0x64; 32],
+    );
+    let (first, second) = tokio::join!(first, second);
+    assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+    let rejected = if let Err(error) = first {
+        error
+    } else {
+        second.expect_err("one concurrent claim must reject")
+    };
+    let rejected = rejected.into_response();
+    assert_eq!(rejected.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(rejected
+        .headers()
+        .get(axum::http::header::RETRY_AFTER)
+        .is_none());
+    assert_eq!(global_opaque_capacity(&test.pool).await, 4096);
+    assert_eq!(opaque_capacity_lease_count(&test.pool).await, 4096);
+    assert_opaque_capacity_matches_states(&test.pool).await;
+
+    raw_sql(
+        "DELETE FROM opaque_registration_states;
+         DELETE FROM opaque_login_states;
+         DELETE FROM opaque_state_capacity_leases;
+         DELETE FROM opaque_state_identifier_capacity;
+         UPDATE opaque_state_global_capacity SET active_count = 0 WHERE singleton = TRUE;",
+    )
+    .execute(&test.pool)
+    .await
+    .unwrap();
+    for index in 0u16..130 {
+        let state_id = Uuid::now_v7();
+        let mut identifier_key = [0u8; 32];
+        identifier_key[..2].copy_from_slice(&index.to_be_bytes());
+        query::<Postgres>(
+            "INSERT INTO opaque_registration_states
+                (id, user_id, tenant_id, device_id, device_challenge, email, device_name,
+                 opaque_suite_id, expires_at, identifier_key)
+             VALUES ($1, $2, $3, $4, $5, $6, 'cleanup test', 2,
+                     now() - interval '1 second', $7)",
+        )
+        .bind(state_id)
+        .bind(Uuid::now_v7())
+        .bind(Uuid::now_v7())
+        .bind(Uuid::now_v7())
+        .bind(vec![0xA5u8; 32])
+        .bind(format!("cleanup-{index}@example.com"))
+        .bind(identifier_key.as_slice())
+        .execute(&test.pool)
+        .await
+        .unwrap();
+    }
+
+    assert_eq!(
+        auth::cleanup_expired_opaque_states(&test.application_pool)
+            .await
+            .unwrap(),
+        128
+    );
+    assert_eq!(global_opaque_capacity(&test.pool).await, 2);
+    assert_eq!(opaque_capacity_lease_count(&test.pool).await, 2);
+    assert_eq!(
+        auth::cleanup_expired_opaque_states(&test.application_pool)
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(global_opaque_capacity(&test.pool).await, 0);
+    assert_eq!(opaque_capacity_lease_count(&test.pool).await, 0);
+    assert_eq!(
+        auth::cleanup_expired_opaque_states(&test.application_pool)
+            .await
+            .unwrap(),
+        0
+    );
+
+    let inconsistent_identifier = [0x7Au8; 32];
+    for index in 0..2 {
+        let state_id = Uuid::now_v7();
+        query::<Postgres>(
+            "INSERT INTO opaque_registration_states
+                (id, user_id, tenant_id, device_id, device_challenge, email, device_name,
+                 opaque_suite_id, expires_at, identifier_key)
+             VALUES ($1, $2, $3, $4, $5, $6, 'underflow test', 2,
+                     now() - interval '1 second', $7)",
+        )
+        .bind(state_id)
+        .bind(Uuid::now_v7())
+        .bind(Uuid::now_v7())
+        .bind(Uuid::now_v7())
+        .bind(vec![0x5Au8; 32])
+        .bind(format!("underflow-{index}@example.com"))
+        .bind(inconsistent_identifier.as_slice())
+        .execute(&test.pool)
+        .await
+        .unwrap();
+    }
+    query::<Postgres>(
+        "UPDATE opaque_state_identifier_capacity
+         SET active_count = 1 WHERE identifier_key = $1",
+    )
+    .bind(inconsistent_identifier.as_slice())
+    .execute(&test.pool)
+    .await
+    .unwrap();
+
+    let underflow = auth::cleanup_expired_opaque_states(&test.application_pool)
+        .await
+        .expect_err("counter underflow must fail closed");
+    assert_eq!(
+        underflow.into_response().status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(global_opaque_capacity(&test.pool).await, 2);
+    assert_eq!(opaque_capacity_lease_count(&test.pool).await, 2);
+    let state_count: i64 =
+        query::<Postgres>("SELECT count(*) AS count FROM opaque_registration_states")
+            .fetch_one(&test.pool)
+            .await
+            .unwrap()
+            .try_get("count")
+            .unwrap();
+    assert_eq!(state_count, 2);
+
+    query::<Postgres>(
+        "UPDATE opaque_state_identifier_capacity
+         SET active_count = 2 WHERE identifier_key = $1",
+    )
+    .bind(inconsistent_identifier.as_slice())
+    .execute(&test.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        auth::cleanup_expired_opaque_states(&test.application_pool)
+            .await
+            .unwrap(),
+        2
+    );
+    assert_opaque_capacity_matches_states(&test.pool).await;
+}
+
+fn registration_start_request(email: &str) -> auth::OpaqueStartRequest {
+    let client_start =
+        ClientRegistration::<TaskveilCipherSuite>::start(&mut OsRng, b"test password").unwrap();
+    auth::OpaqueStartRequest {
+        email: email.to_string(),
+        device_name: Some("capacity test".to_string()),
+        opaque_suite_id: CRYPTO_SUITE_ID,
+        message: STANDARD.encode(client_start.message.serialize()),
+    }
+}
+
+async fn global_opaque_capacity(pool: &PgPool) -> i32 {
+    query::<Postgres>(
+        "SELECT active_count FROM opaque_state_global_capacity WHERE singleton = TRUE",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
+    .try_get("active_count")
+    .unwrap()
+}
+
+async fn opaque_capacity_lease_count(pool: &PgPool) -> i64 {
+    query::<Postgres>("SELECT count(*) AS count FROM opaque_state_capacity_leases")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+        .try_get("count")
+        .unwrap()
+}
+
+async fn assert_opaque_capacity_matches_states(pool: &PgPool) {
+    let row = query::<Postgres>(
+        "SELECT
+             (SELECT active_count FROM opaque_state_global_capacity
+              WHERE singleton = TRUE) AS global_count,
+             (SELECT count(*) FROM opaque_state_capacity_leases) AS lease_count,
+             (SELECT count(*) FROM opaque_registration_states)
+               + (SELECT count(*) FROM opaque_login_states) AS state_count,
+             coalesce(
+                 (SELECT sum(active_count) FROM opaque_state_identifier_capacity),
+                 0
+             ) AS identifier_count",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let global_count = i64::from(row.try_get::<i32, _>("global_count").unwrap());
+    let lease_count = row.try_get::<i64, _>("lease_count").unwrap();
+    let state_count = row.try_get::<i64, _>("state_count").unwrap();
+    let identifier_count = row.try_get::<i64, _>("identifier_count").unwrap();
+    assert_eq!(global_count, lease_count);
+    assert_eq!(lease_count, state_count);
+    assert_eq!(identifier_count, lease_count);
 }
 
 #[tokio::test]

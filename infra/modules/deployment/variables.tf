@@ -93,6 +93,16 @@ variable "lambda_reserved_concurrency" {
   default = 10
 }
 
+variable "auth_limit_hmac_key_generation" {
+  type        = number
+  default     = 1
+  description = "Non-secret positive generation paired with the auth limit HMAC key."
+  validation {
+    condition     = var.auth_limit_hmac_key_generation >= 1 && floor(var.auth_limit_hmac_key_generation) == var.auth_limit_hmac_key_generation
+    error_message = "auth_limit_hmac_key_generation must be a positive integer"
+  }
+}
+
 variable "log_retention_days" {
   type    = number
   default = 14
