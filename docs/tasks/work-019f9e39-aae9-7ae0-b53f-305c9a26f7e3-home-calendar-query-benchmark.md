@@ -1,7 +1,7 @@
 ---
 id: 019f9e39-aae9-7ae0-b53f-305c9a26f7e3
 title: Home and calendar query benchmark
-status: active
+status: done
 lane: critical
 milestone: maintenance
 ---
@@ -71,7 +71,7 @@ benchmarkでread性能とwrite amplificationを同時に管理する。
 - [x] read性能予算とCI回帰閾値が明示され、自動testで超過を検出する。
 - [x] index write amplificationの時間・database page増分を計測し、予算を超えない。
 - [x] migration upgradeとfresh databaseの双方をtestする。
-- [ ] 全品質ゲートと独立セルフレビューが合格する。
+- [x] 全品質ゲートと独立セルフレビューが合格する。
 
 ## 7. 制約・注意事項
 
@@ -147,6 +147,19 @@ index write amplification:
 
 ### 独立検証
 
-- 判定: 未実施
-- 根拠: 実装担当外の検証者による全品質ゲートとdiff reviewを待つ。
-- 検証者: 未割当
+- 判定: APPROVE（P0-P3指摘なし）
+- 根拠:
+  - `origin/main...38b8fca`の全差分を確認し、production queryと
+    `EXPLAIN QUERY PLAN`が同一SQL定数を使うこと、既存migrationを変更せず
+    `0002`だけを追加していること、Home / Calendarの既存選択・重複排除・
+    ancestor / descendant・sort契約を維持していることを確認した。
+  - `home_and_calendar_production_plans_use_partial_range_indexes`を独立再実行し、
+    Homeは4 index、Calendarは4 range searchを使うことを確認した。
+  - `sqlcipher_10000_task_query_and_index_write_budgets_hold`を独立再実行し、
+    Home 129ms / Calendar 30ms、insert 485ms → 461ms、
+    DB 7,057,408 → 7,278,592 bytesで全予算内だった。
+  - 実Flutter → FRB → release Rust → SQLCipher testを独立再実行し、
+    Home 83ms / Calendar 51msで全予算内だった。
+  - `git diff --check`に合格し、実装担当が統合HEADで実行した全workspace
+    Rust / Flutter品質ゲートの証拠と整合した。
+- 検証者: Codex root orchestrator
