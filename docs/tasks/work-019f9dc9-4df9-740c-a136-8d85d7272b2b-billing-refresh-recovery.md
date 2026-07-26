@@ -13,8 +13,8 @@ GitHub Issue #64では、billing refreshの一時失敗でprovider全体が
 課金状態の表示snapshotとrefresh operationの状態を分離し、最後のserver-issued
 entitlementを保持したまま再取得できるようにする。
 
-本作業はtyped FRB error候補
-`1c4007b6192bcc9a848a07194e2614c5167104b1`を基点とする。
+本作業はIssue #65でmainへ統合済みのtyped FRB error実装
+`a3a3b6dc9164d5aeca9b10730329f80d6ed104e3`を基点とする。
 
 ## 2. ゴール
 
@@ -68,9 +68,13 @@ entitlementを保持したまま再取得できるようにする。
   refreshだけが停止してもlogoutできる。store未接続/cached-only状態ではstore操作を
   無効化してretryだけを提示する。
 - Retryは標準`TextButton`の48×48以上のtap targetとbutton semanticsを維持する。
-- 最新typed FRB error HEADへrebase後、最終課金provider/store対象46件、
-  Flutter全331件と`flutter analyze --no-pub`がPASSした。visual QA harness 1件のみ
-  intentional skip。hardcoded strings、client boundary、`git diff --check`もPASS。
+- 旧依存chainからIssue #64固有の3 commitだけを最終mainへ再構成した。独立検証済みの
+  一時統合rangeと最終rangeは`git range-diff`で3 commitすべて同一、stable patch IDも
+  `62e5656a` / `8ab97325` / `c03db6ba`で一致し、Issue #65その他の差分を含まない。
+- Issue #65統合済みの最終mainへrebase後、課金provider/store対象46件、
+  Flutter全364件と`flutter analyze --no-pub`がPASSした。visual QA harness 1件のみ
+  intentional skip。native SQLCipher 10k予算はHome 56 ms、Calendar 27 msでPASSした。
+  hardcoded strings、client boundary、`git diff --check`もPASS。
 - 初回独立レビューのP1 2件、P2 2件（no-cache回復、課金操作競合、破棄後publish、
   tap target）と、再レビューのidentity admission / auth failure recovery /
   cross-generation queue / in-flight logout / store readiness指摘を修正した。最終独立
