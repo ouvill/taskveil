@@ -40,7 +40,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 128175628;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1516629863;
 
 // Section: executor
 
@@ -404,6 +404,43 @@ fn wire__crate__api__account_registration_verify_otp_impl(
                     })()
                     .await,
                 )
+            }
+        },
+    )
+}
+fn wire__crate__api__ack_reminder_notification_command_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "ack_reminder_notification_command",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_reminder_id = <String>::sse_decode(&mut deserializer);
+            let api_revision = <i64>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::ack_reminder_notification_command(
+                        api_reminder_id,
+                        api_revision,
+                    )?;
+                    Ok(output_ok)
+                })())
             }
         },
     )
@@ -1940,6 +1977,41 @@ fn wire__crate__api__list_pending_reminders_impl(
         },
     )
 }
+fn wire__crate__api__list_reminder_notification_commands_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "list_reminder_notification_commands",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_now_ms = <i64>::sse_decode(&mut deserializer);
+            let api_limit = <u32>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok =
+                        crate::api::list_reminder_notification_commands(api_now_ms, api_limit)?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__organization_safety_number_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -2008,6 +2080,40 @@ fn wire__crate__api__pomodoro_target_reached_at_impl(
             move |context| {
                 transform_result_sse::<_, String>((move || {
                     let output_ok = crate::api::pomodoro_target_reached_at(api_session)?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__prepare_reminder_notification_reconciliation_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "prepare_reminder_notification_reconciliation",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_now_ms = <i64>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok =
+                        crate::api::prepare_reminder_notification_reconciliation(api_now_ms)?;
                     Ok(output_ok)
                 })())
             }
@@ -3243,6 +3349,20 @@ impl SseDecode for Vec<crate::api::ReminderDto> {
     }
 }
 
+impl SseDecode for Vec<crate::api::ReminderNotificationCommandDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::ReminderNotificationCommandDto>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
 impl SseDecode for Vec<crate::api::TaskBlueprintNodeDto> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -3468,6 +3588,43 @@ impl SseDecode for crate::api::ReminderDto {
             remind_at: var_remindAt,
             snoozed_until: var_snoozedUntil,
             created_at: var_createdAt,
+        };
+    }
+}
+
+impl SseDecode for crate::api::ReminderNotificationActionDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::ReminderNotificationActionDto::Schedule,
+            1 => crate::api::ReminderNotificationActionDto::Cancel,
+            _ => unreachable!(
+                "Invalid variant for ReminderNotificationActionDto: {}",
+                inner
+            ),
+        };
+    }
+}
+
+impl SseDecode for crate::api::ReminderNotificationCommandDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_reminderId = <String>::sse_decode(deserializer);
+        let mut var_platformId = <i32>::sse_decode(deserializer);
+        let mut var_revision = <i64>::sse_decode(deserializer);
+        let mut var_action = <crate::api::ReminderNotificationActionDto>::sse_decode(deserializer);
+        let mut var_taskId = <Option<String>>::sse_decode(deserializer);
+        let mut var_listId = <Option<String>>::sse_decode(deserializer);
+        let mut var_scheduledAt = <Option<i64>>::sse_decode(deserializer);
+        return crate::api::ReminderNotificationCommandDto {
+            reminder_id: var_reminderId,
+            platform_id: var_platformId,
+            revision: var_revision,
+            action: var_action,
+            task_id: var_taskId,
+            list_id: var_listId,
+            scheduled_at: var_scheduledAt,
         };
     }
 }
@@ -3849,92 +4006,110 @@ fn pde_ffi_dispatcher_primary_impl(
             rust_vec_len,
             data_len,
         ),
-        11 => wire__crate__api__archive_list_impl(port, ptr, rust_vec_len, data_len),
-        12 => wire__crate__api__billing_bootstrap_impl(port, ptr, rust_vec_len, data_len),
-        13 => wire__crate__api__clear_task_reminders_impl(port, ptr, rust_vec_len, data_len),
-        14 => wire__crate__api__confirm_organization_safety_number_impl(
+        11 => wire__crate__api__ack_reminder_notification_command_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        15 => wire__crate__api__count_task_descendants_impl(port, ptr, rust_vec_len, data_len),
-        16 => wire__crate__api__count_tasks_in_list_impl(port, ptr, rust_vec_len, data_len),
-        17 => wire__crate__api__create_draft_task_impl(port, ptr, rust_vec_len, data_len),
-        18 => wire__crate__api__create_list_impl(port, ptr, rust_vec_len, data_len),
-        19 => wire__crate__api__create_task_impl(port, ptr, rust_vec_len, data_len),
-        20 => wire__crate__api__create_task_reminder_impl(port, ptr, rust_vec_len, data_len),
-        21 => {
+        12 => wire__crate__api__archive_list_impl(port, ptr, rust_vec_len, data_len),
+        13 => wire__crate__api__billing_bootstrap_impl(port, ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__clear_task_reminders_impl(port, ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__confirm_organization_safety_number_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        16 => wire__crate__api__count_task_descendants_impl(port, ptr, rust_vec_len, data_len),
+        17 => wire__crate__api__count_tasks_in_list_impl(port, ptr, rust_vec_len, data_len),
+        18 => wire__crate__api__create_draft_task_impl(port, ptr, rust_vec_len, data_len),
+        19 => wire__crate__api__create_list_impl(port, ptr, rust_vec_len, data_len),
+        20 => wire__crate__api__create_task_impl(port, ptr, rust_vec_len, data_len),
+        21 => wire__crate__api__create_task_reminder_impl(port, ptr, rust_vec_len, data_len),
+        22 => {
             wire__crate__api__create_task_series_from_task_impl(port, ptr, rust_vec_len, data_len)
         }
-        22 => wire__crate__api__create_task_series_from_template_impl(
+        23 => wire__crate__api__create_task_series_from_template_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        23 => wire__crate__api__create_template_impl(port, ptr, rust_vec_len, data_len),
-        24 => wire__crate__api__delete_list_impl(port, ptr, rust_vec_len, data_len),
-        25 => wire__crate__api__delete_reminder_impl(port, ptr, rust_vec_len, data_len),
-        26 => wire__crate__api__delete_task_impl(port, ptr, rust_vec_len, data_len),
-        27 => wire__crate__api__delete_task_series_impl(port, ptr, rust_vec_len, data_len),
-        28 => wire__crate__api__delete_template_impl(port, ptr, rust_vec_len, data_len),
-        29 => {
+        24 => wire__crate__api__create_template_impl(port, ptr, rust_vec_len, data_len),
+        25 => wire__crate__api__delete_list_impl(port, ptr, rust_vec_len, data_len),
+        26 => wire__crate__api__delete_reminder_impl(port, ptr, rust_vec_len, data_len),
+        27 => wire__crate__api__delete_task_impl(port, ptr, rust_vec_len, data_len),
+        28 => wire__crate__api__delete_task_series_impl(port, ptr, rust_vec_len, data_len),
+        29 => wire__crate__api__delete_template_impl(port, ptr, rust_vec_len, data_len),
+        30 => {
             wire__crate__api__discard_active_timer_session_impl(port, ptr, rust_vec_len, data_len)
         }
-        30 => wire__crate__api__finish_active_timer_session_impl(port, ptr, rust_vec_len, data_len),
-        31 => wire__crate__api__get_account_session_state_impl(port, ptr, rust_vec_len, data_len),
-        32 => wire__crate__api__get_active_timer_session_impl(port, ptr, rust_vec_len, data_len),
-        33 => wire__crate__api__get_archived_lists_impl(port, ptr, rust_vec_len, data_len),
-        34 => wire__crate__api__get_cached_billing_impl(port, ptr, rust_vec_len, data_len),
-        35 => wire__crate__api__get_calendar_occurrences_impl(port, ptr, rust_vec_len, data_len),
-        36 => {
+        31 => wire__crate__api__finish_active_timer_session_impl(port, ptr, rust_vec_len, data_len),
+        32 => wire__crate__api__get_account_session_state_impl(port, ptr, rust_vec_len, data_len),
+        33 => wire__crate__api__get_active_timer_session_impl(port, ptr, rust_vec_len, data_len),
+        34 => wire__crate__api__get_archived_lists_impl(port, ptr, rust_vec_len, data_len),
+        35 => wire__crate__api__get_cached_billing_impl(port, ptr, rust_vec_len, data_len),
+        36 => wire__crate__api__get_calendar_occurrences_impl(port, ptr, rust_vec_len, data_len),
+        37 => {
             wire__crate__api__get_completed_timer_sessions_impl(port, ptr, rust_vec_len, data_len)
         }
-        37 => wire__crate__api__get_frontend_setting_impl(port, ptr, rust_vec_len, data_len),
-        38 => wire__crate__api__get_home_tasks_impl(port, ptr, rust_vec_len, data_len),
-        39 => wire__crate__api__get_latest_task_undo_impl(port, ptr, rust_vec_len, data_len),
-        40 => wire__crate__api__get_list_reminders_impl(port, ptr, rust_vec_len, data_len),
-        41 => wire__crate__api__get_lists_impl(port, ptr, rust_vec_len, data_len),
-        42 => wire__crate__api__get_local_time_zone_impl(port, ptr, rust_vec_len, data_len),
-        43 => wire__crate__api__get_realtime_ticket_impl(port, ptr, rust_vec_len, data_len),
-        44 => wire__crate__api__get_sync_server_url_impl(port, ptr, rust_vec_len, data_len),
-        45 => wire__crate__api__get_sync_status_impl(port, ptr, rust_vec_len, data_len),
-        46 => wire__crate__api__get_task_reminders_impl(port, ptr, rust_vec_len, data_len),
-        47 => wire__crate__api__get_task_series_impl(port, ptr, rust_vec_len, data_len),
-        48 => wire__crate__api__get_task_series_streak_impl(port, ptr, rust_vec_len, data_len),
-        49 => wire__crate__api__get_task_subtree_reminders_impl(port, ptr, rust_vec_len, data_len),
-        50 => wire__crate__api__get_tasks_impl(port, ptr, rust_vec_len, data_len),
-        51 => wire__crate__api__get_templates_impl(port, ptr, rust_vec_len, data_len),
-        52 => wire__crate__api__greet_impl(port, ptr, rust_vec_len, data_len),
-        53 => wire__crate__api__init_core_impl(port, ptr, rust_vec_len, data_len),
-        54 => wire__crate__api__instantiate_template_impl(port, ptr, rust_vec_len, data_len),
-        55 => wire__crate__api__list_pending_reminders_impl(port, ptr, rust_vec_len, data_len),
-        56 => wire__crate__api__organization_safety_number_impl(port, ptr, rust_vec_len, data_len),
-        57 => wire__crate__api__pomodoro_target_reached_at_impl(port, ptr, rust_vec_len, data_len),
-        58 => wire__crate__api__refresh_billing_impl(port, ptr, rust_vec_len, data_len),
-        59 => wire__crate__api__rename_list_impl(port, ptr, rust_vec_len, data_len),
-        60 => wire__crate__api__reorder_task_impl(port, ptr, rust_vec_len, data_len),
-        61 => wire__crate__api__replace_template_blueprint_impl(port, ptr, rust_vec_len, data_len),
-        62 => wire__crate__api__rotate_device_key_impl(port, ptr, rust_vec_len, data_len),
-        63 => wire__crate__api__save_task_as_template_impl(port, ptr, rust_vec_len, data_len),
-        64 => wire__crate__api__search_tasks_impl(port, ptr, rust_vec_len, data_len),
-        65 => wire__crate__api__set_frontend_setting_impl(port, ptr, rust_vec_len, data_len),
-        66 => wire__crate__api__set_sync_server_url_impl(port, ptr, rust_vec_len, data_len),
-        67 => wire__crate__api__set_task_status_impl(port, ptr, rust_vec_len, data_len),
-        68 => wire__crate__api__settle_due_series_impl(port, ptr, rust_vec_len, data_len),
-        69 => wire__crate__api__snooze_reminder_impl(port, ptr, rust_vec_len, data_len),
-        70 => wire__crate__api__start_active_timer_session_impl(port, ptr, rust_vec_len, data_len),
-        71 => wire__crate__api__sync_now_impl(port, ptr, rust_vec_len, data_len),
-        72 => wire__crate__api__sync_now_outcome_impl(port, ptr, rust_vec_len, data_len),
-        73 => wire__crate__api__unarchive_list_impl(port, ptr, rust_vec_len, data_len),
-        74 => wire__crate__api__undo_task_operation_impl(port, ptr, rust_vec_len, data_len),
-        75 => wire__crate__api__update_active_timer_session_impl(port, ptr, rust_vec_len, data_len),
-        76 => wire__crate__api__update_reminder_impl(port, ptr, rust_vec_len, data_len),
-        77 => wire__crate__api__update_task_impl(port, ptr, rust_vec_len, data_len),
-        78 => wire__crate__api__update_task_series_impl(port, ptr, rust_vec_len, data_len),
-        79 => wire__crate__api__update_template_impl(port, ptr, rust_vec_len, data_len),
-        80 => wire__crate__api__validate_recurrence_rule_impl(port, ptr, rust_vec_len, data_len),
+        38 => wire__crate__api__get_frontend_setting_impl(port, ptr, rust_vec_len, data_len),
+        39 => wire__crate__api__get_home_tasks_impl(port, ptr, rust_vec_len, data_len),
+        40 => wire__crate__api__get_latest_task_undo_impl(port, ptr, rust_vec_len, data_len),
+        41 => wire__crate__api__get_list_reminders_impl(port, ptr, rust_vec_len, data_len),
+        42 => wire__crate__api__get_lists_impl(port, ptr, rust_vec_len, data_len),
+        43 => wire__crate__api__get_local_time_zone_impl(port, ptr, rust_vec_len, data_len),
+        44 => wire__crate__api__get_realtime_ticket_impl(port, ptr, rust_vec_len, data_len),
+        45 => wire__crate__api__get_sync_server_url_impl(port, ptr, rust_vec_len, data_len),
+        46 => wire__crate__api__get_sync_status_impl(port, ptr, rust_vec_len, data_len),
+        47 => wire__crate__api__get_task_reminders_impl(port, ptr, rust_vec_len, data_len),
+        48 => wire__crate__api__get_task_series_impl(port, ptr, rust_vec_len, data_len),
+        49 => wire__crate__api__get_task_series_streak_impl(port, ptr, rust_vec_len, data_len),
+        50 => wire__crate__api__get_task_subtree_reminders_impl(port, ptr, rust_vec_len, data_len),
+        51 => wire__crate__api__get_tasks_impl(port, ptr, rust_vec_len, data_len),
+        52 => wire__crate__api__get_templates_impl(port, ptr, rust_vec_len, data_len),
+        53 => wire__crate__api__greet_impl(port, ptr, rust_vec_len, data_len),
+        54 => wire__crate__api__init_core_impl(port, ptr, rust_vec_len, data_len),
+        55 => wire__crate__api__instantiate_template_impl(port, ptr, rust_vec_len, data_len),
+        56 => wire__crate__api__list_pending_reminders_impl(port, ptr, rust_vec_len, data_len),
+        57 => wire__crate__api__list_reminder_notification_commands_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        58 => wire__crate__api__organization_safety_number_impl(port, ptr, rust_vec_len, data_len),
+        59 => wire__crate__api__pomodoro_target_reached_at_impl(port, ptr, rust_vec_len, data_len),
+        60 => wire__crate__api__prepare_reminder_notification_reconciliation_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        61 => wire__crate__api__refresh_billing_impl(port, ptr, rust_vec_len, data_len),
+        62 => wire__crate__api__rename_list_impl(port, ptr, rust_vec_len, data_len),
+        63 => wire__crate__api__reorder_task_impl(port, ptr, rust_vec_len, data_len),
+        64 => wire__crate__api__replace_template_blueprint_impl(port, ptr, rust_vec_len, data_len),
+        65 => wire__crate__api__rotate_device_key_impl(port, ptr, rust_vec_len, data_len),
+        66 => wire__crate__api__save_task_as_template_impl(port, ptr, rust_vec_len, data_len),
+        67 => wire__crate__api__search_tasks_impl(port, ptr, rust_vec_len, data_len),
+        68 => wire__crate__api__set_frontend_setting_impl(port, ptr, rust_vec_len, data_len),
+        69 => wire__crate__api__set_sync_server_url_impl(port, ptr, rust_vec_len, data_len),
+        70 => wire__crate__api__set_task_status_impl(port, ptr, rust_vec_len, data_len),
+        71 => wire__crate__api__settle_due_series_impl(port, ptr, rust_vec_len, data_len),
+        72 => wire__crate__api__snooze_reminder_impl(port, ptr, rust_vec_len, data_len),
+        73 => wire__crate__api__start_active_timer_session_impl(port, ptr, rust_vec_len, data_len),
+        74 => wire__crate__api__sync_now_impl(port, ptr, rust_vec_len, data_len),
+        75 => wire__crate__api__sync_now_outcome_impl(port, ptr, rust_vec_len, data_len),
+        76 => wire__crate__api__unarchive_list_impl(port, ptr, rust_vec_len, data_len),
+        77 => wire__crate__api__undo_task_operation_impl(port, ptr, rust_vec_len, data_len),
+        78 => wire__crate__api__update_active_timer_session_impl(port, ptr, rust_vec_len, data_len),
+        79 => wire__crate__api__update_reminder_impl(port, ptr, rust_vec_len, data_len),
+        80 => wire__crate__api__update_task_impl(port, ptr, rust_vec_len, data_len),
+        81 => wire__crate__api__update_task_series_impl(port, ptr, rust_vec_len, data_len),
+        82 => wire__crate__api__update_template_impl(port, ptr, rust_vec_len, data_len),
+        83 => wire__crate__api__validate_recurrence_rule_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -4356,6 +4531,53 @@ impl flutter_rust_bridge::IntoDart for crate::api::ReminderDto {
 impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::ReminderDto {}
 impl flutter_rust_bridge::IntoIntoDart<crate::api::ReminderDto> for crate::api::ReminderDto {
     fn into_into_dart(self) -> crate::api::ReminderDto {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::ReminderNotificationActionDto {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Schedule => 0.into_dart(),
+            Self::Cancel => 1.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::ReminderNotificationActionDto
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::ReminderNotificationActionDto>
+    for crate::api::ReminderNotificationActionDto
+{
+    fn into_into_dart(self) -> crate::api::ReminderNotificationActionDto {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::ReminderNotificationCommandDto {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.reminder_id.into_into_dart().into_dart(),
+            self.platform_id.into_into_dart().into_dart(),
+            self.revision.into_into_dart().into_dart(),
+            self.action.into_into_dart().into_dart(),
+            self.task_id.into_into_dart().into_dart(),
+            self.list_id.into_into_dart().into_dart(),
+            self.scheduled_at.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::ReminderNotificationCommandDto
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::ReminderNotificationCommandDto>
+    for crate::api::ReminderNotificationCommandDto
+{
+    fn into_into_dart(self) -> crate::api::ReminderNotificationCommandDto {
         self
     }
 }
@@ -4989,6 +5211,16 @@ impl SseEncode for Vec<crate::api::ReminderDto> {
     }
 }
 
+impl SseEncode for Vec<crate::api::ReminderNotificationCommandDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::ReminderNotificationCommandDto>::sse_encode(item, serializer);
+        }
+    }
+}
+
 impl SseEncode for Vec<crate::api::TaskBlueprintNodeDto> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -5170,6 +5402,35 @@ impl SseEncode for crate::api::ReminderDto {
         <i64>::sse_encode(self.remind_at, serializer);
         <Option<i64>>::sse_encode(self.snoozed_until, serializer);
         <i64>::sse_encode(self.created_at, serializer);
+    }
+}
+
+impl SseEncode for crate::api::ReminderNotificationActionDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::ReminderNotificationActionDto::Schedule => 0,
+                crate::api::ReminderNotificationActionDto::Cancel => 1,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::ReminderNotificationCommandDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.reminder_id, serializer);
+        <i32>::sse_encode(self.platform_id, serializer);
+        <i64>::sse_encode(self.revision, serializer);
+        <crate::api::ReminderNotificationActionDto>::sse_encode(self.action, serializer);
+        <Option<String>>::sse_encode(self.task_id, serializer);
+        <Option<String>>::sse_encode(self.list_id, serializer);
+        <Option<i64>>::sse_encode(self.scheduled_at, serializer);
     }
 }
 

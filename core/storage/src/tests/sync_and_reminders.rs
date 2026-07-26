@@ -522,6 +522,236 @@ fn sqlite_reminder_repository_lists_pending_open_tasks_only() {
 }
 
 #[test]
+fn reminder_notification_commands_join_context_and_persist_unique_platform_ids() {
+    let file = NamedTempFile::new().unwrap();
+    let list = sample_list("a0");
+    let mut task = sample_task();
+    task.list_id = list.id;
+    task.parent_task_id = None;
+    {
+        let connection = open_encrypted(file.path(), &KEY).unwrap();
+        SqliteListRepository::new(connection)
+            .insert(list.clone())
+            .unwrap();
+    }
+    {
+        let connection = open_encrypted(file.path(), &KEY).unwrap();
+        SqliteTaskRepository::new(connection)
+            .insert(task.clone())
+            .unwrap();
+    }
+
+    let occupied_reminder_id = Uuid::now_v7();
+    {
+        let connection = open_encrypted(file.path(), &KEY).unwrap();
+        connection
+            .execute(
+                "INSERT INTO reminder_notification_ids (
+                     platform_id, reminder_id, command_revision, retired
+                 ) VALUES (1, ?1, 0, 1)",
+                [occupied_reminder_id.to_string()],
+            )
+            .unwrap();
+    }
+    let reminder = {
+        let connection = open_encrypted(file.path(), &KEY).unwrap();
+        SqliteReminderRepository::new(connection)
+            .create_task_reminder(task.id, 1_800_000_000_000, 1_799_000_000_000)
+            .unwrap()
+    };
+
+    let first_command = {
+        let connection = open_encrypted(file.path(), &KEY).unwrap();
+        let mut repository = SqliteReminderNotificationRepository::new(connection);
+        let commands = repository.list_commands(1_799_000_000_000, 10).unwrap();
+        assert_eq!(commands.len(), 1);
+        let command = commands[0].clone();
+        assert_eq!(command.reminder_id, reminder.id);
+        assert_eq!(command.platform_id, 2);
+        assert_eq!(command.action, ReminderNotificationAction::Schedule);
+        assert_eq!(command.task_id, Some(task.id));
+        assert_eq!(command.list_id, Some(list.id));
+        assert_eq!(command.scheduled_at, Some(1_800_000_000_000));
+        assert!(repository
+            .ack_command(command.reminder_id, command.revision)
+            .unwrap());
+        command
+    };
+
+    {
+        let connection = open_encrypted(file.path(), &KEY).unwrap();
+        let mut repository = SqliteReminderRepository::new(connection);
+        repository
+            .update_reminder(reminder.id, 1_800_000_600_000, 1_799_000_000_001)
+            .unwrap();
+    }
+    {
+        let connection = open_encrypted(file.path(), &KEY).unwrap();
+        let mut repository = SqliteReminderNotificationRepository::new(connection);
+        let command = repository
+            .list_commands(1_799_000_000_000, 10)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(command.platform_id, first_command.platform_id);
+        assert!(command.revision > first_command.revision);
+        assert!(!repository
+            .ack_command(command.reminder_id, first_command.revision)
+            .unwrap());
+        assert!(repository
+            .ack_command(command.reminder_id, command.revision)
+            .unwrap());
+    }
+
+    let persisted_platform_id: i64 = open_encrypted(file.path(), &KEY)
+        .unwrap()
+        .query_row(
+            "SELECT platform_id
+             FROM reminder_notification_ids
+             WHERE reminder_id = ?1",
+            [reminder.id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(persisted_platform_id, i64::from(first_command.platform_id));
+
+    {
+        let connection = open_encrypted(file.path(), &KEY).unwrap();
+        SqliteReminderRepository::new(connection)
+            .delete_reminder(reminder.id)
+            .unwrap();
+    }
+    {
+        let connection = open_encrypted(file.path(), &KEY).unwrap();
+        let mut repository = SqliteReminderNotificationRepository::new(connection);
+        let cancel = repository
+            .list_commands(1_799_000_000_000, 10)
+            .unwrap()
+            .remove(0);
+        assert_eq!(cancel.action, ReminderNotificationAction::Cancel);
+        assert_eq!(cancel.platform_id, first_command.platform_id);
+        assert!(repository
+            .ack_command(cancel.reminder_id, cancel.revision)
+            .unwrap());
+        assert!(repository
+            .prepare_reconciliation(1_799_000_000_000)
+            .unwrap()
+            .is_empty());
+        let (platform_id, retired): (i64, i64) = repository
+            .connection()
+            .query_row(
+                "SELECT platform_id, retired
+                 FROM reminder_notification_ids
+                 WHERE reminder_id = ?1",
+                [reminder.id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(platform_id, i64::from(first_command.platform_id));
+        assert_eq!(retired, 1);
+    }
+}
+
+#[test]
+fn reminder_notification_commands_rebuild_after_ack_and_track_task_lifecycle() {
+    let file = NamedTempFile::new().unwrap();
+    let list = sample_list("a0");
+    let mut task = sample_task();
+    task.list_id = list.id;
+    task.parent_task_id = None;
+    {
+        let connection = open_encrypted(file.path(), &KEY).unwrap();
+        SqliteListRepository::new(connection)
+            .insert(list.clone())
+            .unwrap();
+    }
+    {
+        let connection = open_encrypted(file.path(), &KEY).unwrap();
+        SqliteTaskRepository::new(connection)
+            .insert(task.clone())
+            .unwrap();
+    }
+    let reminder = {
+        let connection = open_encrypted(file.path(), &KEY).unwrap();
+        SqliteReminderRepository::new(connection)
+            .create_task_reminder(task.id, 1_800_000_000_000, 1_799_000_000_000)
+            .unwrap()
+    };
+    let original = {
+        let connection = open_encrypted(file.path(), &KEY).unwrap();
+        let mut repository = SqliteReminderNotificationRepository::new(connection);
+        let command = repository
+            .list_commands(1_799_000_000_000, 10)
+            .unwrap()
+            .remove(0);
+        assert!(repository
+            .ack_command(command.reminder_id, command.revision)
+            .unwrap());
+        command
+    };
+
+    let rebuilt = {
+        let connection = open_encrypted(file.path(), &KEY).unwrap();
+        let mut repository = SqliteReminderNotificationRepository::new(connection);
+        repository
+            .prepare_reconciliation(1_799_000_000_000)
+            .unwrap()
+            .remove(0)
+    };
+    assert_eq!(rebuilt.reminder_id, reminder.id);
+    assert_eq!(rebuilt.platform_id, original.platform_id);
+    assert!(rebuilt.revision > original.revision);
+    assert_eq!(rebuilt.action, ReminderNotificationAction::Schedule);
+
+    {
+        let connection = open_encrypted(file.path(), &KEY).unwrap();
+        connection
+            .execute(
+                "UPDATE tasks
+                 SET status = 'done', completed_at = ?2
+                 WHERE id = ?1",
+                params![task.id.to_string(), 1_799_000_000_100_i64],
+            )
+            .unwrap();
+    }
+    {
+        let connection = open_encrypted(file.path(), &KEY).unwrap();
+        let mut repository = SqliteReminderNotificationRepository::new(connection);
+        let command = repository
+            .list_commands(1_799_000_000_000, 10)
+            .unwrap()
+            .remove(0);
+        assert_eq!(command.action, ReminderNotificationAction::Cancel);
+        assert_eq!(command.task_id, Some(task.id));
+        assert_eq!(command.platform_id, original.platform_id);
+        assert!(repository
+            .ack_command(command.reminder_id, command.revision)
+            .unwrap());
+    }
+
+    {
+        let connection = open_encrypted(file.path(), &KEY).unwrap();
+        connection
+            .execute(
+                "UPDATE tasks
+                 SET status = 'todo', completed_at = NULL
+                 WHERE id = ?1",
+                [task.id.to_string()],
+            )
+            .unwrap();
+    }
+    let connection = open_encrypted(file.path(), &KEY).unwrap();
+    let mut repository = SqliteReminderNotificationRepository::new(connection);
+    let command = repository
+        .list_commands(1_799_000_000_000, 10)
+        .unwrap()
+        .remove(0);
+    assert_eq!(command.action, ReminderNotificationAction::Schedule);
+    assert_eq!(command.list_id, Some(list.id));
+}
+
+#[test]
 fn sqlite_reminder_repository_lists_subtree_and_list_reminders_for_cancellation() {
     let file = NamedTempFile::new().unwrap();
     let list = sample_list("a0");

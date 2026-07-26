@@ -127,6 +127,27 @@ pub struct Reminder {
 
 pub const MAX_REMINDERS_PER_TASK: usize = 5;
 
+/// Desired operation for the OS-local reminder notification projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReminderNotificationAction {
+    Schedule,
+    Cancel,
+}
+
+/// A durable reminder notification command with schedule context loaded by one
+/// joined query. Schedule commands always contain task/list/time fields;
+/// cancel commands intentionally require only the stable platform ID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReminderNotificationCommand {
+    pub reminder_id: Uuid,
+    pub platform_id: i32,
+    pub revision: i64,
+    pub action: ReminderNotificationAction,
+    pub task_id: Option<Uuid>,
+    pub list_id: Option<Uuid>,
+    pub scheduled_at: Option<i64>,
+}
+
 /// 未ACKのrecord headに保持する暗号化済みsemantic state。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncOutboxState {

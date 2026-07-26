@@ -930,24 +930,8 @@ class TaskDetailScreen extends ConsumerWidget {
           ? await notifier.createReminder(remindAtMs)
           : await notifier.updateReminder(existing.id, remindAtMs);
       if (permissionsGranted) {
-        try {
-          await notificationService.scheduleReminder(
-            reminder: reminder,
-            listId: task.listId,
-            content: ReminderNotificationContent(
-              title: l10n.reminderNotificationTitle,
-              body: l10n.reminderNotificationBody,
-              snoozeActionTitle: l10n.reminderSnoozeOneHourAction,
-            ),
-          );
-        } catch (_) {
-          await notificationService.cancelReminder(reminder);
-          if (context.mounted) {
-            _showReminderMessage(context, l10n.reminderSavedNotificationFailed);
-          }
-        }
+        notificationService.requestReconciliation();
       } else {
-        await notificationService.cancelReminder(reminder);
         if (context.mounted) {
           _showReminderMessage(context, l10n.reminderPermissionDenied);
         }

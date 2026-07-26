@@ -39,6 +39,12 @@ class FakeBridgeService implements BridgeService {
   final List<TemplateDto> _templates = [];
   final List<TaskSeriesDto> _series = [];
   final List<ReminderDto> _reminders = [];
+  final Map<String, int> _reminderNotificationPlatformIds = {};
+  final Map<String, int> _reminderNotificationRevisionCounters = {};
+  final Map<String, _FakeReminderNotificationCommand>
+  _reminderNotificationCommands = {};
+  final Set<String> _retiredReminderNotificationMappings = {};
+  int _nextReminderNotificationPlatformId = 1;
   final List<CompletedTimerSessionDto> _completedTimerSessions = [];
   final List<FakeTaskUndoEntry> _undoEntries = [];
   final Map<FrontendSettingKeyDto, String> _settings;
@@ -1436,6 +1442,12 @@ class FakeBridgeService implements BridgeService {
       updatedAt: updatedAt,
     );
     _tasks[index] = updated;
+    _enqueueReminderNotificationsForTask(
+      taskId,
+      isClosed
+          ? ReminderNotificationActionDto.cancel
+          : ReminderNotificationActionDto.schedule,
+    );
     if (status == 'done' || status == 'wont_do') {
       _recordUndo(operationType: 'complete', before: before, after: updated);
     }
@@ -1450,6 +1462,14 @@ class FakeBridgeService implements BridgeService {
   @override
   Future<void> deleteTask({required String taskId}) async {
     final ids = {taskId, ..._descendantIds(taskId)};
+    for (final reminder in _reminders.where(
+      (reminder) => ids.contains(reminder.taskId),
+    )) {
+      _enqueueReminderNotification(
+        reminder.id,
+        ReminderNotificationActionDto.cancel,
+      );
+    }
     _tasks.removeWhere((task) => ids.contains(task.id));
     _reminders.removeWhere((reminder) => ids.contains(reminder.taskId));
     _undoEntries.removeWhere((entry) => ids.contains(entry.taskId));
@@ -1474,6 +1494,10 @@ class FakeBridgeService implements BridgeService {
         _tasks[index] = task._copyWith(
           listId: defaultList.id,
           updatedAt: task.updatedAt + _fakeMinuteMs,
+        );
+        _enqueueReminderNotificationsForTask(
+          task.id,
+          ReminderNotificationActionDto.schedule,
         );
       }
     }
@@ -1547,6 +1571,10 @@ class FakeBridgeService implements BridgeService {
     }
     entry.consumed = true;
     _tasks[index] = entry.before;
+    _enqueueReminderNotificationsForTask(
+      entry.before.id,
+      ReminderNotificationActionDto.schedule,
+    );
     return entry.before;
   }
 
@@ -1597,6 +1625,10 @@ class FakeBridgeService implements BridgeService {
       createdAt: _fakeTimestamp(2000 + reminderSeq),
     );
     _reminders.add(reminder);
+    _enqueueReminderNotification(
+      reminder.id,
+      ReminderNotificationActionDto.schedule,
+    );
     return reminder;
   }
 
@@ -1630,6 +1662,10 @@ class FakeBridgeService implements BridgeService {
       createdAt: current.createdAt,
     );
     _reminders[index] = updated;
+    _enqueueReminderNotification(
+      updated.id,
+      ReminderNotificationActionDto.schedule,
+    );
     return updated;
   }
 
@@ -1641,7 +1677,12 @@ class FakeBridgeService implements BridgeService {
     if (index < 0) {
       throw Exception('record not found');
     }
-    return _reminders.removeAt(index);
+    final removed = _reminders.removeAt(index);
+    _enqueueReminderNotification(
+      removed.id,
+      ReminderNotificationActionDto.cancel,
+    );
+    return removed;
   }
 
   @override
@@ -1649,6 +1690,12 @@ class FakeBridgeService implements BridgeService {
     final removed = _reminders
         .where((reminder) => reminder.taskId == taskId)
         .toList(growable: false);
+    for (final reminder in removed) {
+      _enqueueReminderNotification(
+        reminder.id,
+        ReminderNotificationActionDto.cancel,
+      );
+    }
     _reminders.removeWhere((reminder) => reminder.taskId == taskId);
     return List.unmodifiable(removed);
   }
@@ -1728,7 +1775,152 @@ class FakeBridgeService implements BridgeService {
       createdAt: current.createdAt,
     );
     _reminders[index] = updated;
+    _enqueueReminderNotification(
+      updated.id,
+      ReminderNotificationActionDto.schedule,
+    );
     return updated;
+  }
+
+  @override
+  Future<List<ReminderNotificationCommandDto>>
+  prepareReminderNotificationReconciliation({required int nowMs}) async {
+    for (final reminder in _reminders) {
+      _reminderNotificationPlatformIds.putIfAbsent(
+        reminder.id,
+        () => _nextReminderNotificationPlatformId++,
+      );
+    }
+    for (final reminderId in _reminderNotificationPlatformIds.keys.toList()) {
+      final action = _canonicalReminderNotificationAction(reminderId, nowMs);
+      if (action == ReminderNotificationActionDto.cancel &&
+          _retiredReminderNotificationMappings.contains(reminderId)) {
+        continue;
+      }
+      _enqueueReminderNotification(reminderId, action);
+    }
+    return _listReminderNotificationCommands(nowMs, null);
+  }
+
+  @override
+  Future<List<ReminderNotificationCommandDto>>
+  listReminderNotificationCommands({
+    required int nowMs,
+    required int limit,
+  }) async {
+    if (limit <= 0 || limit > 512) {
+      throw Exception('invalid reminder notification command limit');
+    }
+    return _listReminderNotificationCommands(nowMs, limit);
+  }
+
+  @override
+  Future<bool> ackReminderNotificationCommand({
+    required String reminderId,
+    required int revision,
+  }) async {
+    final command = _reminderNotificationCommands[reminderId];
+    if (command == null || command.revision != revision) {
+      return false;
+    }
+    _reminderNotificationCommands.remove(reminderId);
+    if (command.action == ReminderNotificationActionDto.cancel) {
+      _retiredReminderNotificationMappings.add(reminderId);
+    }
+    return true;
+  }
+
+  void _enqueueReminderNotificationsForTask(
+    String taskId,
+    ReminderNotificationActionDto action,
+  ) {
+    for (final reminder in _reminders.where(
+      (reminder) => reminder.taskId == taskId,
+    )) {
+      _enqueueReminderNotification(reminder.id, action);
+    }
+  }
+
+  void _enqueueReminderNotification(
+    String reminderId,
+    ReminderNotificationActionDto action,
+  ) {
+    _retiredReminderNotificationMappings.remove(reminderId);
+    _reminderNotificationPlatformIds.putIfAbsent(
+      reminderId,
+      () => _nextReminderNotificationPlatformId++,
+    );
+    final revision =
+        (_reminderNotificationRevisionCounters[reminderId] ?? 0) + 1;
+    _reminderNotificationRevisionCounters[reminderId] = revision;
+    _reminderNotificationCommands[reminderId] =
+        _FakeReminderNotificationCommand(action: action, revision: revision);
+  }
+
+  ReminderNotificationActionDto _canonicalReminderNotificationAction(
+    String reminderId,
+    int nowMs,
+  ) {
+    final reminder = _reminders
+        .where((candidate) => candidate.id == reminderId)
+        .firstOrNull;
+    if (reminder == null || _effectiveReminderAt(reminder) <= nowMs) {
+      return ReminderNotificationActionDto.cancel;
+    }
+    final task = _tasks
+        .where((candidate) => candidate.id == reminder.taskId)
+        .firstOrNull;
+    if (task == null ||
+        (task.status != 'todo' && task.status != 'in_progress')) {
+      return ReminderNotificationActionDto.cancel;
+    }
+    return ReminderNotificationActionDto.schedule;
+  }
+
+  List<ReminderNotificationCommandDto> _listReminderNotificationCommands(
+    int nowMs,
+    int? limit,
+  ) {
+    for (final entry in _reminderNotificationCommands.entries.toList()) {
+      final canonical = _canonicalReminderNotificationAction(entry.key, nowMs);
+      if (canonical != entry.value.action) {
+        _enqueueReminderNotification(entry.key, canonical);
+      }
+    }
+    final commands = _reminderNotificationCommands.entries
+        .map((entry) {
+          final reminder = _reminders
+              .where((candidate) => candidate.id == entry.key)
+              .firstOrNull;
+          final task = reminder == null
+              ? null
+              : _tasks
+                    .where((candidate) => candidate.id == reminder.taskId)
+                    .firstOrNull;
+          return ReminderNotificationCommandDto(
+            reminderId: entry.key,
+            platformId: _reminderNotificationPlatformIds[entry.key]!,
+            revision: entry.value.revision,
+            action: entry.value.action,
+            taskId: reminder?.taskId,
+            listId: task?.listId,
+            scheduledAt: reminder == null
+                ? null
+                : _effectiveReminderAt(reminder),
+          );
+        })
+        .toList(growable: false);
+    commands.sort((a, b) {
+      final byRevision = a.revision.compareTo(b.revision);
+      return byRevision != 0
+          ? byRevision
+          : a.reminderId.compareTo(b.reminderId);
+    });
+    return List.unmodifiable(
+      limit == null || commands.length <= limit
+          ? commands
+          : commands.take(limit),
+    );
   }
 
   TaskDto _reorderBoundary(String boundaryId, TaskDto task) {
@@ -2039,6 +2231,16 @@ SyncStatusDto _copySyncStatus(
     resolvedQuarantineCount: status.resolvedQuarantineCount,
     upgradeRequired: status.upgradeRequired,
   );
+}
+
+class _FakeReminderNotificationCommand {
+  const _FakeReminderNotificationCommand({
+    required this.action,
+    required this.revision,
+  });
+
+  final ReminderNotificationActionDto action;
+  final int revision;
 }
 
 const _sortAlphabet =

@@ -150,6 +150,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<ReminderDto> dco_decode_list_reminder_dto(dynamic raw);
 
   @protected
+  List<ReminderNotificationCommandDto>
+  dco_decode_list_reminder_notification_command_dto(dynamic raw);
+
+  @protected
   List<TaskBlueprintNodeDto> dco_decode_list_task_blueprint_node_dto(
     dynamic raw,
   );
@@ -209,6 +213,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ReminderDto dco_decode_reminder_dto(dynamic raw);
+
+  @protected
+  ReminderNotificationActionDto dco_decode_reminder_notification_action_dto(
+    dynamic raw,
+  );
+
+  @protected
+  ReminderNotificationCommandDto dco_decode_reminder_notification_command_dto(
+    dynamic raw,
+  );
 
   @protected
   SettlementSummaryDto dco_decode_settlement_summary_dto(dynamic raw);
@@ -422,6 +436,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<ReminderDto> sse_decode_list_reminder_dto(SseDeserializer deserializer);
 
   @protected
+  List<ReminderNotificationCommandDto>
+  sse_decode_list_reminder_notification_command_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<TaskBlueprintNodeDto> sse_decode_list_task_blueprint_node_dto(
     SseDeserializer deserializer,
   );
@@ -495,6 +515,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ReminderDto sse_decode_reminder_dto(SseDeserializer deserializer);
+
+  @protected
+  ReminderNotificationActionDto sse_decode_reminder_notification_action_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ReminderNotificationCommandDto sse_decode_reminder_notification_command_dto(
+    SseDeserializer deserializer,
+  );
 
   @protected
   SettlementSummaryDto sse_decode_settlement_summary_dto(
@@ -757,6 +787,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_reminder_notification_command_dto(
+    List<ReminderNotificationCommandDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_task_blueprint_node_dto(
     List<TaskBlueprintNodeDto> self,
     SseSerializer serializer,
@@ -848,6 +884,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_reminder_dto(ReminderDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_reminder_notification_action_dto(
+    ReminderNotificationActionDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_reminder_notification_command_dto(
+    ReminderNotificationCommandDto self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_settlement_summary_dto(

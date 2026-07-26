@@ -44,7 +44,7 @@ Future<void> main() async {
     );
     final localNotificationsPlugin = FlutterLocalNotificationsPlugin();
     final notificationService = ReminderNotificationService(
-      bridge: const FrbBridgeService(),
+      reminderBridge: const FrbBridgeService(),
       gateway: FlutterLocalReminderNotificationGateway(
         plugin: localNotificationsPlugin,
       ),
@@ -52,7 +52,6 @@ Future<void> main() async {
     try {
       await notificationService.initialize(notificationContent);
       reminderNotificationService = notificationService;
-      await notificationService.reconcilePending(notificationContent);
     } catch (error) {
       debugPrint(
         'Taskveil reminder notification initialization failed: $error',
@@ -83,9 +82,10 @@ Future<void> main() async {
       initializationError: initializationError,
       overrides: [
         if (reminderNotificationService != null)
-          reminderNotificationServiceProvider.overrideWithValue(
-            reminderNotificationService,
-          ),
+          reminderNotificationServiceProvider.overrideWith((ref) {
+            ref.onDispose(reminderNotificationService!.dispose);
+            return reminderNotificationService;
+          }),
         if (timerNotificationService != null)
           timerNotificationServiceProvider.overrideWithValue(
             timerNotificationService,
@@ -93,6 +93,11 @@ Future<void> main() async {
       ],
     ),
   );
+  if (reminderNotificationService != null) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      reminderNotificationService!.requestReconciliation(rebuild: true);
+    });
+  }
 }
 
 Locale _resolveStartupLocale(Locale platformLocale) {
@@ -193,6 +198,14 @@ class _TaskveilAppShellState extends ConsumerState<_TaskveilAppShell>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     final onboardingCompleted = ref.read(onboardingStatusProvider).value;
+    if (state == AppLifecycleState.resumed) {
+      ref.read(reminderNotificationServiceProvider).setForeground(true);
+    } else if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      ref.read(reminderNotificationServiceProvider).setForeground(false);
+    }
     if (state == AppLifecycleState.resumed && onboardingCompleted == true) {
       ref.read(appForegroundProvider.notifier).setForeground(true);
       unawaited(_settleRecurrenceAndSync());

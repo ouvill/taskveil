@@ -6,8 +6,8 @@ mod sync;
 pub use account::{AccountRegistrationPending, AccountRegistrationPhase, AccountRegistrationState};
 pub use application::{
     CalendarOccurrenceKind, CalendarOccurrenceView, CalendarRange, CreateTaskCommand, HomeTaskView,
-    ReminderView, ReorderTaskCommand, SetTaskStatusCommand, TaskUndoKind, TaskUndoView,
-    UpdateTaskCommand,
+    ReminderNotificationActionView, ReminderNotificationCommandView, ReminderView,
+    ReorderTaskCommand, SetTaskStatusCommand, TaskUndoKind, TaskUndoView, UpdateTaskCommand,
 };
 pub use recurrence::{
     CreateTaskSeriesFromTaskCommand, CreateTaskSeriesFromTemplateCommand, CreateTemplateCommand,
@@ -28,8 +28,9 @@ use taskveil_crypto::{derive_local_db_key, PlatformLocalKeyCapsuleStore};
 use taskveil_storage::{
     open_encrypted, InternalMetadataRepository, ListRepository, LocalCryptoRepository,
     SqliteAppSettingsRepository, SqliteInternalMetadataRepository, SqliteListRepository,
-    SqliteLocalCryptoRepository, SqliteProfileCoordinationRepository, SqliteReminderRepository,
-    SqliteTaskRepository, SqliteTemplateSeriesRepository, SqliteTimerSessionRepository,
+    SqliteLocalCryptoRepository, SqliteProfileCoordinationRepository,
+    SqliteReminderNotificationRepository, SqliteReminderRepository, SqliteTaskRepository,
+    SqliteTemplateSeriesRepository, SqliteTimerSessionRepository,
 };
 use taskveil_sync::SyncRunSummary;
 use zeroize::Zeroizing;
@@ -502,6 +503,14 @@ impl TaskveilClient {
     ) -> Result<T, ClientError> {
         let connection = open_encrypted(&self.db_path, &self.db_key())?;
         f(&mut SqliteReminderRepository::new(connection))
+    }
+
+    pub(super) fn with_reminder_notification_repository<T>(
+        &self,
+        f: impl FnOnce(&mut SqliteReminderNotificationRepository) -> Result<T, ClientError>,
+    ) -> Result<T, ClientError> {
+        let connection = open_encrypted(&self.db_path, &self.db_key())?;
+        f(&mut SqliteReminderNotificationRepository::new(connection))
     }
 
     pub(super) fn with_timer_repository<T>(

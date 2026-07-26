@@ -19,8 +19,6 @@ void main() {
       const notificationId = 19072501;
       const payload = ReminderNotificationPayload(
         reminderId: 'android-emulator-reminder',
-        taskId: 'android-emulator-task',
-        listId: 'android-emulator-list',
       );
       addTearDown(() => gateway.cancel(notificationId));
 
