@@ -934,7 +934,7 @@ fn verify_current_token_access(
     let mut privileges_len = (privileges.len() * std::mem::size_of::<usize>()) as u32;
     let mut granted = 0;
     let mut allowed = 0;
-    if unsafe {
+    let checked = unsafe {
         AccessCheck(
             descriptor,
             impersonation_token.0,
@@ -945,10 +945,14 @@ fn verify_current_token_access(
             &mut granted,
             &mut allowed,
         )
-    } == 0
-        || allowed == 0
-        || granted & desired != desired
-    {
+    };
+    if checked == 0 || allowed == 0 || granted & desired != desired {
+        #[cfg(test)]
+        eprintln!(
+            "taskveil windows access check: api={checked} allowed={allowed} \
+             granted=0x{granted:08x} desired=0x{desired:08x} last_error={}",
+            std::io::Error::last_os_error()
+        );
         return Err(profile_coordination_failure("access_check"));
     }
     Ok(())
