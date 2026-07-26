@@ -54,6 +54,11 @@ if find "$root/app/rust/src" -type f -name '*.rs' ! -name 'frb_generated.rs' ! -
   fail 'app/rust/src: process-global TaskveilClient handle is only allowed in client_handle.rs'
 fi
 
+if grep -En 'pub[[:space:]]+fn[[:space:]]+(get_setting|set_setting)[[:space:]]*\(' \
+  "$root/app/rust/src/api.rs" >/dev/null; then
+  fail 'app/rust/src/api.rs: raw string-key settings APIs must not cross the frontend boundary'
+fi
+
 if find "$root" -type d \( -name .git -o -name target -o -name build \) -prune -o \
   -type f -name 'Cargo.toml' -exec grep -En '^name[[:space:]]*=[[:space:]]*"core"' {} + \
   >/dev/null; then

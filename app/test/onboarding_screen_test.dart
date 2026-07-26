@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:taskveil/main.dart';
 import 'package:taskveil/src/core/providers.dart';
+import 'package:taskveil/src/rust/api.dart' show FrontendSettingKeyDto;
 
 import 'support/fake_bridge_service.dart';
 
@@ -9,11 +10,14 @@ class _FailingOnboardingSettingsFake extends FakeBridgeService {
   _FailingOnboardingSettingsFake() : super(onboardingCompleted: false);
 
   @override
-  Future<void> setSetting({required String key, required String value}) async {
+  Future<void> setFrontendSetting({
+    required FrontendSettingKeyDto key,
+    required String value,
+  }) async {
     if (key == onboardingCompletedSettingKey) {
       throw Exception('settings unavailable');
     }
-    await super.setSetting(key: key, value: value);
+    await super.setFrontendSetting(key: key, value: value);
   }
 }
 
@@ -48,7 +52,10 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('onboarding-primary-action')));
     await tester.pumpAndSettle();
 
-    expect(await fake.getSetting(key: onboardingCompletedSettingKey), '1');
+    expect(
+      await fake.getFrontendSetting(key: onboardingCompletedSettingKey),
+      '1',
+    );
     expect(find.text('Make room for what matters'), findsNothing);
     expect(find.text('Lists'), findsOneWidget);
     expect(find.byKey(const ValueKey('quick-add-open')), findsOneWidget);

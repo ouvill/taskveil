@@ -99,6 +99,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   CompletedTimerSessionDto dco_decode_completed_timer_session_dto(dynamic raw);
 
   @protected
+  FrontendSettingKeyDto dco_decode_frontend_setting_key_dto(dynamic raw);
+
+  @protected
   HomeTaskDto dco_decode_home_task_dto(dynamic raw);
 
   @protected
@@ -342,6 +345,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   CompletedTimerSessionDto sse_decode_completed_timer_session_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  FrontendSettingKeyDto sse_decode_frontend_setting_key_dto(
     SseDeserializer deserializer,
   );
 
@@ -636,6 +644,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_completed_timer_session_dto(
     CompletedTimerSessionDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_frontend_setting_key_dto(
+    FrontendSettingKeyDto self,
     SseSerializer serializer,
   );
 

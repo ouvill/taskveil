@@ -40,7 +40,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1773028442;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -944964607;
 
 // Section: executor
 
@@ -1079,6 +1079,39 @@ fn wire__crate__api__get_completed_timer_sessions_impl(
         },
     )
 }
+fn wire__crate__api__get_frontend_setting_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "get_frontend_setting",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_key = <crate::api::FrontendSettingKeyDto>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::get_frontend_setting(api_key)?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__get_home_tasks_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -1274,39 +1307,6 @@ fn wire__crate__api__get_realtime_ticket_impl(
                     })()
                     .await,
                 )
-            }
-        },
-    )
-}
-fn wire__crate__api__get_setting_impl(
-    port_: flutter_rust_bridge::for_generated::MessagePort,
-    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
-    rust_vec_len_: i32,
-    data_len_: i32,
-) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "get_setting",
-            port: Some(port_),
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
-        },
-        move || {
-            let message = unsafe {
-                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
-                    ptr_,
-                    rust_vec_len_,
-                    data_len_,
-                )
-            };
-            let mut deserializer =
-                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
-            let api_key = <String>::sse_decode(&mut deserializer);
-            deserializer.end();
-            move |context| {
-                transform_result_sse::<_, String>((move || {
-                    let output_ok = crate::api::get_setting(api_key)?;
-                    Ok(output_ok)
-                })())
             }
         },
     )
@@ -2026,7 +2026,7 @@ fn wire__crate__api__search_tasks_impl(
         },
     )
 }
-fn wire__crate__api__set_setting_impl(
+fn wire__crate__api__set_frontend_setting_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -2034,7 +2034,7 @@ fn wire__crate__api__set_setting_impl(
 ) {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "set_setting",
+            debug_name: "set_frontend_setting",
             port: Some(port_),
             mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
         },
@@ -2048,12 +2048,12 @@ fn wire__crate__api__set_setting_impl(
             };
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
-            let api_key = <String>::sse_decode(&mut deserializer);
+            let api_key = <crate::api::FrontendSettingKeyDto>::sse_decode(&mut deserializer);
             let api_value = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, String>((move || {
-                    let output_ok = crate::api::set_setting(api_key, api_value)?;
+                    let output_ok = crate::api::set_frontend_setting(api_key, api_value)?;
                     Ok(output_ok)
                 })())
             }
@@ -2829,6 +2829,21 @@ impl SseDecode for crate::api::CompletedTimerSessionDto {
     }
 }
 
+impl SseDecode for crate::api::FrontendSettingKeyDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::FrontendSettingKeyDto::UiMode,
+            1 => crate::api::FrontendSettingKeyDto::OnboardingCompleted,
+            2 => crate::api::FrontendSettingKeyDto::CalendarWeekStart,
+            3 => crate::api::FrontendSettingKeyDto::TimerSettings,
+            4 => crate::api::FrontendSettingKeyDto::TimerRuntime,
+            _ => unreachable!("Invalid variant for FrontendSettingKeyDto: {}", inner),
+        };
+    }
+}
+
 impl SseDecode for crate::api::HomeTaskDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -3570,13 +3585,13 @@ fn pde_ffi_dispatcher_primary_impl(
         29 => {
             wire__crate__api__get_completed_timer_sessions_impl(port, ptr, rust_vec_len, data_len)
         }
-        30 => wire__crate__api__get_home_tasks_impl(port, ptr, rust_vec_len, data_len),
-        31 => wire__crate__api__get_latest_task_undo_impl(port, ptr, rust_vec_len, data_len),
-        32 => wire__crate__api__get_list_reminders_impl(port, ptr, rust_vec_len, data_len),
-        33 => wire__crate__api__get_lists_impl(port, ptr, rust_vec_len, data_len),
-        34 => wire__crate__api__get_local_time_zone_impl(port, ptr, rust_vec_len, data_len),
-        35 => wire__crate__api__get_realtime_ticket_impl(port, ptr, rust_vec_len, data_len),
-        36 => wire__crate__api__get_setting_impl(port, ptr, rust_vec_len, data_len),
+        30 => wire__crate__api__get_frontend_setting_impl(port, ptr, rust_vec_len, data_len),
+        31 => wire__crate__api__get_home_tasks_impl(port, ptr, rust_vec_len, data_len),
+        32 => wire__crate__api__get_latest_task_undo_impl(port, ptr, rust_vec_len, data_len),
+        33 => wire__crate__api__get_list_reminders_impl(port, ptr, rust_vec_len, data_len),
+        34 => wire__crate__api__get_lists_impl(port, ptr, rust_vec_len, data_len),
+        35 => wire__crate__api__get_local_time_zone_impl(port, ptr, rust_vec_len, data_len),
+        36 => wire__crate__api__get_realtime_ticket_impl(port, ptr, rust_vec_len, data_len),
         37 => wire__crate__api__get_sync_server_url_impl(port, ptr, rust_vec_len, data_len),
         38 => wire__crate__api__get_sync_status_impl(port, ptr, rust_vec_len, data_len),
         39 => wire__crate__api__get_task_reminders_impl(port, ptr, rust_vec_len, data_len),
@@ -3598,7 +3613,7 @@ fn pde_ffi_dispatcher_primary_impl(
         55 => wire__crate__api__rotate_device_key_impl(port, ptr, rust_vec_len, data_len),
         56 => wire__crate__api__save_task_as_template_impl(port, ptr, rust_vec_len, data_len),
         57 => wire__crate__api__search_tasks_impl(port, ptr, rust_vec_len, data_len),
-        58 => wire__crate__api__set_setting_impl(port, ptr, rust_vec_len, data_len),
+        58 => wire__crate__api__set_frontend_setting_impl(port, ptr, rust_vec_len, data_len),
         59 => wire__crate__api__set_sync_server_url_impl(port, ptr, rust_vec_len, data_len),
         60 => wire__crate__api__set_task_status_impl(port, ptr, rust_vec_len, data_len),
         61 => wire__crate__api__settle_due_series_impl(port, ptr, rust_vec_len, data_len),
@@ -3859,6 +3874,30 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::CompletedTimerSessionDto>
     for crate::api::CompletedTimerSessionDto
 {
     fn into_into_dart(self) -> crate::api::CompletedTimerSessionDto {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::FrontendSettingKeyDto {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::UiMode => 0.into_dart(),
+            Self::OnboardingCompleted => 1.into_dart(),
+            Self::CalendarWeekStart => 2.into_dart(),
+            Self::TimerSettings => 3.into_dart(),
+            Self::TimerRuntime => 4.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::FrontendSettingKeyDto
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::FrontendSettingKeyDto>
+    for crate::api::FrontendSettingKeyDto
+{
+    fn into_into_dart(self) -> crate::api::FrontendSettingKeyDto {
         self
     }
 }
@@ -4456,6 +4495,25 @@ impl SseEncode for crate::api::CompletedTimerSessionDto {
         <chrono::DateTime<chrono::Utc>>::sse_encode(self.ended_at, serializer);
         <i64>::sse_encode(self.active_duration_ms, serializer);
         <chrono::DateTime<chrono::Utc>>::sse_encode(self.created_at, serializer);
+    }
+}
+
+impl SseEncode for crate::api::FrontendSettingKeyDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::FrontendSettingKeyDto::UiMode => 0,
+                crate::api::FrontendSettingKeyDto::OnboardingCompleted => 1,
+                crate::api::FrontendSettingKeyDto::CalendarWeekStart => 2,
+                crate::api::FrontendSettingKeyDto::TimerSettings => 3,
+                crate::api::FrontendSettingKeyDto::TimerRuntime => 4,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
     }
 }
 

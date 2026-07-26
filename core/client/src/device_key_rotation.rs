@@ -8,7 +8,7 @@ use taskveil_storage::{open_encrypted, rekey_encrypted_database, StorageError};
 use zeroize::Zeroizing;
 
 use crate::{
-    runtime::{CryptoRuntimeState, TaskveilClient, ACCOUNT_USER_ID_SETTING_KEY},
+    runtime::{CryptoRuntimeState, TaskveilClient, ACCOUNT_USER_ID_METADATA_KEY},
     ClientError, Uuid,
 };
 
@@ -33,7 +33,7 @@ impl TaskveilClient {
                 CryptoRuntimeState::Anonymous => None,
                 CryptoRuntimeState::Ready(crypto) => {
                     let user_id = self
-                        .non_empty_setting(ACCOUNT_USER_ID_SETTING_KEY)?
+                        .non_empty_internal_metadata(ACCOUNT_USER_ID_METADATA_KEY)?
                         .ok_or(ClientError::IncompleteAccountState)?
                         .parse::<Uuid>()
                         .map_err(|_| ClientError::IncompleteAccountState)?;

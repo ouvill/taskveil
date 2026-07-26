@@ -29,7 +29,7 @@ void main() {
     final profile = Directory('${support.path}/android-ui-smoke-$_runId');
     await profile.create(recursive: true);
     await initCore(dbDir: profile.path, defaultInboxName: 'Inbox');
-    await setSetting(key: onboardingCompletedSettingKey, value: '1');
+    await setFrontendSetting(key: onboardingCompletedSettingKey, value: '1');
 
     final inbox = (await getLists()).singleWhere((list) => list.isDefault);
     final taskTitle = 'Android UI smoke $_runId';

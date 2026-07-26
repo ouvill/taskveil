@@ -64,7 +64,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.12.0';
 
   @override
-  int get rustContentHash => -1773028442;
+  int get rustContentHash => -944964607;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -188,6 +188,10 @@ abstract class RustLibApi extends BaseApi {
     required String taskId,
   });
 
+  Future<String?> crateApiGetFrontendSetting({
+    required FrontendSettingKeyDto key,
+  });
+
   Future<List<HomeTaskDto>> crateApiGetHomeTasks({
     required PlatformInt64 todayStartMs,
     required PlatformInt64 tomorrowStartMs,
@@ -202,8 +206,6 @@ abstract class RustLibApi extends BaseApi {
   Future<String> crateApiGetLocalTimeZone();
 
   Future<RealtimeTicketDto> crateApiGetRealtimeTicket();
-
-  Future<String?> crateApiGetSetting({required String key});
 
   Future<String> crateApiGetSyncServerUrl();
 
@@ -278,7 +280,10 @@ abstract class RustLibApi extends BaseApi {
 
   Future<List<TaskDto>> crateApiSearchTasks({required String query});
 
-  Future<void> crateApiSetSetting({required String key, required String value});
+  Future<void> crateApiSetFrontendSetting({
+    required FrontendSettingKeyDto key,
+    required String value,
+  });
 
   Future<void> crateApiSetSyncServerUrl({required String serverUrl});
 
@@ -1315,6 +1320,36 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<String?> crateApiGetFrontendSetting({
+    required FrontendSettingKeyDto key,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_frontend_setting_key_dto(key, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 30,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_opt_String,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiGetFrontendSettingConstMeta,
+        argValues: [key],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiGetFrontendSettingConstMeta =>
+      const TaskConstMeta(debugName: "get_frontend_setting", argNames: ["key"]);
+
+  @override
   Future<List<HomeTaskDto>> crateApiGetHomeTasks({
     required PlatformInt64 todayStartMs,
     required PlatformInt64 tomorrowStartMs,
@@ -1328,7 +1363,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 30,
+            funcId: 31,
             port: port_,
           );
         },
@@ -1357,7 +1392,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 31,
+            funcId: 32,
             port: port_,
           );
         },
@@ -1385,7 +1420,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 32,
+            funcId: 33,
             port: port_,
           );
         },
@@ -1414,7 +1449,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 33,
+            funcId: 34,
             port: port_,
           );
         },
@@ -1441,7 +1476,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 34,
+            funcId: 35,
             port: port_,
           );
         },
@@ -1468,7 +1503,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 35,
+            funcId: 36,
             port: port_,
           );
         },
@@ -1485,34 +1520,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   TaskConstMeta get kCrateApiGetRealtimeTicketConstMeta =>
       const TaskConstMeta(debugName: "get_realtime_ticket", argNames: []);
-
-  @override
-  Future<String?> crateApiGetSetting({required String key}) {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_String(key, serializer);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 36,
-            port: port_,
-          );
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_opt_String,
-          decodeErrorData: sse_decode_String,
-        ),
-        constMeta: kCrateApiGetSettingConstMeta,
-        argValues: [key],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiGetSettingConstMeta =>
-      const TaskConstMeta(debugName: "get_setting", argNames: ["key"]);
 
   @override
   Future<String> crateApiGetSyncServerUrl() {
@@ -2168,15 +2175,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "search_tasks", argNames: ["query"]);
 
   @override
-  Future<void> crateApiSetSetting({
-    required String key,
+  Future<void> crateApiSetFrontendSetting({
+    required FrontendSettingKeyDto key,
     required String value,
   }) {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_String(key, serializer);
+          sse_encode_frontend_setting_key_dto(key, serializer);
           sse_encode_String(value, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
@@ -2189,15 +2196,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeSuccessData: sse_decode_unit,
           decodeErrorData: sse_decode_String,
         ),
-        constMeta: kCrateApiSetSettingConstMeta,
+        constMeta: kCrateApiSetFrontendSettingConstMeta,
         argValues: [key, value],
         apiImpl: this,
       ),
     );
   }
 
-  TaskConstMeta get kCrateApiSetSettingConstMeta =>
-      const TaskConstMeta(debugName: "set_setting", argNames: ["key", "value"]);
+  TaskConstMeta get kCrateApiSetFrontendSettingConstMeta => const TaskConstMeta(
+    debugName: "set_frontend_setting",
+    argNames: ["key", "value"],
+  );
 
   @override
   Future<void> crateApiSetSyncServerUrl({required String serverUrl}) {
@@ -2980,6 +2989,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  FrontendSettingKeyDto dco_decode_frontend_setting_key_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return FrontendSettingKeyDto.values[raw as int];
+  }
+
+  @protected
   HomeTaskDto dco_decode_home_task_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
@@ -3740,6 +3755,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       activeDurationMs: var_activeDurationMs,
       createdAt: var_createdAt,
     );
+  }
+
+  @protected
+  FrontendSettingKeyDto sse_decode_frontend_setting_key_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return FrontendSettingKeyDto.values[inner];
   }
 
   @protected
@@ -4653,6 +4677,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_Chrono_Utc(self.endedAt, serializer);
     sse_encode_i_64(self.activeDurationMs, serializer);
     sse_encode_Chrono_Utc(self.createdAt, serializer);
+  }
+
+  @protected
+  void sse_encode_frontend_setting_key_dto(
+    FrontendSettingKeyDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
   }
 
   @protected

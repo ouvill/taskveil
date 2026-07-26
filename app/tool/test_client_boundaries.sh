@@ -49,6 +49,11 @@ printf '%s\n' 'use std::sync::OnceLock;' 'static ROGUE: OnceLock<()> = OnceLock:
 expect_failure rogue-process-handle
 rm "$fixture/app/rust/src/rogue_handle.rs"
 
+printf '%s\n' 'pub fn set_setting(key: String, value: String) {}' >> \
+  "$fixture/app/rust/src/api.rs"
+expect_failure raw-settings-api
+cp "$repo_root/app/rust/src/api.rs" "$fixture/app/rust/src/api.rs"
+
 printf '%s\n' "import '../../tool/design_lab.dart';" > \
   "$fixture/app/lib/rogue_design_import.dart"
 expect_failure production-design-lab-import

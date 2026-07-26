@@ -3,7 +3,7 @@ use taskveil_domain::{CompletedTimerSession, List, Task, TaskSeries, TaskTemplat
 
 use crate::{
     encrypt_plaintext, EncryptedSyncState, Hlc, SyncCollection, SyncPlaintext,
-    SYNC_LOCAL_HLC_SETTING_KEY,
+    SYNC_LOCAL_HLC_METADATA_KEY,
 };
 
 use crate::keys::{tenant_root_dek, LocalSyncKeys};
@@ -370,7 +370,7 @@ where
     N: FnMut() -> Result<i64, String>,
 {
     let stored_clock = store
-        .get_setting(SYNC_LOCAL_HLC_SETTING_KEY)?
+        .get_setting(SYNC_LOCAL_HLC_METADATA_KEY)?
         .filter(|encoded| !encoded.is_empty())
         .map(|encoded| Hlc::decode(&encoded).map_err(|_| "sync failed".to_string()))
         .transpose()?;
@@ -421,7 +421,7 @@ where
         })?;
     }
     store.set_setting(
-        SYNC_LOCAL_HLC_SETTING_KEY,
+        SYNC_LOCAL_HLC_METADATA_KEY,
         &clock.encode().map_err(|_| "sync failed".to_string())?,
         now_ms()?,
     )?;
@@ -558,13 +558,13 @@ where
 {
     keys.validate_for_write().map_err(str::to_string)?;
     if store
-        .get_setting(crate::KEY_ROTATION_PENDING_SETTING_KEY)?
+        .get_setting(crate::KEY_ROTATION_PENDING_METADATA_KEY)?
         .as_deref()
         .is_some_and(|value| value != "0" && value != keys.tenant_generation.to_string())
     {
         return Err("active key generation required".to_string());
     }
-    store.set_setting(crate::KEY_ROTATION_PENDING_SETTING_KEY, "0", now_ms()?)?;
+    store.set_setting(crate::KEY_ROTATION_PENDING_METADATA_KEY, "0", now_ms()?)?;
     let mut summary = BackfillSummary::default();
     for list in records.lists {
         if tenant_root_dek(keys).is_none() {
@@ -611,7 +611,7 @@ where
         summary.enqueued_timer_sessions += 1;
     }
     store.set_setting(
-        crate::KEY_ROTATION_PENDING_SETTING_KEY,
+        crate::KEY_ROTATION_PENDING_METADATA_KEY,
         &keys.tenant_generation.to_string(),
         now_ms()?,
     )?;
@@ -846,7 +846,7 @@ where
 
 fn ensure_no_pending_rotation<S: LocalMutationSyncStore>(store: &mut S) -> Result<(), String> {
     if store
-        .get_setting(crate::KEY_ROTATION_PENDING_SETTING_KEY)?
+        .get_setting(crate::KEY_ROTATION_PENDING_METADATA_KEY)?
         .as_deref()
         .is_some_and(|value| value != "0")
     {
@@ -1028,7 +1028,7 @@ where
     S: LocalMutationSyncStore,
     N: FnMut() -> Result<i64, String>,
 {
-    let mut clock = match store.get_setting(SYNC_LOCAL_HLC_SETTING_KEY)? {
+    let mut clock = match store.get_setting(SYNC_LOCAL_HLC_METADATA_KEY)? {
         Some(encoded) if !encoded.is_empty() => {
             Hlc::decode(&encoded).unwrap_or_else(|_| Hlc::new(device_id.to_string()))
         }
@@ -1038,7 +1038,7 @@ where
         .now(now_ms()?)
         .map_err(|_| "sync failed".to_string())?;
     store.set_setting(
-        SYNC_LOCAL_HLC_SETTING_KEY,
+        SYNC_LOCAL_HLC_METADATA_KEY,
         &hlc.encode().map_err(|_| "sync failed".to_string())?,
         now_ms()?,
     )?;
@@ -1071,7 +1071,7 @@ where
     S: LocalMutationSyncStore,
     N: FnMut() -> Result<i64, String>,
 {
-    let mut clock = match store.get_setting(SYNC_LOCAL_HLC_SETTING_KEY)? {
+    let mut clock = match store.get_setting(SYNC_LOCAL_HLC_METADATA_KEY)? {
         Some(encoded) if !encoded.is_empty() => {
             Hlc::decode(&encoded).unwrap_or_else(|_| Hlc::new(device_id.to_string()))
         }
@@ -1083,7 +1083,7 @@ where
         .merge(&remote, now_ms()?)
         .map_err(|_| "sync failed".to_string())?;
     store.set_setting(
-        SYNC_LOCAL_HLC_SETTING_KEY,
+        SYNC_LOCAL_HLC_METADATA_KEY,
         &hlc.encode().map_err(|_| "sync failed".to_string())?,
         now_ms()?,
     )?;
@@ -1100,7 +1100,7 @@ where
     S: LocalMutationSyncStore,
     N: FnMut() -> Result<i64, String>,
 {
-    let mut clock = match store.get_setting(SYNC_LOCAL_HLC_SETTING_KEY)? {
+    let mut clock = match store.get_setting(SYNC_LOCAL_HLC_METADATA_KEY)? {
         Some(encoded) if !encoded.is_empty() => {
             Hlc::decode(&encoded).unwrap_or_else(|_| Hlc::new(device_id.to_string()))
         }
@@ -1112,7 +1112,7 @@ where
         .merge(&remote, now_ms()?)
         .map_err(|_| "sync failed".to_string())?;
     store.set_setting(
-        SYNC_LOCAL_HLC_SETTING_KEY,
+        SYNC_LOCAL_HLC_METADATA_KEY,
         &observed.encode().map_err(|_| "sync failed".to_string())?,
         now_ms()?,
     )

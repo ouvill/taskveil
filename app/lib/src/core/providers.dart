@@ -23,6 +23,7 @@ import 'package:taskveil/src/rust/api.dart'
         CalendarOccurrenceKindDto_Scheduled,
         CalendarRangeInput,
         CompletedTimerSessionDto,
+        FrontendSettingKeyDto,
         HomeTaskDto,
         ListDto,
         ReminderDto,
@@ -260,10 +261,9 @@ final taskSearchProvider =
       TaskSearchNotifier.new,
     );
 
-const uiModeSettingKey = 'ui_mode';
-const onboardingCompletedSettingKey = 'onboarding_completed';
-const syncServerUrlSettingKey = 'sync_server_url';
-const calendarWeekStartSettingKey = 'calendar_week_start';
+const uiModeSettingKey = FrontendSettingKeyDto.uiMode;
+const onboardingCompletedSettingKey = FrontendSettingKeyDto.onboardingCompleted;
+const calendarWeekStartSettingKey = FrontendSettingKeyDto.calendarWeekStart;
 const defaultSyncServerUrl = 'http://localhost:3000';
 const defaultUiMode = 'simple';
 const simpleUiMode = 'simple';
@@ -279,25 +279,22 @@ const _supportedCalendarWeekStarts = {
   sundayCalendarWeekStart,
 };
 
-/// Thin typed entry point for app settings stored in the encrypted local DB.
-///
-/// The generic key/value methods are kept for future notification, theme, and
-/// account settings. Feature-specific helpers own defaults and validation.
+/// Typed entry point for the closed frontend settings allowlist.
 class SettingsRepository {
   SettingsRepository(this._bridge);
 
   final SettingsBridgePort _bridge;
 
-  Future<String?> getSetting(String key) {
-    return _bridge.getSetting(key: key);
+  Future<String?> getFrontendSetting(FrontendSettingKeyDto key) {
+    return _bridge.getFrontendSetting(key: key);
   }
 
-  Future<void> setSetting(String key, String value) {
-    return _bridge.setSetting(key: key, value: value);
+  Future<void> setFrontendSetting(FrontendSettingKeyDto key, String value) {
+    return _bridge.setFrontendSetting(key: key, value: value);
   }
 
   Future<String> getUiMode() async {
-    final persisted = await getSetting(uiModeSettingKey);
+    final persisted = await getFrontendSetting(uiModeSettingKey);
     if (persisted == null || !_supportedUiModes.contains(persisted)) {
       return defaultUiMode;
     }
@@ -308,11 +305,11 @@ class SettingsRepository {
     if (!_supportedUiModes.contains(uiMode)) {
       throw ArgumentError.value(uiMode, 'uiMode', 'unsupported UI mode');
     }
-    return setSetting(uiModeSettingKey, uiMode);
+    return setFrontendSetting(uiModeSettingKey, uiMode);
   }
 
   Future<String> getCalendarWeekStart() async {
-    final persisted = await getSetting(calendarWeekStartSettingKey);
+    final persisted = await getFrontendSetting(calendarWeekStartSettingKey);
     if (persisted == null ||
         !_supportedCalendarWeekStarts.contains(persisted)) {
       return defaultCalendarWeekStart;
@@ -328,7 +325,7 @@ class SettingsRepository {
         'unsupported calendar week start',
       );
     }
-    return setSetting(calendarWeekStartSettingKey, weekStart);
+    return setFrontendSetting(calendarWeekStartSettingKey, weekStart);
   }
 }
 
@@ -851,20 +848,20 @@ final calendarWeekStartProvider =
 
 /// Gates the one-time welcome experience before the app starts its ordinary
 /// Home and sync providers. The flag is device-local and remains inside the
-/// encrypted settings table; it is intentionally not synchronized.
+/// encrypted `app_settings` table; it is intentionally not synchronized.
 class OnboardingStatusNotifier extends AsyncNotifier<bool> {
   @override
   FutureOr<bool> build() async {
     final value = await ref
         .watch(settingsRepositoryProvider)
-        .getSetting(onboardingCompletedSettingKey);
+        .getFrontendSetting(onboardingCompletedSettingKey);
     return value == '1';
   }
 
   Future<void> complete() async {
     await ref
         .read(settingsRepositoryProvider)
-        .setSetting(onboardingCompletedSettingKey, '1');
+        .setFrontendSetting(onboardingCompletedSettingKey, '1');
     state = const AsyncData(true);
   }
 }

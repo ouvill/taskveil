@@ -22,7 +22,7 @@ use taskveil_storage::{
     SqliteProfileCoordinationRepository,
 };
 #[cfg(test)]
-use taskveil_sync::SYNC_LOCAL_HLC_SETTING_KEY;
+use taskveil_sync::SYNC_LOCAL_HLC_METADATA_KEY;
 use taskveil_sync::{
     account::{
         unwrap_active_key_bundle, unwrap_historical_key_bundles, AccountClient, AccountClientError,
@@ -37,10 +37,10 @@ use taskveil_sync::{
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use super::{
-    now_ms, AccountReadiness, CryptoRuntimeState, TaskveilClient, ACCOUNT_DEVICE_ID_SETTING_KEY,
-    ACCOUNT_EMAIL_SETTING_KEY, ACCOUNT_MK_GENERATION_SETTING_KEY, ACCOUNT_ROOT_PUBLIC_SETTING_KEY,
-    ACCOUNT_SESSION_EXPIRES_AT_SETTING_KEY, ACCOUNT_TENANT_ID_SETTING_KEY,
-    ACCOUNT_USER_ID_SETTING_KEY,
+    now_ms, AccountReadiness, CryptoRuntimeState, TaskveilClient, ACCOUNT_DEVICE_ID_METADATA_KEY,
+    ACCOUNT_EMAIL_METADATA_KEY, ACCOUNT_MK_GENERATION_METADATA_KEY,
+    ACCOUNT_ROOT_PUBLIC_METADATA_KEY, ACCOUNT_SESSION_EXPIRES_AT_METADATA_KEY,
+    ACCOUNT_TENANT_ID_METADATA_KEY, ACCOUNT_USER_ID_METADATA_KEY,
 };
 #[cfg(test)]
 use crate::persist_local_crypto_context;
@@ -55,7 +55,7 @@ enum AccountAuthMode {
     Login,
 }
 
-const BILLING_ENTITLEMENT_CACHE_SETTING_KEY: &str = "billing_entitlement_cache";
+const BILLING_ENTITLEMENT_CACHE_METADATA_KEY: &str = "billing_entitlement_cache";
 const SESSION_TOKEN_SET_VERSION: u8 = 2;
 const ACCESS_TOKEN_REFRESH_SKEW_MS: i64 = 60_000;
 const ABSENT_CREDENTIAL_GENERATION: &str = "absent";
@@ -677,7 +677,7 @@ impl TaskveilClient {
         let device_id = parse_uuid(&device_id)?;
         let local_user_id = parse_uuid(
             &self
-                .non_empty_setting(ACCOUNT_USER_ID_SETTING_KEY)?
+                .non_empty_internal_metadata(ACCOUNT_USER_ID_METADATA_KEY)?
                 .ok_or(ClientError::IncompleteAccountState)?,
         )?;
         let session_token = self.access_token(false).await?;
@@ -878,7 +878,7 @@ impl TaskveilClient {
 
     pub fn cached_billing(&self) -> Result<Option<BillingState>, ClientError> {
         let _operation = self.begin_operation()?;
-        self.setting(BILLING_ENTITLEMENT_CACHE_SETTING_KEY)?
+        self.internal_metadata(BILLING_ENTITLEMENT_CACHE_METADATA_KEY)?
             .map(|value| serde_json::from_str(&value).map_err(|_| ClientError::AccountRequest))
             .transpose()
     }
@@ -906,8 +906,8 @@ impl TaskveilClient {
         }
         .map_err(map_account_client_error)?;
         let state = billing_state(response);
-        self.set_setting_value(
-            BILLING_ENTITLEMENT_CACHE_SETTING_KEY,
+        self.set_internal_metadata_value(
+            BILLING_ENTITLEMENT_CACHE_METADATA_KEY,
             &serde_json::to_string(&state).map_err(|_| ClientError::AccountRequest)?,
         )?;
         Ok(state)
@@ -979,7 +979,7 @@ impl TaskveilClient {
                     &outcome.local_wrapped_master_key,
                     &outcome.keys,
                 )?;
-                self.set_setting_value(super::SYNC_SERVER_URL_SETTING_KEY, &server_url)?;
+                self.set_internal_metadata_value(super::SYNC_SERVER_URL_METADATA_KEY, &server_url)?;
                 self.replace_account_runtime(Some(session.clone()), crypto)?;
                 // A new profile has no initial-backfill cursor. Do not delete a
                 // durable cursor here: same-profile authentication must be
@@ -1103,7 +1103,7 @@ impl TaskveilClient {
             &provisional.local_wrapped_master_key,
             &provisional.keys,
         )?;
-        self.set_setting_value(super::SYNC_SERVER_URL_SETTING_KEY, &issuer)?;
+        self.set_internal_metadata_value(super::SYNC_SERVER_URL_METADATA_KEY, &issuer)?;
         self.replace_account_runtime(Some(session.clone()), crypto)?;
         Ok(AccountAuthResult {
             session,
@@ -1162,16 +1162,16 @@ impl TaskveilClient {
         let restored_session = match credential.as_ref() {
             Some(StoredSessionCredential::Active(_)) => {
                 let email = self
-                    .non_empty_setting(ACCOUNT_EMAIL_SETTING_KEY)?
+                    .non_empty_internal_metadata(ACCOUNT_EMAIL_METADATA_KEY)?
                     .ok_or(ClientError::IncompleteAccountState)?;
                 let user_id = self
-                    .non_empty_setting(ACCOUNT_USER_ID_SETTING_KEY)?
+                    .non_empty_internal_metadata(ACCOUNT_USER_ID_METADATA_KEY)?
                     .ok_or(ClientError::IncompleteAccountState)?;
                 let tenant_id = self
-                    .non_empty_setting(ACCOUNT_TENANT_ID_SETTING_KEY)?
+                    .non_empty_internal_metadata(ACCOUNT_TENANT_ID_METADATA_KEY)?
                     .ok_or(ClientError::IncompleteAccountState)?;
                 let device_id = self
-                    .non_empty_setting(ACCOUNT_DEVICE_ID_SETTING_KEY)?
+                    .non_empty_internal_metadata(ACCOUNT_DEVICE_ID_METADATA_KEY)?
                     .ok_or(ClientError::IncompleteAccountState)?;
                 let session_identity = LocalCryptoIdentity {
                     user_id: parse_uuid(&user_id)?,
@@ -1208,7 +1208,7 @@ impl TaskveilClient {
         let master_key = match active_capsule.wrapped_master_key() {
             Some(local_wrapped_master_key) => {
                 let user_id = self
-                    .non_empty_setting(ACCOUNT_USER_ID_SETTING_KEY)?
+                    .non_empty_internal_metadata(ACCOUNT_USER_ID_METADATA_KEY)?
                     .ok_or(ClientError::IncompleteAccountState)
                     .and_then(|value| parse_uuid(&value))?;
                 let device_key = Zeroizing::new(*active_capsule.device_key());
@@ -1450,7 +1450,7 @@ impl TaskveilClient {
             .map_err(super::sync::map_sync_run_error)?;
         transaction
             .set_setting(
-                taskveil_sync::KEY_ROTATION_PENDING_SETTING_KEY,
+                taskveil_sync::KEY_ROTATION_PENDING_METADATA_KEY,
                 "0",
                 cutover_now,
             )
@@ -1534,10 +1534,10 @@ impl TaskveilClient {
             }
         } else if self.has_legacy_account_binding()? {
             let legacy_tenant = self
-                .non_empty_setting(ACCOUNT_TENANT_ID_SETTING_KEY)?
+                .non_empty_internal_metadata(ACCOUNT_TENANT_ID_METADATA_KEY)?
                 .ok_or(ClientError::IncompleteAccountState)?;
             let legacy_user = self
-                .non_empty_setting(ACCOUNT_USER_ID_SETTING_KEY)?
+                .non_empty_internal_metadata(ACCOUNT_USER_ID_METADATA_KEY)?
                 .ok_or(ClientError::IncompleteAccountState)?;
             if parse_uuid(&legacy_tenant)? != tenant_id || parse_uuid(&legacy_user)? != user_id {
                 return Err(ClientError::ProfileIdentityMismatch);
@@ -1552,11 +1552,11 @@ impl TaskveilClient {
     ) -> Result<(), ClientError> {
         let local_user_id = parse_uuid(
             &self
-                .non_empty_setting(ACCOUNT_USER_ID_SETTING_KEY)?
+                .non_empty_internal_metadata(ACCOUNT_USER_ID_METADATA_KEY)?
                 .ok_or(ClientError::IncompleteAccountState)?,
         )?;
         let local_root = self
-            .non_empty_setting(ACCOUNT_ROOT_PUBLIC_SETTING_KEY)?
+            .non_empty_internal_metadata(ACCOUNT_ROOT_PUBLIC_METADATA_KEY)?
             .ok_or(ClientError::IncompleteAccountState)?;
         let expected_local_root = if response.owner_user_id == local_user_id {
             &response.owner_root_public
@@ -1590,7 +1590,7 @@ impl TaskveilClient {
         member_user_id: Uuid,
     ) -> Result<Option<OrganizationTrustPin>, ClientError> {
         let Some(value) =
-            self.setting(&Self::organization_trust_pin_key(tenant_id, member_user_id))?
+            self.internal_metadata(&Self::organization_trust_pin_key(tenant_id, member_user_id))?
         else {
             return Ok(None);
         };
@@ -1605,7 +1605,7 @@ impl TaskveilClient {
         member_user_id: Uuid,
         pin: &OrganizationTrustPin,
     ) -> Result<(), ClientError> {
-        self.set_setting_value(
+        self.set_internal_metadata_value(
             &Self::organization_trust_pin_key(tenant_id, member_user_id),
             &pin.encode(),
         )
@@ -1622,7 +1622,7 @@ impl TaskveilClient {
             (crypto.user_id(), Zeroizing::new(*crypto.master_key()))
         };
         let generation = self
-            .non_empty_setting(ACCOUNT_MK_GENERATION_SETTING_KEY)?
+            .non_empty_internal_metadata(ACCOUNT_MK_GENERATION_METADATA_KEY)?
             .ok_or(ClientError::IncompleteAccountState)?
             .parse::<u64>()
             .map_err(|_| ClientError::IncompleteAccountState)?;
@@ -1641,7 +1641,7 @@ impl TaskveilClient {
         let public = AccountRootPublicKeys::decode(
             &STANDARD
                 .decode(
-                    self.non_empty_setting(ACCOUNT_ROOT_PUBLIC_SETTING_KEY)?
+                    self.non_empty_internal_metadata(ACCOUNT_ROOT_PUBLIC_METADATA_KEY)?
                         .ok_or(ClientError::IncompleteAccountState)?,
                 )
                 .map_err(|_| ClientError::IncompleteAccountState)?,
@@ -1684,7 +1684,7 @@ impl TaskveilClient {
         .map_err(|_| ClientError::Sync)?;
         transaction
             .set_setting(
-                ACCOUNT_DEVICE_ID_SETTING_KEY,
+                ACCOUNT_DEVICE_ID_METADATA_KEY,
                 &identity.device_id.to_string(),
                 persistence_now,
             )
@@ -1699,32 +1699,32 @@ impl TaskveilClient {
             .map_err(|_| ClientError::Sync)?;
         transaction.commit().map_err(|_| ClientError::Sync)?;
         self.store_active_wrapped_master_key(local_wrapped_master_key.to_vec())?;
-        self.set_setting_value(
-            ACCOUNT_EMAIL_SETTING_KEY,
+        self.set_internal_metadata_value(
+            ACCOUNT_EMAIL_METADATA_KEY,
             session.email.as_deref().unwrap_or_default(),
         )?;
-        self.set_setting_value(
-            ACCOUNT_USER_ID_SETTING_KEY,
+        self.set_internal_metadata_value(
+            ACCOUNT_USER_ID_METADATA_KEY,
             session.user_id.as_deref().unwrap_or_default(),
         )?;
-        self.set_setting_value(
-            ACCOUNT_TENANT_ID_SETTING_KEY,
+        self.set_internal_metadata_value(
+            ACCOUNT_TENANT_ID_METADATA_KEY,
             session.tenant_id.as_deref().unwrap_or_default(),
         )?;
-        self.set_setting_value(
-            ACCOUNT_DEVICE_ID_SETTING_KEY,
+        self.set_internal_metadata_value(
+            ACCOUNT_DEVICE_ID_METADATA_KEY,
             session.device_id.as_deref().unwrap_or_default(),
         )?;
-        self.set_setting_value(
-            ACCOUNT_ROOT_PUBLIC_SETTING_KEY,
+        self.set_internal_metadata_value(
+            ACCOUNT_ROOT_PUBLIC_METADATA_KEY,
             &STANDARD.encode(
                 keys.account_root_public
                     .encode()
                     .map_err(|_| ClientError::AccountBoundUnavailable)?,
             ),
         )?;
-        self.set_setting_value(
-            ACCOUNT_MK_GENERATION_SETTING_KEY,
+        self.set_internal_metadata_value(
+            ACCOUNT_MK_GENERATION_METADATA_KEY,
             &keys.generation.to_string(),
         )?;
         let root_private = keys.account_root_private.encode();
@@ -1762,20 +1762,20 @@ impl TaskveilClient {
             crate::SqliteSyncStore::begin_profile_cutover_transaction(&self.db_path, &db_key)
                 .map_err(|_| ClientError::Sync)?;
         let old_clock = transaction
-            .get_setting(SYNC_LOCAL_HLC_SETTING_KEY)
+            .get_setting(SYNC_LOCAL_HLC_METADATA_KEY)
             .map_err(|_| ClientError::Sync)?;
         let old_device = transaction
-            .get_setting(ACCOUNT_DEVICE_ID_SETTING_KEY)
+            .get_setting(ACCOUNT_DEVICE_ID_METADATA_KEY)
             .map_err(|_| ClientError::Sync)?;
         let mut fixed_now = || Ok(persistence_now);
         rebind_local_device(&mut transaction, &device_id.to_string(), &mut fixed_now)
             .map_err(|_| ClientError::Sync)?;
         let new_clock = transaction
-            .get_setting(SYNC_LOCAL_HLC_SETTING_KEY)
+            .get_setting(SYNC_LOCAL_HLC_METADATA_KEY)
             .map_err(|_| ClientError::Sync)?;
         transaction
             .set_setting(
-                ACCOUNT_DEVICE_ID_SETTING_KEY,
+                ACCOUNT_DEVICE_ID_METADATA_KEY,
                 &device_id.to_string(),
                 persistence_now,
             )
@@ -1806,13 +1806,13 @@ impl TaskveilClient {
 
     fn has_legacy_account_binding(&self) -> Result<bool, ClientError> {
         for key in [
-            ACCOUNT_EMAIL_SETTING_KEY,
-            ACCOUNT_USER_ID_SETTING_KEY,
-            ACCOUNT_TENANT_ID_SETTING_KEY,
-            ACCOUNT_DEVICE_ID_SETTING_KEY,
-            ACCOUNT_SESSION_EXPIRES_AT_SETTING_KEY,
+            ACCOUNT_EMAIL_METADATA_KEY,
+            ACCOUNT_USER_ID_METADATA_KEY,
+            ACCOUNT_TENANT_ID_METADATA_KEY,
+            ACCOUNT_DEVICE_ID_METADATA_KEY,
+            ACCOUNT_SESSION_EXPIRES_AT_METADATA_KEY,
         ] {
-            if self.non_empty_setting(key)?.is_some() {
+            if self.non_empty_internal_metadata(key)?.is_some() {
                 return Ok(true);
             }
         }
@@ -2085,7 +2085,7 @@ mod tests {
     };
     use taskveil_sync::{
         EncryptedSyncState, Hlc, LocalSyncKeys, LocalSyncStore, NewLocalSyncOutboxEntry,
-        SyncCollection, SYNC_LOCAL_HLC_SETTING_KEY,
+        SyncCollection, SYNC_LOCAL_HLC_METADATA_KEY,
     };
     use tempfile::TempDir;
 
@@ -2280,6 +2280,60 @@ mod tests {
             .expect("remove test token");
     }
 
+    #[test]
+    fn active_credential_rejects_mismatched_stored_origin_on_read() {
+        let temp = TempDir::new().expect("temp profile");
+        let client = open_test_client(temp.path(), [0x32; 32]);
+        client
+            .set_internal_metadata_value(
+                super::super::SYNC_SERVER_URL_METADATA_KEY,
+                "https://attacker.example",
+            )
+            .expect("seed migrated metadata");
+        let tokens = StoredSessionTokens {
+            version: SESSION_TOKEN_SET_VERSION,
+            credential_generation: Some(Uuid::now_v7().to_string()),
+            issuer: "https://sync.example.com".to_string(),
+            access_token: "access-secret".to_string(),
+            access_expires_at_ms: 1_900_000_000_000,
+            refresh_token: "refresh-secret".to_string(),
+            refresh_expires_at_ms: 1_901_000_000_000,
+        };
+        store_session_tokens(temp.path(), &tokens).expect("store token set");
+
+        let result = client.sync_server_url_unlocked();
+        assert!(
+            matches!(result, Err(ClientError::AccountRequest)),
+            "unexpected result: {result:?}"
+        );
+        client
+            .set_internal_metadata_value(super::super::SYNC_SERVER_URL_METADATA_KEY, " ")
+            .expect("seed blank migrated metadata");
+        assert_eq!(
+            client.sync_server_url_unlocked().unwrap(),
+            "https://sync.example.com"
+        );
+        delete_account_secret(temp.path(), AccountSecretKind::SessionTokens)
+            .expect("remove test token");
+    }
+
+    #[test]
+    fn invalid_migrated_server_url_is_rejected_on_read() {
+        let temp = TempDir::new().expect("temp profile");
+        let client = open_test_client(temp.path(), [0x33; 32]);
+        client
+            .set_internal_metadata_value(
+                super::super::SYNC_SERVER_URL_METADATA_KEY,
+                "https://sync.example.com/path",
+            )
+            .expect("seed migrated metadata");
+
+        assert!(matches!(
+            client.sync_server_url_unlocked(),
+            Err(ClientError::AccountRequest)
+        ));
+    }
+
     #[tokio::test]
     async fn logout_retains_credential_until_remote_revocation_succeeds() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
@@ -2334,18 +2388,21 @@ mod tests {
             device_id: "00000000-0000-4000-8000-000000000003".parse().unwrap(),
         };
         for (key, value) in [
-            (ACCOUNT_EMAIL_SETTING_KEY, "restart@example.com".to_string()),
-            (ACCOUNT_USER_ID_SETTING_KEY, identity.user_id.to_string()),
             (
-                ACCOUNT_TENANT_ID_SETTING_KEY,
+                ACCOUNT_EMAIL_METADATA_KEY,
+                "restart@example.com".to_string(),
+            ),
+            (ACCOUNT_USER_ID_METADATA_KEY, identity.user_id.to_string()),
+            (
+                ACCOUNT_TENANT_ID_METADATA_KEY,
                 identity.tenant_id.to_string(),
             ),
             (
-                ACCOUNT_DEVICE_ID_SETTING_KEY,
+                ACCOUNT_DEVICE_ID_METADATA_KEY,
                 identity.device_id.to_string(),
             ),
         ] {
-            first.set_setting_value(key, &value).unwrap();
+            first.set_internal_metadata_value(key, &value).unwrap();
         }
         let crypto = persist_local_crypto_context(
             first.db_path(),
@@ -2408,20 +2465,20 @@ mod tests {
         };
         for (key, value) in [
             (
-                ACCOUNT_EMAIL_SETTING_KEY,
+                ACCOUNT_EMAIL_METADATA_KEY,
                 "converge@example.com".to_string(),
             ),
-            (ACCOUNT_USER_ID_SETTING_KEY, identity.user_id.to_string()),
+            (ACCOUNT_USER_ID_METADATA_KEY, identity.user_id.to_string()),
             (
-                ACCOUNT_TENANT_ID_SETTING_KEY,
+                ACCOUNT_TENANT_ID_METADATA_KEY,
                 identity.tenant_id.to_string(),
             ),
             (
-                ACCOUNT_DEVICE_ID_SETTING_KEY,
+                ACCOUNT_DEVICE_ID_METADATA_KEY,
                 identity.device_id.to_string(),
             ),
         ] {
-            client.set_setting_value(key, &value).unwrap();
+            client.set_internal_metadata_value(key, &value).unwrap();
         }
         let crypto = persist_local_crypto_context(
             client.db_path(),
@@ -2717,17 +2774,17 @@ mod tests {
         client.account_state().unwrap().crypto = CryptoRuntimeState::Ready(Box::new(crypto));
         for (key, value) in [
             (
-                ACCOUNT_EMAIL_SETTING_KEY,
+                ACCOUNT_EMAIL_METADATA_KEY,
                 "mismatch@example.com".to_string(),
             ),
-            (ACCOUNT_USER_ID_SETTING_KEY, identity.user_id.to_string()),
+            (ACCOUNT_USER_ID_METADATA_KEY, identity.user_id.to_string()),
             (
-                ACCOUNT_TENANT_ID_SETTING_KEY,
+                ACCOUNT_TENANT_ID_METADATA_KEY,
                 identity.tenant_id.to_string(),
             ),
-            (ACCOUNT_DEVICE_ID_SETTING_KEY, Uuid::now_v7().to_string()),
+            (ACCOUNT_DEVICE_ID_METADATA_KEY, Uuid::now_v7().to_string()),
         ] {
-            client.set_setting_value(key, &value).unwrap();
+            client.set_internal_metadata_value(key, &value).unwrap();
         }
         store_session_tokens(
             temp.path(),
@@ -2890,18 +2947,18 @@ mod tests {
             device_id: Uuid::now_v7(),
         };
         for (key, value) in [
-            (ACCOUNT_EMAIL_SETTING_KEY, "lease@example.com".to_string()),
-            (ACCOUNT_USER_ID_SETTING_KEY, identity.user_id.to_string()),
+            (ACCOUNT_EMAIL_METADATA_KEY, "lease@example.com".to_string()),
+            (ACCOUNT_USER_ID_METADATA_KEY, identity.user_id.to_string()),
             (
-                ACCOUNT_TENANT_ID_SETTING_KEY,
+                ACCOUNT_TENANT_ID_METADATA_KEY,
                 identity.tenant_id.to_string(),
             ),
             (
-                ACCOUNT_DEVICE_ID_SETTING_KEY,
+                ACCOUNT_DEVICE_ID_METADATA_KEY,
                 identity.device_id.to_string(),
             ),
         ] {
-            client.set_setting_value(key, &value).unwrap();
+            client.set_internal_metadata_value(key, &value).unwrap();
         }
         let crypto = persist_local_crypto_context(
             client.db_path(),
@@ -2980,18 +3037,18 @@ mod tests {
             device_id: Uuid::now_v7(),
         };
         for (key, value) in [
-            (ACCOUNT_EMAIL_SETTING_KEY, "reauth@example.com".to_string()),
-            (ACCOUNT_USER_ID_SETTING_KEY, identity.user_id.to_string()),
+            (ACCOUNT_EMAIL_METADATA_KEY, "reauth@example.com".to_string()),
+            (ACCOUNT_USER_ID_METADATA_KEY, identity.user_id.to_string()),
             (
-                ACCOUNT_TENANT_ID_SETTING_KEY,
+                ACCOUNT_TENANT_ID_METADATA_KEY,
                 identity.tenant_id.to_string(),
             ),
             (
-                ACCOUNT_DEVICE_ID_SETTING_KEY,
+                ACCOUNT_DEVICE_ID_METADATA_KEY,
                 identity.device_id.to_string(),
             ),
         ] {
-            client.set_setting_value(key, &value).unwrap();
+            client.set_internal_metadata_value(key, &value).unwrap();
         }
         let crypto = persist_local_crypto_context(
             client.db_path(),
@@ -3158,8 +3215,8 @@ mod tests {
 
         let client = open_test_client(temp.path(), db_key);
         client
-            .set_setting_value(
-                BILLING_ENTITLEMENT_CACHE_SETTING_KEY,
+            .set_internal_metadata_value(
+                BILLING_ENTITLEMENT_CACHE_METADATA_KEY,
                 &serde_json::to_string(&expected).expect("serialize billing state"),
             )
             .expect("persist billing cache");
@@ -3175,7 +3232,7 @@ mod tests {
             Some(expected)
         );
         reopened
-            .set_setting_value(BILLING_ENTITLEMENT_CACHE_SETTING_KEY, "{not-json")
+            .set_internal_metadata_value(BILLING_ENTITLEMENT_CACHE_METADATA_KEY, "{not-json")
             .expect("persist corrupt cache fixture");
         assert!(matches!(
             reopened.cached_billing(),
@@ -3305,10 +3362,10 @@ mod tests {
         let old_op_id = Uuid::now_v7();
         let mut store = SqliteSyncStore::new(client.db_path().to_path_buf(), DB_KEY);
         store
-            .set_setting(SYNC_LOCAL_HLC_SETTING_KEY, &old_revision, 100)
+            .set_setting(SYNC_LOCAL_HLC_METADATA_KEY, &old_revision, 100)
             .unwrap();
         store
-            .set_setting(ACCOUNT_DEVICE_ID_SETTING_KEY, &old_device.to_string(), 100)
+            .set_setting(ACCOUNT_DEVICE_ID_METADATA_KEY, &old_device.to_string(), 100)
             .unwrap();
         store
             .put_outbox_head(NewLocalSyncOutboxEntry {
@@ -3329,7 +3386,7 @@ mod tests {
 
         let rebound_clock = Hlc::decode(
             &store
-                .get_setting(SYNC_LOCAL_HLC_SETTING_KEY)
+                .get_setting(SYNC_LOCAL_HLC_METADATA_KEY)
                 .unwrap()
                 .unwrap(),
         )
@@ -3350,7 +3407,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .get_setting(ACCOUNT_DEVICE_ID_SETTING_KEY)
+                .get_setting(ACCOUNT_DEVICE_ID_METADATA_KEY)
                 .unwrap()
                 .as_deref(),
             Some(new_device.to_string().as_str())
@@ -3378,10 +3435,10 @@ mod tests {
         let old_op_id = Uuid::now_v7();
         let mut store = SqliteSyncStore::new(client.db_path().to_path_buf(), DB_KEY);
         store
-            .set_setting(SYNC_LOCAL_HLC_SETTING_KEY, &old_clock, 100)
+            .set_setting(SYNC_LOCAL_HLC_METADATA_KEY, &old_clock, 100)
             .unwrap();
         store
-            .set_setting(ACCOUNT_DEVICE_ID_SETTING_KEY, &old_device.to_string(), 100)
+            .set_setting(ACCOUNT_DEVICE_ID_METADATA_KEY, &old_device.to_string(), 100)
             .unwrap();
         store
             .put_outbox_head(NewLocalSyncOutboxEntry {
@@ -3409,12 +3466,12 @@ mod tests {
             .is_err());
 
         assert_eq!(
-            store.get_setting(SYNC_LOCAL_HLC_SETTING_KEY).unwrap(),
+            store.get_setting(SYNC_LOCAL_HLC_METADATA_KEY).unwrap(),
             Some(old_clock.clone())
         );
         assert_eq!(
             store
-                .get_setting(ACCOUNT_DEVICE_ID_SETTING_KEY)
+                .get_setting(ACCOUNT_DEVICE_ID_METADATA_KEY)
                 .unwrap()
                 .as_deref(),
             Some(old_device.to_string().as_str())
@@ -3452,7 +3509,7 @@ mod tests {
         .unwrap();
         let mut store = SqliteSyncStore::new(client.db_path().to_path_buf(), *client.db_key());
         store
-            .set_setting(SYNC_LOCAL_HLC_SETTING_KEY, &old_revision, 100)
+            .set_setting(SYNC_LOCAL_HLC_METADATA_KEY, &old_revision, 100)
             .unwrap();
         store
             .put_outbox_head(NewLocalSyncOutboxEntry {
@@ -3493,7 +3550,7 @@ mod tests {
             .unwrap()
             .execute_batch(
                 "CREATE TRIGGER fail_account_persistence
-                 BEFORE INSERT ON settings
+                 BEFORE INSERT ON internal_metadata
                  WHEN NEW.key = 'account_email'
                  BEGIN SELECT RAISE(ABORT, 'fail account persistence'); END;",
             )

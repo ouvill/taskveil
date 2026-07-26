@@ -13,11 +13,11 @@ use convert::{
 };
 use taskveil_domain::{CompletedTimerSession, List, Task, TaskSeries, TaskTemplate, Uuid};
 use taskveil_storage::{
-    open_encrypted, ListRepository, OwnedSqliteWriteTx, SettingsRepository, SqliteListRepository,
-    SqliteProfileCoordinationRepository, SqliteSettingsRepository, SqliteSyncStateRepository,
-    SqliteTaskRepository, SqliteTemplateSeriesRepository, SqliteTimerSessionRepository,
-    StorageError, SyncLease, SyncStateRepository, TaskRepository, TemplateSeriesRepository,
-    TimerSessionRepository,
+    open_encrypted, InternalMetadataRepository, ListRepository, OwnedSqliteWriteTx,
+    SqliteInternalMetadataRepository, SqliteListRepository, SqliteProfileCoordinationRepository,
+    SqliteSyncStateRepository, SqliteTaskRepository, SqliteTemplateSeriesRepository,
+    SqliteTimerSessionRepository, StorageError, SyncLease, SyncStateRepository, TaskRepository,
+    TemplateSeriesRepository, TimerSessionRepository,
 };
 use taskveil_sync::{
     enqueue::{LocalFullResyncProgress, LocalFullResyncSweepSummary},
@@ -357,8 +357,10 @@ impl LocalMutationSyncStore for SqliteSyncStore {
     }
 
     fn get_setting(&mut self, key: &str) -> Result<Option<String>, String> {
-        with_settings_repository(&self.db_path, &self.db_key, |repository| {
-            repository.get_setting(key).map_err(sync_coordination_error)
+        with_internal_metadata_repository(&self.db_path, &self.db_key, |repository| {
+            repository
+                .get_internal_metadata(key)
+                .map_err(sync_coordination_error)
         })
     }
 
@@ -404,7 +406,7 @@ impl LocalSyncStore for SqliteSyncStore {
                 .map_err(sync_coordination_error)
         })?;
         let awaiting_base_ack = self
-            .get_setting(taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY)?
+            .get_setting(taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_METADATA_KEY)?
             .is_some_and(|token| !token.is_empty());
         Ok(progress.map(|progress| storage_resync_to_local(progress, awaiting_base_ack)))
     }
@@ -709,13 +711,13 @@ impl LocalMutationSyncStore for SqliteSyncWriteTx {
 
     fn get_setting(&mut self, key: &str) -> Result<Option<String>, String> {
         self.transaction
-            .get_setting(key)
+            .get_internal_metadata(key)
             .map_err(sync_coordination_error)
     }
 
     fn set_setting(&mut self, key: &str, value: &str, updated_at: i64) -> Result<(), String> {
         self.transaction
-            .set_setting(key, value, updated_at)
+            .set_internal_metadata(key, value, updated_at)
             .map_err(sync_coordination_error)
     }
 
@@ -760,7 +762,7 @@ impl LocalSyncStore for SqliteSyncWriteTx {
             .map_err(sync_coordination_error)?;
         let awaiting_base_ack = self
             .transaction
-            .get_setting(taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY)
+            .get_internal_metadata(taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_METADATA_KEY)
             .map_err(sync_coordination_error)?
             .is_some_and(|token| !token.is_empty());
         Ok(progress.map(|progress| storage_resync_to_local(progress, awaiting_base_ack)))
@@ -1209,13 +1211,13 @@ fn with_sync_repository<T>(
     f(&mut repository)
 }
 
-fn with_settings_repository<T>(
+fn with_internal_metadata_repository<T>(
     db_path: &Path,
     db_key: &[u8; 32],
-    f: impl FnOnce(&mut SqliteSettingsRepository) -> Result<T, String>,
+    f: impl FnOnce(&mut SqliteInternalMetadataRepository) -> Result<T, String>,
 ) -> Result<T, String> {
     let connection = open_encrypted(db_path, db_key).map_err(sync_coordination_error)?;
-    let mut repository = SqliteSettingsRepository::new(connection);
+    let mut repository = SqliteInternalMetadataRepository::new(connection);
     f(&mut repository)
 }
 
@@ -1633,9 +1635,9 @@ mod tests {
 
         for key in [
             "sync_upgrade_required",
-            taskveil_sync::SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY,
-            taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY,
-            taskveil_sync::KEY_ROTATION_PENDING_SETTING_KEY,
+            taskveil_sync::SYNC_FULL_RESYNC_PAGE_TOKEN_METADATA_KEY,
+            taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_METADATA_KEY,
+            taskveil_sync::KEY_ROTATION_PENDING_METADATA_KEY,
         ] {
             assert_eq!(
                 old_store.set_setting(key, "stale", 3).unwrap_err(),
@@ -1669,9 +1671,9 @@ mod tests {
         );
         assert_eq!(observer.get_cursor_seq(SYNC_CURSOR_NAME).unwrap(), Some(2));
         for key in [
-            taskveil_sync::SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY,
-            taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY,
-            taskveil_sync::KEY_ROTATION_PENDING_SETTING_KEY,
+            taskveil_sync::SYNC_FULL_RESYNC_PAGE_TOKEN_METADATA_KEY,
+            taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_METADATA_KEY,
+            taskveil_sync::KEY_ROTATION_PENDING_METADATA_KEY,
         ] {
             assert_eq!(observer.get_setting(key).unwrap(), None);
         }
@@ -2233,7 +2235,7 @@ mod tests {
             .unwrap();
         transaction
             .set_setting(
-                taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY,
+                taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_METADATA_KEY,
                 "completion-token",
                 101,
             )
@@ -2248,7 +2250,7 @@ mod tests {
         let mut transaction = store.begin_write_transaction().unwrap();
         transaction
             .set_setting(
-                taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY,
+                taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_METADATA_KEY,
                 "",
                 102,
             )
@@ -2275,14 +2277,14 @@ mod tests {
             .unwrap();
         transaction
             .set_setting(
-                taskveil_sync::SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY,
+                taskveil_sync::SYNC_FULL_RESYNC_PAGE_TOKEN_METADATA_KEY,
                 "page-token",
                 100,
             )
             .unwrap();
         transaction
             .set_setting(
-                taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY,
+                taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_METADATA_KEY,
                 "completion-token",
                 100,
             )
@@ -2292,7 +2294,7 @@ mod tests {
             .unwrap()
             .execute_batch(
                 "CREATE TRIGGER fail_resync_reset_token
-                 BEFORE UPDATE ON settings
+                 BEFORE UPDATE ON internal_metadata
                  WHEN NEW.key = 'sync_full_resync_completion_token' AND NEW.value = ''
                  BEGIN SELECT RAISE(ABORT, 'fail reset token'); END;",
             )
@@ -2302,14 +2304,14 @@ mod tests {
         transaction.reset_full_resync().unwrap();
         transaction
             .set_setting(
-                taskveil_sync::SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY,
+                taskveil_sync::SYNC_FULL_RESYNC_PAGE_TOKEN_METADATA_KEY,
                 "",
                 101,
             )
             .unwrap();
         assert!(transaction
             .set_setting(
-                taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY,
+                taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_METADATA_KEY,
                 "",
                 101,
             )
@@ -2318,7 +2320,7 @@ mod tests {
         assert!(store.load_full_resync().unwrap().is_some());
         assert_eq!(
             store
-                .get_setting(taskveil_sync::SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY)
+                .get_setting(taskveil_sync::SYNC_FULL_RESYNC_PAGE_TOKEN_METADATA_KEY)
                 .unwrap()
                 .as_deref(),
             Some("page-token")
@@ -2340,14 +2342,14 @@ mod tests {
         transaction.reset_full_resync().unwrap();
         transaction
             .set_setting(
-                taskveil_sync::SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY,
+                taskveil_sync::SYNC_FULL_RESYNC_PAGE_TOKEN_METADATA_KEY,
                 "",
                 102,
             )
             .unwrap();
         transaction
             .set_setting(
-                taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY,
+                taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_METADATA_KEY,
                 "",
                 102,
             )

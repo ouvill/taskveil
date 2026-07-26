@@ -298,7 +298,7 @@ void main() {
   testWidgets('Calendar applies Monday and Sunday week starts', (tester) async {
     final fake = FakeBridgeService();
     await _createInbox(fake);
-    await fake.setSetting(
+    await fake.setFrontendSetting(
       key: calendarWeekStartSettingKey,
       value: mondayCalendarWeekStart,
     );
