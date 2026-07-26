@@ -176,6 +176,22 @@ jobs:
         with:
           toolchain: 1.97.0
 
+      - name: Prepare owner-only Windows test profiles
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $secureTemp = Join-Path $env:RUNNER_TEMP "taskveil-secure-temp"
+          New-Item -ItemType Directory -Path $secureTemp -Force | Out-Null
+          $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+          & icacls.exe $secureTemp /setowner $currentUser
+          if ($LASTEXITCODE -ne 0) { throw "failed to set secure temp owner" }
+          & icacls.exe $secureTemp /inheritance:r
+          if ($LASTEXITCODE -ne 0) { throw "failed to remove inherited temp ACLs" }
+          & icacls.exe $secureTemp /grant:r "${currentUser}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F"
+          if ($LASTEXITCODE -ne 0) { throw "failed to grant secure temp ACLs" }
+          "TMP=$secureTemp" >> $env:GITHUB_ENV
+          "TEMP=$secureTemp" >> $env:GITHUB_ENV
+
       - name: Full client test suite
         run: cargo test -p taskveil-client -- --nocapture
 
