@@ -139,6 +139,7 @@ struct Fixture {
     tenant_id: Uuid,
     auth: AuthContext,
     token: String,
+    resync_tokens: taskveil_server::resync_token::ResyncTokenKeyring,
     _postgres: ContainerAsync<postgres::Postgres>,
 }
 
@@ -280,10 +281,12 @@ impl Fixture {
             "postgres://taskveil_runtime_test:taskveil-runtime-test@{host}:{port}/postgres"
         );
         let application_pool = db::connect_application(&application_url).await.unwrap();
+        let resync_tokens = taskveil_server::resync_token::ResyncTokenKeyring::for_tests();
         let app = build_router(AppState {
             pool: application_pool.clone(),
             billing: BillingService::unavailable_for_tests(BillingEnvironment::Sandbox),
             auth_issuer: "http://localhost".to_string(),
+            resync_tokens: resync_tokens.clone(),
         });
         Self {
             app,
@@ -292,6 +295,7 @@ impl Fixture {
             tenant_id,
             auth: AuthContext { user_id, device_id },
             token,
+            resync_tokens,
             _postgres: postgres,
         }
     }
@@ -309,6 +313,50 @@ impl Fixture {
         .results
         .pop()
         .unwrap()
+    }
+
+    fn revision_hlc(&self, delta: i64, counter: u32) -> String {
+        hlc(delta, counter, &self.auth.device_id.to_string())
+    }
+
+    async fn register_device(&self) -> (Uuid, String) {
+        let device_id = Uuid::now_v7();
+        let token = format!("protocol-v2-test-token-{device_id}");
+        query(
+            "INSERT INTO devices
+               (id, user_id, device_name, certificate, certified_at)
+             VALUES ($1, $2, 'test-peer', '\\x00'::bytea, now())",
+        )
+        .bind(device_id)
+        .bind(self.auth.user_id)
+        .execute(&self.admin_pool)
+        .await
+        .unwrap();
+        let family_id = Uuid::now_v7();
+        query(
+            "INSERT INTO session_families
+                (id, user_id, device_id, client_id, absolute_expires_at)
+             VALUES ($1, $2, $3, 'taskveil-native', $4)",
+        )
+        .bind(family_id)
+        .bind(self.auth.user_id)
+        .bind(device_id)
+        .bind(Utc::now() + Duration::days(1))
+        .execute(&self.admin_pool)
+        .await
+        .unwrap();
+        query(
+            "INSERT INTO access_tokens (id, family_id, token_hash, expires_at)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(family_id)
+        .bind(Sha256::digest(token.as_bytes()).to_vec())
+        .bind(Utc::now() + Duration::days(1))
+        .execute(&self.admin_pool)
+        .await
+        .unwrap();
+        (device_id, token)
     }
 
     async fn close_continuity(&self) {
@@ -428,7 +476,7 @@ async fn production_pull_refreshes_once_then_atomically_applies_and_quarantines(
         let revision = Hlc {
             wall_ms: now + 200 + index as i64,
             counter: 0,
-            device_id: "remote".to_string(),
+            device_id: fixture.auth.device_id.to_string(),
         };
         let plaintext = SyncPlaintext::from_list(list, mutation.clone()).unwrap();
         let blob = if list.id == corrupt.id {
@@ -470,7 +518,7 @@ async fn production_pull_refreshes_once_then_atomically_applies_and_quarantines(
     let context = ActiveSyncContext {
         server_url,
         tenant_id: fixture.tenant_id,
-        device_id: "quarantine-client".to_string(),
+        device_id: fixture.auth.device_id.to_string(),
         session_token: taskveil_sync::SecretString::new(fixture.token.clone()),
         manifest_auth_key: test_manifest_auth_key(),
         keys: LocalSyncKeys {
@@ -541,7 +589,7 @@ async fn production_pull_refreshes_once_then_atomically_applies_and_quarantines(
     let revision = Hlc {
         wall_ms: now + 2_001,
         counter: 0,
-        device_id: "remote".to_string(),
+        device_id: fixture.auth.device_id.to_string(),
     };
     let corrected = encrypt_plaintext(
         &tenant_dek,
@@ -622,7 +670,7 @@ async fn production_pull_refreshes_once_then_atomically_applies_and_quarantines(
     let matrix_revision = Hlc {
         wall_ms: now + 2_501,
         counter: 0,
-        device_id: "remote".to_string(),
+        device_id: fixture.auth.device_id.to_string(),
     };
     let mut matrix_corrupt_blob = encrypt_plaintext(
         &tenant_dek,
@@ -809,14 +857,23 @@ async fn production_pull_refreshes_once_then_atomically_applies_and_quarantines(
                 .unwrap();
             assert_eq!(count, 0, "{table} rollback at failure stage {name}");
         }
-        let hlc_count: i64 = connection
+        let (hlc_count, hlc_value): (i64, String) = connection
             .query_row(
-                "SELECT count(*) FROM settings WHERE key = 'sync_local_hlc'",
+                "SELECT count(*), max(value) FROM settings
+                 WHERE key = 'sync_local_hlc'",
                 [],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        assert_eq!(hlc_count, 0, "HLC rollback at failure stage {name}");
+        assert_eq!(
+            hlc_count, 1,
+            "pre-network device rebind remains durable at failure stage {name}"
+        );
+        assert_eq!(
+            Hlc::decode(&hlc_value).unwrap().device_id,
+            context.device_id,
+            "page rollback preserves the authenticated HLC node at failure stage {name}"
+        );
     }
 
     let unknown = taskveil_domain::new_list(
@@ -834,7 +891,7 @@ async fn production_pull_refreshes_once_then_atomically_applies_and_quarantines(
     let revision = Hlc {
         wall_ms: now + 3_001,
         counter: 0,
-        device_id: "future".to_string(),
+        device_id: fixture.auth.device_id.to_string(),
     };
     let mut unknown_blob = encrypt_plaintext(
         &unknown_dek,
@@ -1136,6 +1193,7 @@ async fn continuity_410_still_enforces_protocol_upgrade_before_resync() {
                     axum::Json(taskveil_protocol::sync::ResyncStartResponse {
                         base_seq: 2,
                         generation: 1,
+                        page_token: "page".to_string(),
                     })
                 }
             }),
@@ -1213,17 +1271,28 @@ async fn gc_horizon_full_resync_closes_before_local_outbox_push() {
                     axum::Json(taskveil_protocol::sync::ResyncStartResponse {
                         base_seq: 2,
                         generation: 1,
+                        page_token: "page".to_string(),
                     })
                 }
             }),
         )
         .route(
             "/v2/tenants/{tenant_id}/resync/base",
-            axum::routing::get(|| async {
+            axum::routing::post(|| async {
                 axum::Json(taskveil_protocol::sync::BaseScanResponse {
                     records: Vec::new(),
                     next_cursor: None,
                     has_more: false,
+                    next_page_token: None,
+                    completion_token: Some("complete".to_string()),
+                })
+            }),
+        )
+        .route(
+            "/v2/tenants/{tenant_id}/resync/base/complete",
+            axum::routing::post(|| async {
+                axum::Json(taskveil_protocol::sync::CompleteBaseResponse {
+                    base_complete: true,
                 })
             }),
         )
@@ -1354,6 +1423,245 @@ async fn gc_horizon_full_resync_closes_before_local_outbox_push() {
     assert!(!store
         .has_outbox_head(SyncCollection::Tasks, record_id)
         .unwrap());
+}
+
+#[tokio::test]
+async fn expired_terminal_token_restarts_once_and_converges_on_new_generation() {
+    const DB_KEY: [u8; 32] = [0xd7; 32];
+    let tenant_id = Uuid::now_v7();
+    let device_id = Uuid::now_v7();
+    let starts = Arc::new(AtomicUsize::new(0));
+    let completions = Arc::new(AtomicUsize::new(0));
+    let start_counter = starts.clone();
+    let completion_counter = completions.clone();
+    let app = Router::new()
+        .route(
+            "/v2/tenants/{tenant_id}/preflight",
+            axum::routing::get(move || async move {
+                let mut capabilities = test_capabilities(
+                    tenant_id,
+                    taskveil_sync::protocol::SYNC_PROTOCOL_VERSION,
+                );
+                capabilities.gc_horizon_seq = 1;
+                capabilities.required_generation = 1;
+                capabilities.full_resync_required = true;
+                (StatusCode::GONE, axum::Json(capabilities))
+            }),
+        )
+        .route(
+            "/v2/tenants/{tenant_id}/resync/start",
+            axum::routing::post(move || {
+                let counter = start_counter.clone();
+                async move {
+                    let generation = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                    axum::Json(taskveil_sync::protocol::ResyncStartResponse {
+                        base_seq: 0,
+                        generation: generation as i64,
+                        page_token: format!("page-{generation}"),
+                    })
+                }
+            }),
+        )
+        .route(
+            "/v2/tenants/{tenant_id}/resync/base",
+            axum::routing::post(
+                |axum::Json(request): axum::Json<
+                    taskveil_sync::protocol::BaseScanRequest,
+                >| async move {
+                    let generation = request.page_token.trim_start_matches("page-");
+                    axum::Json(taskveil_sync::protocol::BaseScanResponse {
+                        records: Vec::new(),
+                        next_cursor: None,
+                        has_more: false,
+                        next_page_token: None,
+                        completion_token: Some(format!("complete-{generation}")),
+                    })
+                },
+            ),
+        )
+        .route(
+            "/v2/tenants/{tenant_id}/resync/base/complete",
+            axum::routing::post(
+                move |axum::Json(_request): axum::Json<
+                    taskveil_sync::protocol::CompleteBaseRequest,
+                >| {
+                    let counter = completion_counter.clone();
+                    async move {
+                        if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                            (
+                                StatusCode::CONFLICT,
+                                axum::Json(json!({"error": "expired resync token"})),
+                            )
+                                .into_response()
+                        } else {
+                            axum::Json(taskveil_sync::protocol::CompleteBaseResponse {
+                                base_complete: true,
+                            })
+                            .into_response()
+                        }
+                    }
+                },
+            ),
+        )
+        .route(
+            "/v2/tenants/{tenant_id}/pull",
+            axum::routing::get(move || async move {
+                axum::Json(taskveil_sync::protocol::PullResponse {
+                    records: Vec::new(),
+                    next_since: 0,
+                    has_more: false,
+                    high_water: 0,
+                    closure_proof: Some(taskveil_sync::protocol::ClosureProof {
+                        proof_id: Uuid::now_v7(),
+                        tenant_id,
+                        device_id,
+                        high_water: 0,
+                        generation: 2,
+                    }),
+                })
+            }),
+        )
+        .route(
+            "/v2/tenants/{tenant_id}/continuity/ack",
+            axum::routing::post(|| async {
+                axum::Json(taskveil_sync::protocol::ContinuityAckResponse {
+                    continuity_seq: 0,
+                    continuity_generation: 2,
+                })
+            }),
+        )
+        .route(
+            "/v2/tenants/{tenant_id}/push",
+            axum::routing::post(|| async {
+                axum::Json(taskveil_sync::protocol::PushResponse {
+                    results: Vec::new(),
+                })
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let temp = TempDir::new().unwrap();
+    let db_path = temp.path().join("expired-terminal-restart.sqlite3");
+    let mut store = SqliteSyncStore::new(db_path, DB_KEY);
+    let mut now = || Ok(Utc::now().timestamp_millis());
+    run_sync_now(
+        ActiveSyncContext {
+            server_url: format!("http://{address}"),
+            tenant_id,
+            device_id: device_id.to_string(),
+            session_token: taskveil_sync::SecretString::new("token"),
+            manifest_auth_key: test_manifest_auth_key(),
+            keys: LocalSyncKeys {
+                tenant_id,
+                tenant_root_dek: Some([0xd7; 32].into()),
+                tenant_generation: 1,
+                historical_tenant_root_deks: Vec::new(),
+            },
+        },
+        &mut store,
+        &mut now,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(starts.load(Ordering::SeqCst), 2);
+    assert_eq!(completions.load(Ordering::SeqCst), 2);
+    assert!(store.load_full_resync().unwrap().is_none());
+    assert_eq!(
+        store
+            .get_setting(taskveil_sync::SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY)
+            .unwrap()
+            .as_deref(),
+        Some("")
+    );
+    assert_eq!(
+        store
+            .get_setting(taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY)
+            .unwrap()
+            .as_deref(),
+        Some("")
+    );
+}
+
+#[tokio::test]
+async fn repeated_invalid_page_token_conflict_does_not_restart_forever() {
+    const DB_KEY: [u8; 32] = [0xd8; 32];
+    let tenant_id = Uuid::now_v7();
+    let starts = Arc::new(AtomicUsize::new(0));
+    let scans = Arc::new(AtomicUsize::new(0));
+    let start_counter = starts.clone();
+    let scan_counter = scans.clone();
+    let app = Router::new()
+        .route(
+            "/v2/tenants/{tenant_id}/preflight",
+            axum::routing::get(move || async move {
+                let mut capabilities =
+                    test_capabilities(tenant_id, taskveil_sync::protocol::SYNC_PROTOCOL_VERSION);
+                capabilities.full_resync_required = true;
+                capabilities.required_generation = 1;
+                (StatusCode::GONE, axum::Json(capabilities))
+            }),
+        )
+        .route(
+            "/v2/tenants/{tenant_id}/resync/start",
+            axum::routing::post(move || {
+                let counter = start_counter.clone();
+                async move {
+                    let generation = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                    axum::Json(taskveil_sync::protocol::ResyncStartResponse {
+                        base_seq: 0,
+                        generation: generation as i64,
+                        page_token: format!("invalid-page-{generation}"),
+                    })
+                }
+            }),
+        )
+        .route(
+            "/v2/tenants/{tenant_id}/resync/base",
+            axum::routing::post(move || {
+                let counter = scan_counter.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    (
+                        StatusCode::CONFLICT,
+                        axum::Json(json!({"error": "invalid resync page token"})),
+                    )
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let temp = TempDir::new().unwrap();
+    let mut store =
+        SqliteSyncStore::new(temp.path().join("bounded-resync-restart.sqlite3"), DB_KEY);
+    let mut now = || Ok(Utc::now().timestamp_millis());
+    assert_eq!(
+        run_sync_now(
+            ActiveSyncContext {
+                server_url: format!("http://{address}"),
+                tenant_id,
+                device_id: Uuid::now_v7().to_string(),
+                session_token: taskveil_sync::SecretString::new("token"),
+                manifest_auth_key: test_manifest_auth_key(),
+                keys: LocalSyncKeys {
+                    tenant_id,
+                    tenant_root_dek: Some([0xd8; 32].into()),
+                    tenant_generation: 1,
+                    historical_tenant_root_deks: Vec::new(),
+                },
+            },
+            &mut store,
+            &mut now,
+        )
+        .await,
+        Err("sync failed".to_string())
+    );
+    assert_eq!(starts.load(Ordering::SeqCst), 2);
+    assert_eq!(scans.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
@@ -1510,6 +1818,7 @@ async fn production_two_client_distinct_fields_and_due_mode_conflict_converge() 
     const DB_KEY_B: [u8; 32] = [0xb2; 32];
     const MASTER_KEY: [u8; 32] = [0xa3; 32];
     let fixture = Fixture::setup().await;
+    let (device_b, token_b) = fixture.register_device().await;
     let server_url = fixture.serve().await;
     let temp = TempDir::new().unwrap();
     let path_a = temp.path().join("client-a.sqlite3");
@@ -1528,7 +1837,7 @@ async fn production_two_client_distinct_fields_and_due_mode_conflict_converge() 
     }
     let tenant_key = [0xe7; 32];
     let sync_a = LocalMutationContext {
-        device_id: "production-client-a".to_string(),
+        device_id: fixture.auth.device_id.to_string(),
         keys: LocalSyncKeys {
             tenant_id: fixture.tenant_id,
             tenant_root_dek: Some(tenant_key.into()),
@@ -1537,7 +1846,7 @@ async fn production_two_client_distinct_fields_and_due_mode_conflict_converge() 
         },
     };
     let sync_b = LocalMutationContext {
-        device_id: "production-client-b".to_string(),
+        device_id: device_b.to_string(),
         keys: sync_a.keys.clone(),
     };
     persist_local_crypto_context(
@@ -1582,11 +1891,11 @@ async fn production_two_client_distinct_fields_and_due_mode_conflict_converge() 
             &sync_a,
         )
         .unwrap();
-    let context = |device_id: &str, keys: LocalSyncKeys| ActiveSyncContext {
+    let context = |device_id: &str, token: &str, keys: LocalSyncKeys| ActiveSyncContext {
         server_url: server_url.clone(),
         tenant_id: fixture.tenant_id,
         device_id: device_id.to_string(),
-        session_token: taskveil_sync::SecretString::new(fixture.token.clone()),
+        session_token: taskveil_sync::SecretString::new(token),
         manifest_auth_key: test_manifest_auth_key(),
         keys,
     };
@@ -1596,7 +1905,7 @@ async fn production_two_client_distinct_fields_and_due_mode_conflict_converge() 
         Ok(clock)
     };
     run_sync_now(
-        context("production-client-a", sync_a.keys.clone()),
+        context(&sync_a.device_id, &fixture.token, sync_a.keys.clone()),
         &mut store_a,
         &mut ticking_now,
     )
@@ -1604,7 +1913,7 @@ async fn production_two_client_distinct_fields_and_due_mode_conflict_converge() 
     .unwrap();
     let mut store_b = SqliteSyncStore::new(path_b.clone(), DB_KEY_B);
     run_sync_now(
-        context("production-client-b", sync_b.keys.clone()),
+        context(&sync_b.device_id, &token_b, sync_b.keys.clone()),
         &mut store_b,
         &mut ticking_now,
     )
@@ -1653,7 +1962,7 @@ async fn production_two_client_distinct_fields_and_due_mode_conflict_converge() 
         .unwrap();
 
     let first = run_sync_now(
-        context("production-client-a", sync_a.keys.clone()),
+        context(&sync_a.device_id, &fixture.token, sync_a.keys.clone()),
         &mut store_a,
         &mut ticking_now,
     )
@@ -1662,7 +1971,7 @@ async fn production_two_client_distinct_fields_and_due_mode_conflict_converge() 
     assert_eq!(first.push_acked_count, 1);
     drop(store_a);
     let second = run_sync_now(
-        context("production-client-b", sync_b.keys.clone()),
+        context(&sync_b.device_id, &token_b, sync_b.keys.clone()),
         &mut store_b,
         &mut ticking_now,
     )
@@ -1695,7 +2004,7 @@ async fn production_two_client_distinct_fields_and_due_mode_conflict_converge() 
 
     let mut store_a = SqliteSyncStore::new(path_a.clone(), DB_KEY_A);
     run_sync_now(
-        context("production-client-a", sync_a.keys.clone()),
+        context(&sync_a.device_id, &fixture.token, sync_a.keys.clone()),
         &mut store_a,
         &mut ticking_now,
     )
@@ -1718,6 +2027,7 @@ async fn equal_rank_clients_converge_then_common_reorder_rebalances_and_reconver
     const DB_KEY_B: [u8; 32] = [0xd2; 32];
     const MASTER_KEY: [u8; 32] = [0xc3; 32];
     let fixture = Fixture::setup().await;
+    let (device_b, token_b) = fixture.register_device().await;
     let server_url = fixture.serve().await;
     let temp = TempDir::new().unwrap();
     let path_a = temp.path().join("rank-client-a.sqlite3");
@@ -1736,7 +2046,7 @@ async fn equal_rank_clients_converge_then_common_reorder_rebalances_and_reconver
     }
     let tenant_key = [0xe7; 32];
     let sync_a = LocalMutationContext {
-        device_id: "rank-client-a".to_string(),
+        device_id: fixture.auth.device_id.to_string(),
         keys: LocalSyncKeys {
             tenant_id: fixture.tenant_id,
             tenant_root_dek: Some(tenant_key.into()),
@@ -1745,7 +2055,7 @@ async fn equal_rank_clients_converge_then_common_reorder_rebalances_and_reconver
         },
     };
     let sync_b = LocalMutationContext {
-        device_id: "rank-client-b".to_string(),
+        device_id: device_b.to_string(),
         keys: sync_a.keys.clone(),
     };
     persist_local_crypto_context(
@@ -1790,11 +2100,11 @@ async fn equal_rank_clients_converge_then_common_reorder_rebalances_and_reconver
             &sync_a,
         )
         .unwrap();
-    let context = |device_id: &str, keys: LocalSyncKeys| ActiveSyncContext {
+    let context = |device_id: &str, token: &str, keys: LocalSyncKeys| ActiveSyncContext {
         server_url: server_url.clone(),
         tenant_id: fixture.tenant_id,
         device_id: device_id.to_string(),
-        session_token: taskveil_sync::SecretString::new(fixture.token.clone()),
+        session_token: taskveil_sync::SecretString::new(token),
         manifest_auth_key: test_manifest_auth_key(),
         keys,
     };
@@ -1805,14 +2115,14 @@ async fn equal_rank_clients_converge_then_common_reorder_rebalances_and_reconver
     };
     let mut store_b = SqliteSyncStore::new(path_b.clone(), DB_KEY_B);
     run_sync_now(
-        context("rank-client-a", sync_a.keys.clone()),
+        context(&sync_a.device_id, &fixture.token, sync_a.keys.clone()),
         &mut store_a,
         &mut ticking_now,
     )
     .await
     .unwrap();
     run_sync_now(
-        context("rank-client-b", sync_b.keys.clone()),
+        context(&sync_b.device_id, &token_b, sync_b.keys.clone()),
         &mut store_b,
         &mut ticking_now,
     )
@@ -1853,21 +2163,21 @@ async fn equal_rank_clients_converge_then_common_reorder_rebalances_and_reconver
         .unwrap();
     assert_eq!(concurrent_a.sort_order, concurrent_b.sort_order);
     run_sync_now(
-        context("rank-client-a", sync_a.keys.clone()),
+        context(&sync_a.device_id, &fixture.token, sync_a.keys.clone()),
         &mut store_a,
         &mut ticking_now,
     )
     .await
     .unwrap();
     run_sync_now(
-        context("rank-client-b", sync_b.keys.clone()),
+        context(&sync_b.device_id, &token_b, sync_b.keys.clone()),
         &mut store_b,
         &mut ticking_now,
     )
     .await
     .unwrap();
     run_sync_now(
-        context("rank-client-a", sync_a.keys.clone()),
+        context(&sync_a.device_id, &fixture.token, sync_a.keys.clone()),
         &mut store_a,
         &mut ticking_now,
     )
@@ -1921,21 +2231,21 @@ async fn equal_rank_clients_converge_then_common_reorder_rebalances_and_reconver
         )
         .unwrap();
     run_sync_now(
-        context("rank-client-a", sync_a.keys.clone()),
+        context(&sync_a.device_id, &fixture.token, sync_a.keys.clone()),
         &mut store_a,
         &mut ticking_now,
     )
     .await
     .unwrap();
     run_sync_now(
-        context("rank-client-b", sync_b.keys.clone()),
+        context(&sync_b.device_id, &token_b, sync_b.keys.clone()),
         &mut store_b,
         &mut ticking_now,
     )
     .await
     .unwrap();
     run_sync_now(
-        context("rank-client-a", sync_a.keys.clone()),
+        context(&sync_a.device_id, &fixture.token, sync_a.keys.clone()),
         &mut store_a,
         &mut ticking_now,
     )
@@ -1986,7 +2296,7 @@ async fn remote_list_deletion_rehomes_offline_descendant_and_republishes_it() {
         historical_tenant_root_deks: Vec::new(),
     };
     let mutation = hlc(-4_000, 0, "list-live");
-    let live_revision = hlc(-3_900, 0, "list-live-revision");
+    let live_revision = fixture.revision_hlc(-3_900, 0);
     assert_eq!(
         fixture
             .push(PushOp {
@@ -2005,7 +2315,7 @@ async fn remote_list_deletion_rehomes_offline_descendant_and_republishes_it() {
         PushStatus::Accepted
     );
     let delete_hlc = hlc(-3_000, 0, "list-delete");
-    let delete_revision = hlc(-2_900, 0, "list-delete-revision");
+    let delete_revision = fixture.revision_hlc(-2_900, 0);
     assert_eq!(
         fixture
             .push(PushOp {
@@ -2036,7 +2346,7 @@ async fn remote_list_deletion_rehomes_offline_descendant_and_republishes_it() {
                 now_ms: now + 1,
             },
             &LocalMutationContext {
-                device_id: "offline-descendant".to_string(),
+                device_id: fixture.auth.device_id.to_string(),
                 keys: keys.clone(),
             },
         )
@@ -2051,7 +2361,7 @@ async fn remote_list_deletion_rehomes_offline_descendant_and_republishes_it() {
         ActiveSyncContext {
             server_url,
             tenant_id: fixture.tenant_id,
-            device_id: "offline-descendant".to_string(),
+            device_id: fixture.auth.device_id.to_string(),
             session_token: taskveil_sync::SecretString::new(fixture.token.clone()),
             manifest_auth_key: test_manifest_auth_key(),
             keys,
@@ -2132,7 +2442,7 @@ async fn rotation_activation_is_atomic_stale_writes_fail_and_retirement_waits() 
     .unwrap();
 
     let record_id = Uuid::now_v7();
-    let old_revision = hlc(-2_000, 0, "rotation-old");
+    let old_revision = fixture.revision_hlc(-2_000, 0);
     assert_eq!(
         fixture
             .push(live_op(
@@ -2242,7 +2552,7 @@ async fn rotation_activation_is_atomic_stale_writes_fail_and_retirement_waits() 
     let stale = live_op(
         record_id,
         Some(old_revision.clone()),
-        hlc(-1_800, 0, "rotation-stale"),
+        fixture.revision_hlc(-1_800, 0),
         hlc(-1_900, 0, "rotation-stale-mutation"),
         b"stale-generation",
     );
@@ -2255,7 +2565,7 @@ async fn rotation_activation_is_atomic_stale_writes_fail_and_retirement_waits() 
     .await
     .is_err());
 
-    let new_revision = hlc(-1_600, 0, "rotation-new");
+    let new_revision = fixture.revision_hlc(-1_600, 0);
     let migrated = PushOp {
         op_id: Uuid::now_v7(),
         record_id,
@@ -2439,6 +2749,84 @@ fn tombstone_op(
     }
 }
 
+#[tokio::test]
+async fn push_rejects_unobservable_or_spoofed_revision_clocks_before_persistence() {
+    let fixture = Fixture::setup().await;
+    fixture.close_continuity().await;
+    let authenticated_node = fixture.auth.device_id.to_string();
+    let boundary_id = Uuid::now_v7();
+    let no_headroom_id = Uuid::now_v7();
+    let maximum_id = Uuid::now_v7();
+    let spoofed_id = Uuid::now_v7();
+
+    // Validation covers the whole batch before starting persistence: the valid
+    // boundary record must not survive beside a poisoned record.
+    let boundary = hlc(-1_000, u32::MAX - 2, &authenticated_node);
+    let no_headroom = hlc(-1_000, u32::MAX - 1, &authenticated_node);
+    assert!(sync::push(
+        &fixture.pool,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+        PushRequest {
+            ops: vec![
+                tombstone_op(boundary_id, None, boundary.clone(), boundary.clone()),
+                tombstone_op(no_headroom_id, None, no_headroom.clone(), no_headroom,),
+            ],
+        },
+    )
+    .await
+    .is_err());
+
+    let maximum = hlc(-900, u32::MAX, &authenticated_node);
+    assert!(sync::push(
+        &fixture.pool,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+        PushRequest {
+            ops: vec![tombstone_op(maximum_id, None, maximum.clone(), maximum,)],
+        },
+    )
+    .await
+    .is_err());
+
+    let spoofed = hlc(-800, 0, &Uuid::now_v7().to_string());
+    assert!(sync::push(
+        &fixture.pool,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+        PushRequest {
+            ops: vec![tombstone_op(spoofed_id, None, spoofed.clone(), spoofed,)],
+        },
+    )
+    .await
+    .is_err());
+
+    let rejected_count: i64 = query(
+        "SELECT count(*) AS count FROM sync_records
+         WHERE tenant_id = $1 AND record_id = ANY($2)",
+    )
+    .bind(fixture.tenant_id)
+    .bind(vec![boundary_id, no_headroom_id, maximum_id, spoofed_id])
+    .fetch_one(&fixture.admin_pool)
+    .await
+    .unwrap()
+    .try_get("count")
+    .unwrap();
+    assert_eq!(rejected_count, 0);
+
+    let accepted = sync::push(
+        &fixture.pool,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+        PushRequest {
+            ops: vec![tombstone_op(boundary_id, None, boundary.clone(), boundary)],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(accepted.results[0].status, PushStatus::Accepted);
+}
+
 fn timer_live_op(
     record_id: Uuid,
     base_revision_hlc: Option<String>,
@@ -2473,7 +2861,7 @@ async fn timer_session_live_is_immutable_and_tombstone_is_terminal_and_pullable(
     let fixture = Fixture::setup().await;
     let record_id = Uuid::now_v7();
     let mutation = hlc(-5_000, 0, "timer-mutation");
-    let revision = hlc(-4_900, 0, "timer-revision");
+    let revision = fixture.revision_hlc(-4_900, 0);
     let create = timer_live_op(
         record_id,
         None,
@@ -2496,7 +2884,7 @@ async fn timer_session_live_is_immutable_and_tombstone_is_terminal_and_pullable(
         .push(timer_live_op(
             record_id,
             Some(revision.clone()),
-            hlc(-4_000, 0, "timer-update-revision"),
+            fixture.revision_hlc(-4_000, 0),
             hlc(-4_100, 0, "timer-update-mutation"),
             b"different-opaque-timer-session",
         ))
@@ -2526,15 +2914,20 @@ async fn timer_session_live_is_immutable_and_tombstone_is_terminal_and_pullable(
     assert_eq!(live.collection, SyncCollection::TimerSessions);
     assert!(matches!(live.state, SyncRecordState::Live { .. }));
 
-    let resync = sync::begin_full_resync(&fixture.pool, fixture.tenant_id, fixture.auth.clone())
-        .await
-        .unwrap();
-    let base = sync::scan_base(
+    let resync = sync::begin_full_resync(
         &fixture.pool,
+        &fixture.resync_tokens,
         fixture.tenant_id,
         fixture.auth.clone(),
-        resync.generation,
-        None,
+    )
+    .await
+    .unwrap();
+    let base = sync::scan_base(
+        &fixture.pool,
+        &fixture.resync_tokens,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+        &resync.page_token,
         Some(100),
     )
     .await
@@ -2550,7 +2943,7 @@ async fn timer_session_live_is_immutable_and_tombstone_is_terminal_and_pullable(
         SyncCollection::TimerSessions
     );
 
-    let delete_revision = hlc(-3_000, 0, "timer-delete-revision");
+    let delete_revision = fixture.revision_hlc(-3_000, 0);
     let deleted = fixture
         .push(timer_tombstone_op(
             record_id,
@@ -2565,7 +2958,7 @@ async fn timer_session_live_is_immutable_and_tombstone_is_terminal_and_pullable(
         .push(timer_live_op(
             record_id,
             Some(delete_revision),
-            hlc(-2_000, 0, "timer-resurrect-revision"),
+            fixture.revision_hlc(-2_000, 0),
             hlc(-2_100, 0, "timer-resurrect-mutation"),
             b"resurrected-timer-session",
         ))
@@ -2596,7 +2989,7 @@ async fn timer_session_live_is_immutable_and_tombstone_is_terminal_and_pullable(
 }
 
 #[tokio::test]
-async fn task_series_domain_migration_updates_every_server_collection_check() {
+async fn task_series_domain_migration_updates_persisted_record_collection_checks() {
     let fixture = Fixture::setup().await;
     let constraints = query(
         "SELECT conname, pg_get_constraintdef(oid) AS definition
@@ -2605,7 +2998,6 @@ async fn task_series_domain_migration_updates_every_server_collection_check() {
          ORDER BY conname",
     )
     .bind(vec![
-        "device_resync_sessions_base_cursor_collection_check",
         "sync_records_collection_check",
         "sync_records_history_collection_check",
     ])
@@ -2613,7 +3005,7 @@ async fn task_series_domain_migration_updates_every_server_collection_check() {
     .await
     .unwrap();
 
-    assert_eq!(constraints.len(), 3);
+    assert_eq!(constraints.len(), 2);
     for row in constraints {
         let definition: String = row.try_get("definition").unwrap();
         assert!(definition.contains("timer_sessions"), "{definition}");
@@ -2627,7 +3019,7 @@ async fn cas_retry_semantic_fences_and_pull_preserve_the_current_head() {
     let fixture = Fixture::setup().await;
     let record_id = Uuid::now_v7();
     let mutation_1 = hlc(-4_000, 0, "semantic-a");
-    let revision_1 = hlc(-3_900, 0, "revision-a");
+    let revision_1 = fixture.revision_hlc(-3_900, 0);
     let create = live_op(
         record_id,
         None,
@@ -2658,7 +3050,7 @@ async fn cas_retry_semantic_fences_and_pull_preserve_the_current_head() {
     let stale = live_op(
         record_id,
         None,
-        hlc(-3_000, 0, "revision-stale"),
+        fixture.revision_hlc(-3_000, 0),
         hlc(-3_100, 0, "semantic-stale"),
         b"must-not-overwrite",
     );
@@ -2672,8 +3064,8 @@ async fn cas_retry_semantic_fences_and_pull_preserve_the_current_head() {
     let delete_old = tombstone_op(
         record_id,
         Some(revision_1.clone()),
-        hlc(-2_900, 0, "revision-delete-old"),
-        hlc(-5_000, 0, "delete-old"),
+        fixture.revision_hlc(-2_900, 0),
+        hlc(-50_000, 0, "delete-old"),
     );
     let superseded = fixture.push(delete_old).await;
     assert_eq!(superseded.status, PushStatus::Superseded);
@@ -2683,7 +3075,7 @@ async fn cas_retry_semantic_fences_and_pull_preserve_the_current_head() {
     );
 
     let delete_hlc = hlc(-2_500, 0, "delete-new");
-    let delete_revision = hlc(-2_400, 0, "revision-delete-new");
+    let delete_revision = fixture.revision_hlc(-2_400, 0);
     let deleted = fixture
         .push(tombstone_op(
             record_id,
@@ -2699,7 +3091,7 @@ async fn cas_retry_semantic_fences_and_pull_preserve_the_current_head() {
         .push(live_op(
             record_id,
             Some(delete_revision.clone()),
-            hlc(-2_000, 0, "revision-live-old"),
+            fixture.revision_hlc(-2_000, 0),
             mutation_1,
             b"must-stay-deleted",
         ))
@@ -2714,7 +3106,7 @@ async fn cas_retry_semantic_fences_and_pull_preserve_the_current_head() {
         .push(live_op(
             record_id,
             Some(delete_revision.clone()),
-            hlc(-1_500, 0, "revision-live-new"),
+            fixture.revision_hlc(-1_500, 0),
             hlc(-1_600, 0, "semantic-live-new"),
             b"cipher-resurrected",
         ))
@@ -2761,7 +3153,7 @@ async fn server_trusted_continuity_binds_proofs_and_guards_all_writes() {
     let op = live_op(
         record_id,
         None,
-        hlc(-2_000, 0, "continuity-revision"),
+        fixture.revision_hlc(-2_000, 0),
         hlc(-2_100, 0, "continuity-mutation"),
         b"continuity",
     );
@@ -2859,9 +3251,14 @@ async fn server_trusted_continuity_binds_proofs_and_guards_all_writes() {
         PushStatus::Accepted
     );
     fixture.close_continuity().await;
-    let start = sync::begin_full_resync(&fixture.pool, fixture.tenant_id, fixture.auth.clone())
-        .await
-        .unwrap();
+    let start = sync::begin_full_resync(
+        &fixture.pool,
+        &fixture.resync_tokens,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+    )
+    .await
+    .unwrap();
     assert!(sync::push(
         &fixture.pool,
         fixture.tenant_id,
@@ -2872,15 +3269,24 @@ async fn server_trusted_continuity_binds_proofs_and_guards_all_writes() {
     .is_err());
     let base = sync::scan_base(
         &fixture.pool,
+        &fixture.resync_tokens,
         fixture.tenant_id,
         fixture.auth.clone(),
-        start.generation,
-        None,
+        &start.page_token,
         Some(100),
     )
     .await
     .unwrap();
     assert!(!base.has_more);
+    sync::complete_base(
+        &fixture.pool,
+        &fixture.resync_tokens,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+        base.completion_token.as_deref().unwrap(),
+    )
+    .await
+    .unwrap();
     let closure = sync::pull(
         &fixture.pool,
         fixture.tenant_id,
@@ -2919,9 +3325,14 @@ async fn server_trusted_continuity_binds_proofs_and_guards_all_writes() {
     .await
     .is_ok());
 
-    let next = sync::begin_full_resync(&fixture.pool, fixture.tenant_id, fixture.auth.clone())
-        .await
-        .unwrap();
+    let next = sync::begin_full_resync(
+        &fixture.pool,
+        &fixture.resync_tokens,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+    )
+    .await
+    .unwrap();
     assert!(next.generation > start.generation);
     assert!(sync::ack_continuity(
         &fixture.pool,
@@ -2940,7 +3351,7 @@ async fn v2_route_rejects_v1_unknown_collection_invalid_blob_and_collection_chan
     let fixture = Fixture::setup().await;
     fixture.close_continuity().await;
     let record_id = Uuid::now_v7();
-    let revision = hlc(-1_000, 0, "route-revision");
+    let revision = fixture.revision_hlc(-1_000, 0);
     let mutation = hlc(-1_100, 0, "route-mutation");
     let valid_body = json!({
         "ops": [{
@@ -3102,7 +3513,7 @@ async fn v2_route_rejects_v1_unknown_collection_invalid_blob_and_collection_chan
         record_id,
         collection: SyncCollection::Lists,
         base_revision_hlc: Some(revision),
-        revision_hlc: hlc(-700, 0, "changed-collection"),
+        revision_hlc: fixture.revision_hlc(-700, 0),
         state: SyncRecordState::Tombstone {
             delete_hlc: hlc(-750, 0, "changed-delete"),
         },
@@ -3141,7 +3552,7 @@ async fn v2_schema_enforces_tagged_state_and_gc_only_removes_tombstones() {
         .push(live_op(
             live_id,
             None,
-            hlc(-1_000, 0, "gc-live-revision"),
+            fixture.revision_hlc(-1_000, 0),
             hlc(-1_100, 0, "gc-live-mutation"),
             b"live",
         ))
@@ -3150,7 +3561,7 @@ async fn v2_schema_enforces_tagged_state_and_gc_only_removes_tombstones() {
         .push(tombstone_op(
             tombstone_id,
             None,
-            hlc(-900, 0, "gc-delete-revision"),
+            fixture.revision_hlc(-900, 0),
             hlc(-950, 0, "gc-delete"),
         ))
         .await;
@@ -3223,7 +3634,7 @@ async fn fuzzy_base_uses_stable_keys_and_delta_recovers_behind_cursor_changes() 
     let behind_cursor = Uuid::from_u128(5);
     let first = Uuid::from_u128(10);
     let last = Uuid::from_u128(30);
-    let first_revision = hlc(-5_000, 0, "stable-first");
+    let first_revision = fixture.revision_hlc(-5_000, 0);
     fixture
         .push(live_op(
             first,
@@ -3237,22 +3648,27 @@ async fn fuzzy_base_uses_stable_keys_and_delta_recovers_behind_cursor_changes() 
         .push(live_op(
             last,
             None,
-            hlc(-4_900, 0, "stable-last"),
+            fixture.revision_hlc(-4_900, 0),
             hlc(-5_000, 0, "stable-last-mutation"),
             b"last",
         ))
         .await;
 
-    let start = sync::begin_full_resync(&fixture.pool, fixture.tenant_id, fixture.auth.clone())
-        .await
-        .unwrap();
+    let start = sync::begin_full_resync(
+        &fixture.pool,
+        &fixture.resync_tokens,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+    )
+    .await
+    .unwrap();
     assert_eq!(start.base_seq, 2);
     let first_page = sync::scan_base(
         &fixture.pool,
+        &fixture.resync_tokens,
         fixture.tenant_id,
         fixture.auth.clone(),
-        start.generation,
-        None,
+        &start.page_token,
         Some(1),
     )
     .await
@@ -3264,7 +3680,7 @@ async fn fuzzy_base_uses_stable_keys_and_delta_recovers_behind_cursor_changes() 
         .push(live_op(
             first,
             Some(first_revision),
-            hlc(-4_000, 0, "stable-first-update"),
+            fixture.revision_hlc(-4_000, 0),
             hlc(-4_100, 0, "stable-first-update-mutation"),
             b"first-v2",
         ))
@@ -3273,7 +3689,7 @@ async fn fuzzy_base_uses_stable_keys_and_delta_recovers_behind_cursor_changes() 
         .push(live_op(
             behind_cursor,
             None,
-            hlc(-3_900, 0, "stable-behind"),
+            fixture.revision_hlc(-3_900, 0),
             hlc(-4_000, 0, "stable-behind-mutation"),
             b"behind",
         ))
@@ -3281,16 +3697,25 @@ async fn fuzzy_base_uses_stable_keys_and_delta_recovers_behind_cursor_changes() 
 
     let second_page = sync::scan_base(
         &fixture.pool,
+        &fixture.resync_tokens,
         fixture.tenant_id,
         fixture.auth.clone(),
-        start.generation,
-        first_page.next_cursor,
+        first_page.next_page_token.as_deref().unwrap(),
         Some(1),
     )
     .await
     .unwrap();
     assert_eq!(second_page.records[0].record_id, last);
     assert!(!second_page.has_more);
+    sync::complete_base(
+        &fixture.pool,
+        &fixture.resync_tokens,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+        second_page.completion_token.as_deref().unwrap(),
+    )
+    .await
+    .unwrap();
 
     let delta = sync::pull(
         &fixture.pool,
@@ -3331,22 +3756,36 @@ async fn fuzzy_base_uses_stable_keys_and_delta_recovers_behind_cursor_changes() 
 #[tokio::test]
 async fn empty_resync_closes_and_base_scan_is_not_limited_to_start_seq() {
     let fixture = Fixture::setup().await;
-    let start = sync::begin_full_resync(&fixture.pool, fixture.tenant_id, fixture.auth.clone())
-        .await
-        .unwrap();
+    let start = sync::begin_full_resync(
+        &fixture.pool,
+        &fixture.resync_tokens,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+    )
+    .await
+    .unwrap();
     assert_eq!(start.base_seq, 0);
     let empty_base = sync::scan_base(
         &fixture.pool,
+        &fixture.resync_tokens,
         fixture.tenant_id,
         fixture.auth.clone(),
-        start.generation,
-        None,
+        &start.page_token,
         Some(100),
     )
     .await
     .unwrap();
     assert!(empty_base.records.is_empty());
     assert!(!empty_base.has_more);
+    sync::complete_base(
+        &fixture.pool,
+        &fixture.resync_tokens,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+        empty_base.completion_token.as_deref().unwrap(),
+    )
+    .await
+    .unwrap();
     let empty_delta = sync::pull(
         &fixture.pool,
         fixture.tenant_id,
@@ -3369,20 +3808,25 @@ async fn empty_resync_closes_and_base_scan_is_not_limited_to_start_seq() {
         .push(live_op(
             created_after_start,
             None,
-            hlc(-2_000, 0, "after-start"),
+            fixture.revision_hlc(-2_000, 0),
             hlc(-2_100, 0, "after-start-mutation"),
             b"created-after-start",
         ))
         .await;
-    let restarted = sync::begin_full_resync(&fixture.pool, fixture.tenant_id, fixture.auth.clone())
-        .await
-        .unwrap();
-    let fuzzy_base = sync::scan_base(
+    let restarted = sync::begin_full_resync(
         &fixture.pool,
+        &fixture.resync_tokens,
         fixture.tenant_id,
         fixture.auth.clone(),
-        restarted.generation,
-        None,
+    )
+    .await
+    .unwrap();
+    let fuzzy_base = sync::scan_base(
+        &fixture.pool,
+        &fixture.resync_tokens,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+        &restarted.page_token,
         Some(100),
     )
     .await
@@ -3390,6 +3834,307 @@ async fn empty_resync_closes_and_base_scan_is_not_limited_to_start_seq() {
     assert_eq!(fuzzy_base.records.len(), 1);
     assert_eq!(fuzzy_base.records[0].record_id, created_after_start);
     assert!(fuzzy_base.records[0].seq > start.base_seq);
+}
+
+#[tokio::test]
+async fn resync_page_tokens_are_replayable_bound_and_require_idempotent_completion_ack() {
+    use taskveil_server::resync_token::ResyncTokenClaims;
+
+    let fixture = Fixture::setup().await;
+    let start = sync::begin_full_resync(
+        &fixture.pool,
+        &fixture.resync_tokens,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+    )
+    .await
+    .unwrap();
+    let base_path = format!("/v2/tenants/{}/resync/base", fixture.tenant_id);
+    assert_eq!(
+        request_status(
+            &fixture.app,
+            Method::GET,
+            format!("{base_path}?page_token={}", start.page_token),
+            Some(&fixture.token),
+            None,
+        )
+        .await,
+        StatusCode::METHOD_NOT_ALLOWED
+    );
+    assert_eq!(
+        request_status(
+            &fixture.app,
+            Method::POST,
+            base_path.clone(),
+            Some(&fixture.token),
+            Some(json!({
+                "page_token": start.page_token,
+                "limit": 100,
+                "cursor": {"collection": "tasks", "record_id": Uuid::now_v7()}
+            })),
+        )
+        .await,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        request_status(
+            &fixture.app,
+            Method::POST,
+            base_path.clone(),
+            Some(&fixture.token),
+            Some(json!({"page_token": "x".repeat(9 * 1024), "limit": 100})),
+        )
+        .await,
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert_eq!(
+        request_status(
+            &fixture.app,
+            Method::POST,
+            base_path,
+            Some(&fixture.token),
+            Some(json!({"page_token": start.page_token, "limit": 100})),
+        )
+        .await,
+        StatusCode::OK
+    );
+    let first = sync::scan_base(
+        &fixture.pool,
+        &fixture.resync_tokens,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+        &start.page_token,
+        Some(100),
+    )
+    .await
+    .unwrap();
+    let replay = sync::scan_base(
+        &fixture.pool,
+        &fixture.resync_tokens,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+        &start.page_token,
+        Some(100),
+    )
+    .await
+    .unwrap();
+    assert_eq!(replay, first);
+    assert!(sync::pull(
+        &fixture.pool,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+        start.base_seq,
+        Some(100),
+        Some(start.generation),
+    )
+    .await
+    .is_err());
+
+    let completion = first.completion_token.as_deref().unwrap();
+    let first_ack = sync::complete_base(
+        &fixture.pool,
+        &fixture.resync_tokens,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+        completion,
+    )
+    .await
+    .unwrap();
+    let replayed_ack = sync::complete_base(
+        &fixture.pool,
+        &fixture.resync_tokens,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+        completion,
+    )
+    .await
+    .unwrap();
+    assert_eq!(replayed_ack, first_ack);
+    let continuity = query(
+        "SELECT continuity_generation, required_generation
+         FROM tenant_device_continuity
+         WHERE tenant_id = $1 AND device_id = $2",
+    )
+    .bind(fixture.tenant_id)
+    .bind(fixture.auth.device_id)
+    .fetch_one(&fixture.admin_pool)
+    .await
+    .unwrap();
+    assert_ne!(
+        continuity
+            .try_get::<i64, _>("continuity_generation")
+            .unwrap(),
+        continuity.try_get::<i64, _>("required_generation").unwrap(),
+        "base completion ACK must not close the independent continuity proof"
+    );
+    assert!(sync::pull(
+        &fixture.pool,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+        start.base_seq,
+        Some(100),
+        Some(start.generation),
+    )
+    .await
+    .is_ok());
+
+    let stale = sync::begin_full_resync(
+        &fixture.pool,
+        &fixture.resync_tokens,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+    )
+    .await
+    .unwrap();
+    let current = sync::begin_full_resync(
+        &fixture.pool,
+        &fixture.resync_tokens,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+    )
+    .await
+    .unwrap();
+    assert!(sync::scan_base(
+        &fixture.pool,
+        &fixture.resync_tokens,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+        &stale.page_token,
+        Some(100),
+    )
+    .await
+    .is_err());
+    assert!(sync::scan_base(
+        &fixture.pool,
+        &fixture.resync_tokens,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+        &format!("{}x", current.page_token),
+        Some(100),
+    )
+    .await
+    .is_err());
+
+    let token_now = Utc::now().timestamp();
+    let cross_device_claims = ResyncTokenClaims::page(
+        fixture.tenant_id,
+        Uuid::now_v7(),
+        current.generation,
+        current.base_seq,
+        None,
+        token_now,
+    )
+    .unwrap();
+    let cross_device = fixture
+        .resync_tokens
+        .sign(&cross_device_claims, token_now)
+        .unwrap();
+    assert!(sync::scan_base(
+        &fixture.pool,
+        &fixture.resync_tokens,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+        &cross_device,
+        Some(100),
+    )
+    .await
+    .is_err());
+
+    let cross_tenant_claims = ResyncTokenClaims::page(
+        Uuid::now_v7(),
+        fixture.auth.device_id,
+        current.generation,
+        current.base_seq,
+        None,
+        token_now,
+    )
+    .unwrap();
+    let cross_tenant = fixture
+        .resync_tokens
+        .sign(&cross_tenant_claims, token_now)
+        .unwrap();
+    assert!(sync::scan_base(
+        &fixture.pool,
+        &fixture.resync_tokens,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+        &cross_tenant,
+        Some(100),
+    )
+    .await
+    .is_err());
+
+    let restarted_keyring = taskveil_server::resync_token::ResyncTokenKeyring::for_tests();
+    let after_restart = sync::scan_base(
+        &fixture.pool,
+        &restarted_keyring,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+        &current.page_token,
+        Some(100),
+    )
+    .await
+    .unwrap();
+    let replayed_after_response_loss = sync::scan_base(
+        &fixture.pool,
+        &restarted_keyring,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+        &current.page_token,
+        Some(100),
+    )
+    .await
+    .unwrap();
+    assert_eq!(after_restart, replayed_after_response_loss);
+
+    let expired_issued_at = token_now - taskveil_server::resync_token::MAX_TOKEN_LIFETIME_SECS - 1;
+    let expired_claims = ResyncTokenClaims::page(
+        fixture.tenant_id,
+        fixture.auth.device_id,
+        current.generation,
+        current.base_seq,
+        None,
+        expired_issued_at,
+    )
+    .unwrap();
+    let expired = fixture
+        .resync_tokens
+        .sign(&expired_claims, expired_issued_at)
+        .unwrap();
+    assert!(sync::scan_base(
+        &fixture.pool,
+        &restarted_keyring,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+        &expired,
+        Some(100),
+    )
+    .await
+    .is_err());
+    let replacement = sync::begin_full_resync(
+        &fixture.pool,
+        &restarted_keyring,
+        fixture.tenant_id,
+        fixture.auth.clone(),
+    )
+    .await
+    .unwrap();
+    assert!(replacement.generation > current.generation);
+    let session_count: i64 = query(
+        "SELECT count(*) AS count FROM device_resync_sessions
+         WHERE tenant_id = $1 AND device_id = $2",
+    )
+    .bind(fixture.tenant_id)
+    .bind(fixture.auth.device_id)
+    .fetch_one(&fixture.admin_pool)
+    .await
+    .unwrap()
+    .try_get("count")
+    .unwrap();
+    assert_eq!(
+        session_count, 1,
+        "an expired chain restarts by replacing the device's only session row"
+    );
 }
 
 #[tokio::test]
@@ -3401,7 +4146,7 @@ async fn gc_horizon_can_exceed_max_active_seq_and_empty_delta_reaches_high_water
         .push(live_op(
             live_id,
             None,
-            hlc(-5_000, 0, "horizon-live"),
+            fixture.revision_hlc(-5_000, 0),
             hlc(-5_100, 0, "horizon-live-mutation"),
             b"live",
         ))
@@ -3410,7 +4155,7 @@ async fn gc_horizon_can_exceed_max_active_seq_and_empty_delta_reaches_high_water
         .push(tombstone_op(
             tombstone_id,
             None,
-            hlc(-4_000, 0, "horizon-delete"),
+            fixture.revision_hlc(-4_000, 0),
             hlc(-4_100, 0, "horizon-delete-semantic"),
         ))
         .await;

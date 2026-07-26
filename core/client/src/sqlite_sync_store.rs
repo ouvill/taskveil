@@ -125,18 +125,32 @@ impl LocalMutationSyncStore for SqliteSyncStore {
 
 impl LocalSyncStore for SqliteSyncStore {
     fn load_full_resync(&mut self) -> Result<Option<LocalFullResyncProgress>, String> {
-        with_sync_repository(&self.db_path, &self.db_key, |repository| {
+        let progress = with_sync_repository(&self.db_path, &self.db_key, |repository| {
             repository
                 .load_full_resync()
-                .map(|progress| progress.map(storage_resync_to_local))
                 .map_err(|error| error.to_string())
-        })
+        })?;
+        let awaiting_base_ack = self
+            .get_setting(taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY)?
+            .is_some_and(|token| !token.is_empty());
+        Ok(progress.map(|progress| storage_resync_to_local(progress, awaiting_base_ack)))
     }
 
     fn list_outbox_heads(&mut self, limit: usize) -> Result<Vec<LocalSyncOutboxEntry>, String> {
         with_sync_repository(&self.db_path, &self.db_key, |repository| {
             repository
                 .list_outbox_heads(limit)
+                .map_err(|error| error.to_string())
+        })?
+        .into_iter()
+        .map(storage_outbox_to_local)
+        .collect()
+    }
+
+    fn list_all_outbox_heads(&mut self, limit: usize) -> Result<Vec<LocalSyncOutboxEntry>, String> {
+        with_sync_repository(&self.db_path, &self.db_key, |repository| {
+            repository
+                .list_all_outbox_heads(limit)
                 .map_err(|error| error.to_string())
         })?
         .into_iter()
@@ -552,15 +566,30 @@ impl LocalMutationSyncStore for SqliteSyncWriteTx {
 
 impl LocalSyncStore for SqliteSyncWriteTx {
     fn load_full_resync(&mut self) -> Result<Option<LocalFullResyncProgress>, String> {
-        self.transaction
+        let progress = self
+            .transaction
             .load_full_resync()
-            .map(|progress| progress.map(storage_resync_to_local))
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        let awaiting_base_ack = self
+            .transaction
+            .get_setting(taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY)
+            .map_err(|error| error.to_string())?
+            .is_some_and(|token| !token.is_empty());
+        Ok(progress.map(|progress| storage_resync_to_local(progress, awaiting_base_ack)))
     }
 
     fn list_outbox_heads(&mut self, limit: usize) -> Result<Vec<LocalSyncOutboxEntry>, String> {
         self.transaction
             .list_outbox_heads(limit)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(storage_outbox_to_local)
+            .collect()
+    }
+
+    fn list_all_outbox_heads(&mut self, limit: usize) -> Result<Vec<LocalSyncOutboxEntry>, String> {
+        self.transaction
+            .list_all_outbox_heads(limit)
             .map_err(|error| error.to_string())?
             .into_iter()
             .map(storage_outbox_to_local)
@@ -834,7 +863,7 @@ impl LocalSyncWriteTransaction for SqliteSyncWriteTx {
     ) -> Result<LocalFullResyncProgress, String> {
         self.transaction
             .start_full_resync(generation_id, continuity_generation, base_seq, now_ms)
-            .map(storage_resync_to_local)
+            .map(|progress| storage_resync_to_local(progress, false))
             .map_err(|error| error.to_string())
     }
 
@@ -904,6 +933,12 @@ impl LocalSyncWriteTransaction for SqliteSyncWriteTx {
     ) -> Result<i64, String> {
         self.transaction
             .finalize_full_resync(generation_id, cursor_name, now_ms)
+            .map_err(|error| error.to_string())
+    }
+
+    fn reset_full_resync(&mut self) -> Result<(), String> {
+        self.transaction
+            .reset_full_resync()
             .map_err(|error| error.to_string())
     }
 
@@ -1563,5 +1598,152 @@ mod tests {
         assert_eq!(store.list_outbox_heads(10).unwrap().len(), 1);
         assert!(store.get_list(list.id).unwrap().is_some());
         assert_eq!(store.get_cursor_seq(SYNC_CURSOR_NAME).unwrap(), Some(0));
+    }
+
+    #[test]
+    fn durable_completion_token_exposes_awaiting_ack_until_atomically_cleared() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("profile.sqlite3");
+        let mut store = SqliteSyncStore::new(db_path, DB_KEY);
+        let generation_id = Uuid::now_v7();
+        let mut transaction = store.begin_write_transaction().unwrap();
+        transaction
+            .start_full_resync(generation_id, 7, 11, 100)
+            .unwrap();
+        transaction
+            .advance_full_resync_base(generation_id, None, true, 101)
+            .unwrap();
+        transaction
+            .set_setting(
+                taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY,
+                "completion-token",
+                101,
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+
+        assert_eq!(
+            store.load_full_resync().unwrap().unwrap().phase,
+            taskveil_sync::enqueue::LocalFullResyncPhase::BaseAwaitingAck
+        );
+
+        let mut transaction = store.begin_write_transaction().unwrap();
+        transaction
+            .set_setting(
+                taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY,
+                "",
+                102,
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+        assert_eq!(
+            store.load_full_resync().unwrap().unwrap().phase,
+            taskveil_sync::enqueue::LocalFullResyncPhase::Delta
+        );
+    }
+
+    #[test]
+    fn invalid_resync_restart_atomically_clears_progress_marks_and_both_tokens() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("profile.sqlite3");
+        let mut store = SqliteSyncStore::new(db_path.clone(), DB_KEY);
+        let generation_id = Uuid::now_v7();
+        let mut transaction = store.begin_write_transaction().unwrap();
+        transaction
+            .start_full_resync(generation_id, 7, 11, 100)
+            .unwrap();
+        transaction
+            .mark_full_resync_record(generation_id, SyncCollection::Tasks, Uuid::now_v7())
+            .unwrap();
+        transaction
+            .set_setting(
+                taskveil_sync::SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY,
+                "page-token",
+                100,
+            )
+            .unwrap();
+        transaction
+            .set_setting(
+                taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY,
+                "completion-token",
+                100,
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+        open_encrypted(&db_path, &DB_KEY)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_resync_reset_token
+                 BEFORE UPDATE ON settings
+                 WHEN NEW.key = 'sync_full_resync_completion_token' AND NEW.value = ''
+                 BEGIN SELECT RAISE(ABORT, 'fail reset token'); END;",
+            )
+            .unwrap();
+
+        let mut transaction = store.begin_write_transaction().unwrap();
+        transaction.reset_full_resync().unwrap();
+        transaction
+            .set_setting(
+                taskveil_sync::SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY,
+                "",
+                101,
+            )
+            .unwrap();
+        assert!(transaction
+            .set_setting(
+                taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY,
+                "",
+                101,
+            )
+            .is_err());
+        drop(transaction);
+        assert!(store.load_full_resync().unwrap().is_some());
+        assert_eq!(
+            store
+                .get_setting(taskveil_sync::SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY)
+                .unwrap()
+                .as_deref(),
+            Some("page-token")
+        );
+        let connection = open_encrypted(&db_path, &DB_KEY).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM sync_full_resync_marks", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            1
+        );
+        connection
+            .execute_batch("DROP TRIGGER fail_resync_reset_token;")
+            .unwrap();
+
+        let mut transaction = store.begin_write_transaction().unwrap();
+        transaction.reset_full_resync().unwrap();
+        transaction
+            .set_setting(
+                taskveil_sync::SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY,
+                "",
+                102,
+            )
+            .unwrap();
+        transaction
+            .set_setting(
+                taskveil_sync::SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY,
+                "",
+                102,
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+        assert!(store.load_full_resync().unwrap().is_none());
+        assert_eq!(
+            open_encrypted(&db_path, &DB_KEY)
+                .unwrap()
+                .query_row("SELECT count(*) FROM sync_full_resync_marks", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
     }
 }

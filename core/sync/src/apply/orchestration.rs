@@ -73,6 +73,13 @@ where
     R: SyncKeyRefresher,
     P: FnMut(&mut S) -> Result<(), String>,
 {
+    // Re-authentication can assign a fresh server device UUID to an existing
+    // encrypted profile. Assert the durable clock/outbox identity before any
+    // network request so a partially completed login cannot push an old node.
+    let mut identity_transaction = store.begin_write_transaction()?;
+    rebind_local_device(&mut identity_transaction, &context.device_id, now_ms)?;
+    identity_transaction.commit()?;
+
     let engine = SyncEngine::new(
         context.server_url.clone(),
         context.tenant_id,

@@ -54,6 +54,7 @@ async fn setup() -> TestApp {
         pool: application_pool,
         billing: BillingService::unavailable_for_tests(BillingEnvironment::Sandbox),
         auth_issuer: "http://localhost".to_string(),
+        resync_tokens: taskveil_server::resync_token::ResyncTokenKeyring::for_tests(),
     });
     TestApp {
         app,

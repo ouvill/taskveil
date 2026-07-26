@@ -620,3 +620,9 @@ pub(super) fn finalize_full_resync_on(
     )?;
     Ok(high_water)
 }
+
+pub(super) fn reset_full_resync_on(connection: &Connection) -> Result<(), StorageError> {
+    connection.execute("DELETE FROM sync_full_resync_marks", [])?;
+    connection.execute("DELETE FROM sync_full_resync_state", [])?;
+    Ok(())
+}

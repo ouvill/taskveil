@@ -24,6 +24,11 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         name: "home_calendar_range_indexes",
         sql: include_str!("../migrations/0002_home_calendar_range_indexes.sql"),
     },
+    Migration {
+        version: 3,
+        name: "resync_page_tokens",
+        sql: include_str!("../migrations/0003_resync_page_tokens.sql"),
+    },
 ];
 
 #[derive(Clone, Copy)]
@@ -213,6 +218,7 @@ mod tests {
         time::Duration,
     };
 
+    use taskveil_domain::Uuid;
     use tempfile::NamedTempFile;
 
     use super::*;
@@ -255,7 +261,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(version, LATEST_MIGRATION_VERSION);
-        assert_eq!(name, "home_calendar_range_indexes");
+        assert_eq!(name, "resync_page_tokens");
         assert_eq!(checksum_length, 48);
         assert!(table_exists(&connection, "tasks").unwrap());
     }
@@ -377,6 +383,67 @@ mod tests {
     }
 
     #[test]
+    fn page_token_migration_clears_unresumable_legacy_full_resync_state() {
+        let file = NamedTempFile::new().unwrap();
+        let mut connection = open_raw(file.path());
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        transaction.execute_batch(CREATE_MIGRATION_TABLE).unwrap();
+        transaction.execute_batch(MIGRATIONS[0].sql).unwrap();
+        transaction
+            .execute(
+                "INSERT INTO _taskveil_migrations (version, name, checksum)
+                 VALUES (?1, ?2, ?3)",
+                params![
+                    MIGRATIONS[0].version,
+                    MIGRATIONS[0].name,
+                    migration_checksum(&MIGRATIONS[0])
+                ],
+            )
+            .unwrap();
+        let generation_id = Uuid::now_v7().to_string();
+        transaction
+            .execute(
+                "INSERT INTO sync_full_resync_state (
+                     singleton, generation_id, phase, base_seq, delta_cursor,
+                     started_at, updated_at, continuity_generation
+                 ) VALUES (1, ?1, 'base', 0, 0, 1, 1, 1)",
+                [&generation_id],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO sync_full_resync_marks
+                     (generation_id, collection, record_id)
+                 VALUES (?1, 'tasks', ?2)",
+                [&generation_id, &Uuid::now_v7().to_string()],
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+        drop(connection);
+
+        let connection = open_encrypted(file.path(), &KEY).unwrap();
+        assert_eq!(ledger_count(&connection), 2);
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM sync_full_resync_state", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM sync_full_resync_marks", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
     fn checksum_mismatch_is_rejected_without_database_changes() {
         let file = NamedTempFile::new().unwrap();
         drop(open_encrypted(file.path(), &KEY).unwrap());
@@ -423,6 +490,7 @@ mod tests {
                 latest
             }) if found == LATEST_MIGRATION_VERSION + 1
                 && latest == LATEST_MIGRATION_VERSION
+            })
         ));
     }
 

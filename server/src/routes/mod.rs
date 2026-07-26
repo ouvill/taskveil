@@ -63,6 +63,7 @@ mod tests {
             pool,
             billing: BillingService::unavailable_for_tests(BillingEnvironment::Sandbox),
             auth_issuer: "http://localhost".to_string(),
+            resync_tokens: crate::resync_token::ResyncTokenKeyring::for_tests(),
         });
         let (status, Json(body)) = ready(State(state)).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);

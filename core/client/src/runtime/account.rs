@@ -33,7 +33,8 @@ use taskveil_sync::{
     },
     canonical_server_origin,
     organization::verify_organization_active_bundle,
-    LocalMutationSyncStore, LocalSyncAtomicStore, LocalSyncKeys, LocalSyncWriteTransaction,
+    rebind_local_device, LocalMutationSyncStore, LocalSyncAtomicStore, LocalSyncKeys,
+    LocalSyncWriteTransaction,
 };
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -1504,12 +1505,14 @@ impl TaskveilClient {
             user_id: parse_session_id(session.user_id.as_deref())?,
             device_id: parse_session_id(session.device_id.as_deref())?,
         };
+        let persistence_now = now_ms()?;
+        self.rebind_sync_device_locked(identity.device_id, persistence_now)?;
         let crypto = persist_account_crypto_context(
             &self.db_path,
             &self.db_key(),
             identity,
             keys,
-            now_ms()?,
+            persistence_now,
         )?;
         self.store_active_wrapped_master_key(local_wrapped_master_key.to_vec())?;
         self.set_setting_value(
@@ -1562,6 +1565,28 @@ impl TaskveilClient {
             &StoredSessionTokens::from_account_tokens(issuer, tokens),
         )?;
         Ok(crypto)
+    }
+
+    fn rebind_sync_device_locked(
+        &self,
+        device_id: Uuid,
+        persistence_now: i64,
+    ) -> Result<(), ClientError> {
+        let mut store = crate::SqliteSyncStore::new_secret(self.db_path.clone(), self.db_key());
+        let mut transaction = store
+            .begin_write_transaction()
+            .map_err(|_| ClientError::Sync)?;
+        let mut fixed_now = || Ok(persistence_now);
+        rebind_local_device(&mut transaction, &device_id.to_string(), &mut fixed_now)
+            .map_err(|_| ClientError::Sync)?;
+        transaction
+            .set_setting(
+                ACCOUNT_DEVICE_ID_SETTING_KEY,
+                &device_id.to_string(),
+                persistence_now,
+            )
+            .map_err(|_| ClientError::Sync)?;
+        transaction.commit().map_err(|_| ClientError::Sync)
     }
 
     fn replace_account_runtime(
@@ -1799,7 +1824,12 @@ mod tests {
         sync::Mutex,
     };
 
-    use taskveil_sync::LocalSyncStore;
+    use taskveil_domain::new_list;
+    use taskveil_storage::{ListRepository, SqliteListRepository};
+    use taskveil_sync::{
+        EncryptedSyncState, Hlc, LocalSyncStore, NewLocalSyncOutboxEntry, SyncCollection,
+        SYNC_LOCAL_HLC_SETTING_KEY,
+    };
     use tempfile::TempDir;
 
     use super::*;
@@ -2149,6 +2179,266 @@ mod tests {
                 .get_cursor_seq(super::super::INITIAL_BACKFILL_CURSOR_NAME)
                 .unwrap(),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn same_profile_authentication_rebinds_clock_and_pending_outbox_to_fresh_device() {
+        const DB_KEY: [u8; 32] = [0x74; 32];
+        let temp = TempDir::new().unwrap();
+        let client = open_test_client(temp.path(), DB_KEY);
+        let list = new_list("Inbox".into(), "a0".into(), 1).unwrap();
+        SqliteListRepository::new(open_encrypted(client.db_path(), &DB_KEY).unwrap())
+            .insert(list.clone())
+            .unwrap();
+
+        let old_device = Uuid::now_v7();
+        let new_device = Uuid::now_v7();
+        let old_clock = Hlc {
+            wall_ms: 100,
+            counter: 5,
+            device_id: old_device.to_string(),
+        };
+        let old_revision = old_clock.encode().unwrap();
+        let old_op_id = Uuid::now_v7();
+        let mut store = SqliteSyncStore::new(client.db_path().to_path_buf(), DB_KEY);
+        store
+            .set_setting(SYNC_LOCAL_HLC_SETTING_KEY, &old_revision, 100)
+            .unwrap();
+        store
+            .set_setting(ACCOUNT_DEVICE_ID_SETTING_KEY, &old_device.to_string(), 100)
+            .unwrap();
+        store
+            .put_outbox_head(NewLocalSyncOutboxEntry {
+                op_id: old_op_id,
+                record_id: list.id,
+                collection: SyncCollection::Lists,
+                base_revision_hlc: None,
+                revision_hlc: old_revision.clone(),
+                state: EncryptedSyncState::Live {
+                    mutation_hlc: old_revision.clone(),
+                    blob: vec![1, 2, 3],
+                },
+                created_at: 100,
+            })
+            .unwrap();
+
+        client.rebind_sync_device_locked(new_device, 200).unwrap();
+
+        let rebound_clock = Hlc::decode(
+            &store
+                .get_setting(SYNC_LOCAL_HLC_SETTING_KEY)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        let rebound = store.list_all_outbox_heads(10).unwrap();
+        assert_eq!(rebound.len(), 1);
+        let rebound_revision = Hlc::decode(&rebound[0].revision_hlc).unwrap();
+        assert_eq!(rebound_clock.device_id, new_device.to_string());
+        assert_eq!(rebound_revision.device_id, new_device.to_string());
+        assert!(rebound_revision.encode().unwrap() > old_revision);
+        assert_ne!(rebound[0].op_id, old_op_id);
+        assert_eq!(
+            rebound[0].state,
+            EncryptedSyncState::Live {
+                mutation_hlc: old_clock.encode().unwrap(),
+                blob: vec![1, 2, 3],
+            }
+        );
+        assert_eq!(
+            store
+                .get_setting(ACCOUNT_DEVICE_ID_SETTING_KEY)
+                .unwrap()
+                .as_deref(),
+            Some(new_device.to_string().as_str())
+        );
+    }
+
+    #[test]
+    fn device_rebind_failure_rolls_back_clock_outbox_and_account_device() {
+        const DB_KEY: [u8; 32] = [0x75; 32];
+        let temp = TempDir::new().unwrap();
+        let client = open_test_client(temp.path(), DB_KEY);
+        let list = new_list("Inbox".into(), "a0".into(), 1).unwrap();
+        SqliteListRepository::new(open_encrypted(client.db_path(), &DB_KEY).unwrap())
+            .insert(list.clone())
+            .unwrap();
+
+        let old_device = Uuid::now_v7();
+        let old_clock = Hlc {
+            wall_ms: 100,
+            counter: 5,
+            device_id: old_device.to_string(),
+        }
+        .encode()
+        .unwrap();
+        let old_op_id = Uuid::now_v7();
+        let mut store = SqliteSyncStore::new(client.db_path().to_path_buf(), DB_KEY);
+        store
+            .set_setting(SYNC_LOCAL_HLC_SETTING_KEY, &old_clock, 100)
+            .unwrap();
+        store
+            .set_setting(ACCOUNT_DEVICE_ID_SETTING_KEY, &old_device.to_string(), 100)
+            .unwrap();
+        store
+            .put_outbox_head(NewLocalSyncOutboxEntry {
+                op_id: old_op_id,
+                record_id: list.id,
+                collection: SyncCollection::Lists,
+                base_revision_hlc: None,
+                revision_hlc: old_clock.clone(),
+                state: EncryptedSyncState::Tombstone {
+                    delete_hlc: old_clock.clone(),
+                },
+                created_at: 100,
+            })
+            .unwrap();
+        open_encrypted(client.db_path(), &DB_KEY)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_device_rebind BEFORE UPDATE ON sync_outbox
+                 BEGIN SELECT RAISE(ABORT, 'fail device rebind'); END;",
+            )
+            .unwrap();
+
+        assert!(client
+            .rebind_sync_device_locked(Uuid::now_v7(), 200)
+            .is_err());
+
+        assert_eq!(
+            store.get_setting(SYNC_LOCAL_HLC_SETTING_KEY).unwrap(),
+            Some(old_clock.clone())
+        );
+        assert_eq!(
+            store
+                .get_setting(ACCOUNT_DEVICE_ID_SETTING_KEY)
+                .unwrap()
+                .as_deref(),
+            Some(old_device.to_string().as_str())
+        );
+        let pending = store.list_all_outbox_heads(10).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].op_id, old_op_id);
+        assert_eq!(pending[0].revision_hlc, old_clock);
+    }
+
+    #[test]
+    fn account_persistence_failure_retries_same_device_without_reclocking_outbox_again() {
+        // Apple unit-test binaries are not signed with the production
+        // Keychain entitlement. Select the same file-backed secret path used
+        // by the Flutter test runner.
+        std::env::set_var("FLUTTER_TEST", "1");
+        let temp = TempDir::new().unwrap();
+        let client =
+            TaskveilClient::open(super::super::LocalProfileConfig::new(temp.path(), "Inbox"))
+                .unwrap();
+        let old_device = Uuid::now_v7();
+        let new_device = Uuid::now_v7();
+        let tenant_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+        let list = new_list("Pending".into(), "a1".into(), 1).unwrap();
+        SqliteListRepository::new(open_encrypted(client.db_path(), &client.db_key()).unwrap())
+            .insert(list.clone())
+            .unwrap();
+        let old_revision = Hlc {
+            wall_ms: 100,
+            counter: 5,
+            device_id: old_device.to_string(),
+        }
+        .encode()
+        .unwrap();
+        let mut store =
+            SqliteSyncStore::new_secret(client.db_path().to_path_buf(), client.db_key());
+        store
+            .set_setting(SYNC_LOCAL_HLC_SETTING_KEY, &old_revision, 100)
+            .unwrap();
+        store
+            .put_outbox_head(NewLocalSyncOutboxEntry {
+                op_id: Uuid::now_v7(),
+                record_id: list.id,
+                collection: SyncCollection::Lists,
+                base_revision_hlc: None,
+                revision_hlc: old_revision.clone(),
+                state: EncryptedSyncState::Tombstone {
+                    delete_hlc: old_revision,
+                },
+                created_at: 100,
+            })
+            .unwrap();
+
+        let root = taskveil_crypto::organization::generate_account_root(user_id).unwrap();
+        let keys = AccountKeyMaterial {
+            generation: 1,
+            tenant_generation: 1,
+            master_key: Zeroizing::new([0x31; KEY_LEN]),
+            account_root_private: root.private,
+            account_root_public: root.public,
+            tenant_root_dek: Zeroizing::new([0x32; KEY_LEN]),
+        };
+        let session = account_session_state(
+            "retry@example.com".into(),
+            user_id.to_string(),
+            tenant_id.to_string(),
+            new_device.to_string(),
+        );
+        let tokens = AccountTokenSet {
+            access_token: Zeroizing::new("new-access".to_string()),
+            access_expires_at_ms: 2_000_000_000_000,
+            refresh_token: Zeroizing::new("new-refresh".to_string()),
+            refresh_expires_at_ms: 2_100_000_000_000,
+        };
+        open_encrypted(client.db_path(), &client.db_key())
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_account_persistence
+                 BEFORE INSERT ON settings
+                 WHEN NEW.key = 'account_email'
+                 BEGIN SELECT RAISE(ABORT, 'fail account persistence'); END;",
+            )
+            .unwrap();
+
+        assert!(client
+            .persist_account_state_locked(
+                "https://sync.example.com",
+                &session,
+                &tokens,
+                &[0x44; 48],
+                &keys,
+            )
+            .is_err());
+        assert!(load_session_tokens(temp.path()).unwrap().is_none());
+        let after_failure = store.list_all_outbox_heads(10).unwrap();
+        assert_eq!(after_failure.len(), 1);
+        let rebound_op_id = after_failure[0].op_id;
+        assert_eq!(
+            Hlc::decode(&after_failure[0].revision_hlc)
+                .unwrap()
+                .device_id,
+            new_device.to_string()
+        );
+
+        open_encrypted(client.db_path(), &client.db_key())
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_account_persistence;")
+            .unwrap();
+        client
+            .persist_account_state_locked(
+                "https://sync.example.com",
+                &session,
+                &tokens,
+                &[0x44; 48],
+                &keys,
+            )
+            .unwrap();
+
+        assert!(load_session_tokens(temp.path()).unwrap().is_some());
+        let after_retry = store.list_all_outbox_heads(10).unwrap();
+        assert_eq!(after_retry.len(), 1);
+        assert_eq!(after_retry[0].op_id, rebound_op_id);
+        assert_eq!(
+            Hlc::decode(&after_retry[0].revision_hlc).unwrap().device_id,
+            new_device.to_string()
         );
     }
 }

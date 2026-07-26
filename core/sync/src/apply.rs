@@ -11,17 +11,18 @@ use crate::{
     account::{AccountClient, AccountClientError},
     decrypt_plaintext, merge_lww, EncryptedSyncState, EnvelopeError, Hlc, PullRecord, PushOp,
     PushStatus, SyncCollection, SyncEngine, SyncEngineError, SyncPlaintext, SyncRunSummary,
-    LISTS_COLLECTION, SYNC_CURSOR_NAME, SYNC_UPGRADE_REQUIRED_SETTING_KEY, TASKS_COLLECTION,
+    LISTS_COLLECTION, SYNC_CURSOR_NAME, SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY,
+    SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY, SYNC_UPGRADE_REQUIRED_SETTING_KEY, TASKS_COLLECTION,
     TASK_SERIES_COLLECTION, TEMPLATES_COLLECTION,
 };
 
 use crate::enqueue::{
     enqueue_merged_plaintext, enqueue_rebased_tombstone, enqueue_task_sync,
-    enqueue_timer_session_sync, list_plaintext, observe_remote_hlc, task_plaintext,
-    task_series_plaintext, template_plaintext, LocalFullResyncPhase, LocalListAlias,
-    LocalSyncAtomicStore, LocalSyncQuarantineEntry, LocalSyncRecordState, LocalSyncSemanticState,
-    LocalSyncStore, LocalSyncWriteTransaction, PullFailureReason, RebasePlaintextRequest,
-    RebaseTombstoneRequest,
+    enqueue_timer_session_sync, list_plaintext, observe_remote_hlc, rebind_local_device,
+    task_plaintext, task_series_plaintext, template_plaintext, LocalFullResyncPhase,
+    LocalListAlias, LocalMutationSyncStore, LocalSyncAtomicStore, LocalSyncQuarantineEntry,
+    LocalSyncRecordState, LocalSyncSemanticState, LocalSyncStore, LocalSyncWriteTransaction,
+    PullFailureReason, RebasePlaintextRequest, RebaseTombstoneRequest,
 };
 use crate::keys::{tenant_root_dek, LocalSyncKeys};
 

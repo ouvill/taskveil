@@ -4,8 +4,11 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const SYNC_PROTOCOL_VERSION: u16 = 8;
+pub const SYNC_PROTOCOL_VERSION: u16 = 9;
 pub const SYNC_PROTOCOL_VERSION_HEADER: &str = "x-taskveil-protocol-version";
+pub const SYNC_CLOCK_SKEW_RETRYABLE_CODE: &str = "sync_clock_skew_retryable";
+pub const SYNC_CLOCK_SKEW_RETRYABLE_TYPE: &str =
+    "https://taskveil.com/problems/sync-clock-skew-retryable";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
@@ -51,6 +54,26 @@ pub struct KeyManifestDescriptor {
 pub struct ResyncStartResponse {
     pub base_seq: i64,
     pub generation: i64,
+    pub page_token: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BaseScanRequest {
+    pub page_token: String,
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompleteBaseRequest {
+    pub completion_token: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompleteBaseResponse {
+    pub base_complete: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,6 +225,8 @@ pub struct BaseScanResponse {
     pub records: Vec<SyncRecord>,
     pub next_cursor: Option<StableRecordCursor>,
     pub has_more: bool,
+    pub next_page_token: Option<String>,
+    pub completion_token: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

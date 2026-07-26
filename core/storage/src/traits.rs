@@ -138,6 +138,8 @@ pub trait SyncStateRepository {
         entry: NewSyncOutboxEntry,
     ) -> Result<SyncOutboxEntry, StorageError>;
     fn list_outbox_heads(&self, limit: usize) -> Result<Vec<SyncOutboxEntry>, StorageError>;
+    /// Lists every pending head, including records currently quarantined.
+    fn list_all_outbox_heads(&self, limit: usize) -> Result<Vec<SyncOutboxEntry>, StorageError>;
     fn has_outbox_head(&self, collection: &str, record_id: Uuid) -> Result<bool, StorageError>;
     fn ack_outbox_op(&mut self, op_id: Uuid) -> Result<bool, StorageError>;
     fn delete_outbox_head(

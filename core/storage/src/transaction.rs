@@ -301,6 +301,13 @@ impl<'connection> SqliteWriteTx<'connection> {
         list_outbox_heads_on(&self.transaction, limit)
     }
 
+    pub fn list_all_outbox_heads(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<SyncOutboxEntry>, StorageError> {
+        list_all_outbox_heads_on(&self.transaction, limit)
+    }
+
     pub fn has_outbox_head(&self, collection: &str, record_id: Uuid) -> Result<bool, StorageError> {
         has_outbox_head_on(&self.transaction, collection, record_id)
     }
@@ -379,6 +386,13 @@ impl OwnedSqliteWriteTx {
 
     pub fn list_outbox_heads(&self, limit: usize) -> Result<Vec<SyncOutboxEntry>, StorageError> {
         list_outbox_heads_on(self.connection(), limit)
+    }
+
+    pub fn list_all_outbox_heads(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<SyncOutboxEntry>, StorageError> {
+        list_all_outbox_heads_on(self.connection(), limit)
     }
 
     pub fn has_outbox_head(&self, collection: &str, record_id: Uuid) -> Result<bool, StorageError> {
@@ -569,6 +583,10 @@ impl OwnedSqliteWriteTx {
         now_ms: i64,
     ) -> Result<i64, StorageError> {
         finalize_full_resync_on(self.connection(), generation_id, cursor_name, now_ms)
+    }
+
+    pub fn reset_full_resync(&mut self) -> Result<(), StorageError> {
+        reset_full_resync_on(self.connection())
     }
 
     pub fn default_list_id(&self) -> Result<Option<Uuid>, StorageError> {

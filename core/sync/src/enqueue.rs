@@ -109,6 +109,7 @@ pub struct LocalSyncQuarantineEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalFullResyncPhase {
     Base,
+    BaseAwaitingAck,
     Delta,
     Sweep,
 }
@@ -134,6 +135,11 @@ pub struct LocalFullResyncSweepSummary {
     pub swept_task_series: usize,
     pub swept_timer_sessions: usize,
     pub swept_record_states: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeviceRebindSummary {
+    pub rebound_outbox_heads: usize,
 }
 
 /// The local persistence operations needed to prepare a domain mutation for sync.
@@ -173,6 +179,10 @@ pub trait LocalSyncStore: LocalMutationSyncStore {
         Ok(None)
     }
     fn list_outbox_heads(&mut self, limit: usize) -> Result<Vec<LocalSyncOutboxEntry>, String>;
+    /// Lists every pending head, including records currently quarantined.
+    fn list_all_outbox_heads(&mut self, limit: usize) -> Result<Vec<LocalSyncOutboxEntry>, String> {
+        self.list_outbox_heads(limit)
+    }
     fn ack_outbox_op(&mut self, op_id: Uuid) -> Result<bool, String>;
     fn delete_outbox_head(
         &mut self,
@@ -323,6 +333,9 @@ pub trait LocalSyncWriteTransaction: LocalSyncStore {
     ) -> Result<i64, String> {
         Err("durable full resync is unavailable".to_string())
     }
+    fn reset_full_resync(&mut self) -> Result<(), String> {
+        Err("durable full resync is unavailable".to_string())
+    }
     fn commit(self) -> Result<(), String>;
 }
 
@@ -330,6 +343,89 @@ pub trait LocalSyncAtomicStore: LocalSyncStore {
     type WriteTransaction: LocalSyncWriteTransaction;
 
     fn begin_write_transaction(&mut self) -> Result<Self::WriteTransaction, String>;
+}
+
+/// Rebinds the durable local HLC and every pending outbox revision to a newly
+/// authenticated device identity.
+///
+/// The caller must pass a write transaction and commit it only together with
+/// the account-device binding. On failure, dropping that transaction must roll
+/// back the clock and every replaced outbox head.
+pub fn rebind_local_device<S, N>(
+    store: &mut S,
+    new_device_id: &str,
+    now_ms: &mut N,
+) -> Result<DeviceRebindSummary, String>
+where
+    S: LocalSyncStore,
+    N: FnMut() -> Result<i64, String>,
+{
+    let stored_clock = store
+        .get_setting(SYNC_LOCAL_HLC_SETTING_KEY)?
+        .filter(|encoded| !encoded.is_empty())
+        .map(|encoded| Hlc::decode(&encoded).map_err(|_| "sync failed".to_string()))
+        .transpose()?;
+    let all_limit = usize::try_from(i64::MAX).unwrap_or(usize::MAX);
+    let outbox = store.list_all_outbox_heads(all_limit)?;
+    let outbox_clocks = outbox
+        .iter()
+        .map(|entry| Hlc::decode(&entry.revision_hlc).map_err(|_| "sync failed".to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if stored_clock.as_ref().is_some_and(|clock| {
+        clock.device_id == new_device_id
+            && outbox_clocks.iter().all(|revision| {
+                revision.device_id == new_device_id && compare_hlc(clock, revision).is_ge()
+            })
+    }) {
+        return Ok(DeviceRebindSummary::default());
+    }
+
+    let maximum = stored_clock
+        .iter()
+        .chain(outbox_clocks.iter())
+        .max_by(|left, right| compare_hlc(left, right));
+    let mut clock = Hlc::new(new_device_id.to_string());
+    if let Some(maximum) = maximum {
+        clock
+            .merge(maximum, now_ms()?)
+            .map_err(|_| "sync failed".to_string())?;
+    } else {
+        clock
+            .now(now_ms()?)
+            .map_err(|_| "sync failed".to_string())?;
+    }
+
+    for entry in outbox {
+        let revision = clock
+            .now(now_ms()?)
+            .and_then(|value| value.encode())
+            .map_err(|_| "sync failed".to_string())?;
+        store.put_outbox_head(NewLocalSyncOutboxEntry {
+            op_id: Uuid::now_v7(),
+            record_id: entry.record_id,
+            collection: entry.collection,
+            base_revision_hlc: entry.base_revision_hlc,
+            revision_hlc: revision,
+            state: entry.state,
+            created_at: entry.created_at,
+        })?;
+    }
+    store.set_setting(
+        SYNC_LOCAL_HLC_SETTING_KEY,
+        &clock.encode().map_err(|_| "sync failed".to_string())?,
+        now_ms()?,
+    )?;
+    Ok(DeviceRebindSummary {
+        rebound_outbox_heads: outbox_clocks.len(),
+    })
+}
+
+fn compare_hlc(left: &Hlc, right: &Hlc) -> std::cmp::Ordering {
+    left.wall_ms
+        .cmp(&right.wall_ms)
+        .then_with(|| left.counter.cmp(&right.counter))
+        .then_with(|| left.device_id.cmp(&right.device_id))
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -929,7 +1025,9 @@ where
         }
         _ => Hlc::new(device_id.to_string()),
     };
-    let hlc = clock.now(now_ms()?);
+    let hlc = clock
+        .now(now_ms()?)
+        .map_err(|_| "sync failed".to_string())?;
     store.set_setting(
         SYNC_LOCAL_HLC_SETTING_KEY,
         &hlc.encode().map_err(|_| "sync failed".to_string())?,
@@ -970,8 +1068,11 @@ where
         }
         _ => Hlc::new(device_id.to_string()),
     };
-    let remote = Hlc::decode(remote_revision_hlc).map_err(|_| "sync failed".to_string())?;
-    let hlc = clock.merge(&remote, now_ms()?);
+    let remote =
+        Hlc::decode_observable(remote_revision_hlc).map_err(|_| "sync failed".to_string())?;
+    let hlc = clock
+        .merge(&remote, now_ms()?)
+        .map_err(|_| "sync failed".to_string())?;
     store.set_setting(
         SYNC_LOCAL_HLC_SETTING_KEY,
         &hlc.encode().map_err(|_| "sync failed".to_string())?,
@@ -996,8 +1097,11 @@ where
         }
         _ => Hlc::new(device_id.to_string()),
     };
-    let remote = Hlc::decode(remote_revision_hlc).map_err(|_| "sync failed".to_string())?;
-    let observed = clock.merge(&remote, now_ms()?);
+    let remote =
+        Hlc::decode_observable(remote_revision_hlc).map_err(|_| "sync failed".to_string())?;
+    let observed = clock
+        .merge(&remote, now_ms()?)
+        .map_err(|_| "sync failed".to_string())?;
     store.set_setting(
         SYNC_LOCAL_HLC_SETTING_KEY,
         &observed.encode().map_err(|_| "sync failed".to_string())?,
@@ -1437,9 +1541,9 @@ mod tests {
         store.record_states.insert(
             (SyncCollection::Tasks, tombstone_id),
             LocalSyncRecordState {
-                current_revision_hlc: Some(Hlc::new("remote").now(1).encode().unwrap()),
+                current_revision_hlc: Some(Hlc::new("remote").now(1).unwrap().encode().unwrap()),
                 state: LocalSyncSemanticState::Tombstone {
-                    delete_hlc: Hlc::new("remote").now(1).encode().unwrap(),
+                    delete_hlc: Hlc::new("remote").now(1).unwrap().encode().unwrap(),
                 },
             },
         );
@@ -1623,9 +1727,9 @@ mod tests {
             record_id,
             collection,
             base_revision_hlc: None,
-            revision_hlc: Hlc::new("existing").now(1).encode().unwrap(),
+            revision_hlc: Hlc::new("existing").now(1).unwrap().encode().unwrap(),
             state: EncryptedSyncState::Live {
-                mutation_hlc: Hlc::new("existing").now(1).encode().unwrap(),
+                mutation_hlc: Hlc::new("existing").now(1).unwrap().encode().unwrap(),
                 blob: vec![1],
             },
             created_at: 1,

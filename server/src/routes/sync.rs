@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -17,17 +17,23 @@ use crate::{
     AppError, SharedState,
 };
 use taskveil_protocol::sync::{
-    BaseScanResponse, ContinuityAckRequest, ContinuityAckResponse, PullResponse, PushRequest,
-    PushResponse, PushStatus, ResyncStartResponse, StableRecordCursor, SyncCollection,
+    BaseScanRequest, BaseScanResponse, CompleteBaseRequest, CompleteBaseResponse,
+    ContinuityAckRequest, ContinuityAckResponse, PullResponse, PushRequest, PushResponse,
+    PushStatus, ResyncStartResponse,
 };
 
 pub fn router() -> Router<SharedState> {
+    const BASE_SCAN_REQUEST_BODY_LIMIT: usize = 8 * 1024;
     Router::new()
         .route("/{tenant_id}/preflight", get(preflight))
         .route("/{tenant_id}/push", post(push))
         .route("/{tenant_id}/pull", get(pull))
         .route("/{tenant_id}/resync/start", post(begin_full_resync))
-        .route("/{tenant_id}/resync/base", get(scan_base))
+        .route(
+            "/{tenant_id}/resync/base",
+            post(scan_base).layer(DefaultBodyLimit::max(BASE_SCAN_REQUEST_BODY_LIMIT)),
+        )
+        .route("/{tenant_id}/resync/base/complete", post(complete_base))
         .route("/{tenant_id}/continuity/ack", post(ack_continuity))
         .route("/{tenant_id}/key-rotation", get(rotation_state))
         .route("/{tenant_id}/key-rotation/bundle", get(active_key_bundle))
@@ -171,19 +177,16 @@ struct PullQuery {
     generation: Option<i64>,
 }
 
-#[derive(Debug, Deserialize)]
-struct BaseScanQuery {
-    generation: i64,
-    after_collection: Option<SyncCollection>,
-    after_record_id: Option<Uuid>,
-    limit: Option<i64>,
-}
-
 async fn begin_full_resync(
     State(state): State<SharedState>,
     authorized: AuthorizedSyncRequest,
 ) -> Result<Json<ResyncStartResponse>, AppError> {
-    sync::begin_full_resync(&state.pool, authorized.tenant_id, authorized.auth_context)
+    sync::begin_full_resync(
+        &state.pool,
+        &state.resync_tokens,
+        authorized.tenant_id,
+        authorized.auth_context,
+    )
         .await
         .map(Json)
 }
@@ -191,23 +194,31 @@ async fn begin_full_resync(
 async fn scan_base(
     State(state): State<SharedState>,
     authorized: AuthorizedSyncRequest,
-    Query(query): Query<BaseScanQuery>,
+    Json(request): Json<BaseScanRequest>,
 ) -> Result<Json<BaseScanResponse>, AppError> {
-    let cursor = match (query.after_collection, query.after_record_id) {
-        (None, None) => None,
-        (Some(collection), Some(record_id)) => Some(StableRecordCursor {
-            collection,
-            record_id,
-        }),
-        _ => return Err(AppError::bad_request("incomplete base cursor")),
-    };
     sync::scan_base(
         &state.pool,
+        &state.resync_tokens,
         authorized.tenant_id,
         authorized.auth_context,
-        query.generation,
-        cursor,
-        query.limit,
+        &request.page_token,
+        request.limit,
+    )
+    .await
+    .map(Json)
+}
+
+async fn complete_base(
+    State(state): State<SharedState>,
+    authorized: AuthorizedSyncRequest,
+    Json(request): Json<CompleteBaseRequest>,
+) -> Result<Json<CompleteBaseResponse>, AppError> {
+    sync::complete_base(
+        &state.pool,
+        &state.resync_tokens,
+        authorized.tenant_id,
+        authorized.auth_context,
+        &request.completion_token,
     )
     .await
     .map(Json)

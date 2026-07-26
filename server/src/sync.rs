@@ -14,16 +14,21 @@ use taskveil_protocol::{
     account::{ActiveKeyBundleDto, HistoricalKeyBundleDto},
     parse_envelope_header,
     sync::{
-        BaseScanResponse, ClosureProof, ContinuityAckRequest, ContinuityAckResponse,
-        KeyManifestDescriptor, PullResponse, PushOp, PushRequest, PushResponse, PushResult,
-        PushStatus, ResyncStartResponse, StableRecordCursor, SyncCapabilities, SyncCollection,
-        SyncRecord, SyncRecordState,
+        BaseScanResponse, ClosureProof, CompleteBaseResponse, ContinuityAckRequest,
+        ContinuityAckResponse, KeyManifestDescriptor, PullResponse, PushOp, PushRequest,
+        PushResponse, PushResult, PushStatus, ResyncStartResponse, StableRecordCursor,
+        SyncCapabilities, SyncCollection, SyncRecord, SyncRecordState,
     },
     RotationStatus, WireHlc, ENVELOPE_VERSION, MAX_ENCRYPTED_BLOB_LEN,
 };
 use uuid::Uuid;
 
-use crate::{auth::AuthContext, db, AppError};
+use crate::{
+    auth::AuthContext,
+    db,
+    resync_token::{ResyncTokenClaims, ResyncTokenKeyring, ResyncTokenKind},
+    AppError,
+};
 
 pub const MAX_PUSH_OPS: usize = 100;
 pub const MAX_PULL_LIMIT: i64 = 100;
@@ -208,6 +213,7 @@ pub async fn preflight(
 
 pub async fn begin_full_resync(
     pool: &PgPool,
+    token_keys: &ResyncTokenKeyring,
     tenant_id: Uuid,
     auth: AuthContext,
 ) -> Result<ResyncStartResponse, AppError> {
@@ -242,6 +248,17 @@ pub async fn begin_full_resync(
     )
     .execute(&mut *tx)
     .await?;
+    // Only required_generation is resumable. Older signed tokens are already
+    // invalid, so retaining their session rows would create unbounded growth
+    // when a client repeatedly restarts after losing the start response.
+    sqlx::query(
+        "DELETE FROM device_resync_sessions
+         WHERE tenant_id = $1 AND device_id = $2",
+    )
+    .bind(tenant_id)
+    .bind(auth.device_id)
+    .execute(&mut *tx)
+    .await?;
     sqlx::query!(
         "INSERT INTO device_resync_sessions
          (tenant_id, device_id, generation, base_seq)
@@ -253,29 +270,50 @@ pub async fn begin_full_resync(
     )
     .execute(&mut *tx)
     .await?;
+    let token_now = Utc::now().timestamp();
+    let initial_claims = ResyncTokenClaims::page(
+        tenant_id,
+        auth.device_id,
+        generation,
+        base_seq,
+        None,
+        token_now,
+    )
+    .map_err(|_| AppError::internal())?;
+    let page_token = token_keys
+        .sign(&initial_claims, token_now)
+        .map_err(|_| AppError::internal())?;
     tx.commit().await?;
     Ok(ResyncStartResponse {
         base_seq,
         generation,
+        page_token,
     })
 }
 
 pub async fn scan_base(
     pool: &PgPool,
+    token_keys: &ResyncTokenKeyring,
     tenant_id: Uuid,
     auth: AuthContext,
-    generation: i64,
-    cursor: Option<StableRecordCursor>,
+    page_token: &str,
     limit: Option<i64>,
 ) -> Result<BaseScanResponse, AppError> {
-    if generation <= 0 {
-        return Err(AppError::bad_request("invalid resync generation"));
+    let token_now = Utc::now().timestamp();
+    let claims = token_keys
+        .verify(page_token, token_now)
+        .map_err(|_| AppError::conflict("invalid resync page token"))?;
+    if claims.kind != ResyncTokenKind::Page
+        || claims.tenant_id != tenant_id
+        || claims.device_id != auth.device_id
+    {
+        return Err(AppError::conflict("invalid resync page token"));
     }
     let limit = validated_page_limit(limit)?;
     let mut tx = db::begin_tenant_transaction(pool, tenant_id).await?;
-    let session = sqlx::query!(
-        "SELECT session.base_cursor_collection, session.base_cursor_record_id,
-                session.base_complete, continuity.required_generation
+    let session = sqlx::query_as::<_, (i64, bool, i64)>(
+        "SELECT session.base_seq, session.base_complete,
+                continuity.required_generation
          FROM device_resync_sessions AS session
          JOIN tenant_device_continuity AS continuity
            ON continuity.tenant_id = session.tenant_id
@@ -283,26 +321,17 @@ pub async fn scan_base(
          WHERE session.tenant_id = $1 AND session.device_id = $2
            AND session.generation = $3
          FOR UPDATE OF session, continuity",
-        tenant_id,
-        auth.device_id,
-        generation
     )
+    .bind(tenant_id)
+    .bind(auth.device_id)
+    .bind(claims.generation)
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| AppError::conflict("invalid resync generation"))?;
-    let presented_cursor = cursor
-        .as_ref()
-        .map(|value| (value.collection.as_str().to_string(), value.record_id));
-    if session.base_complete
-        || session.required_generation != generation
-        || presented_cursor
-            != session
-                .base_cursor_collection
-                .zip(session.base_cursor_record_id)
-    {
-        return Err(AppError::conflict("invalid resync cursor"));
+    if session.1 || session.2 != claims.generation || session.0 != claims.base_seq {
+        return Err(AppError::conflict("invalid resync page token"));
     }
-    let rows = if let Some(cursor) = cursor {
+    let rows = if let Some(cursor) = claims.cursor.as_ref() {
         sqlx::query_as!(
             StoredRecordRow,
             "SELECT record_id, collection, seq, revision_hlc, mutation_hlc,
@@ -345,27 +374,93 @@ pub async fn scan_base(
         collection: record.collection,
         record_id: record.record_id,
     });
-    let next_collection = next_cursor.as_ref().map(|value| value.collection.as_str());
-    let next_record_id = next_cursor.as_ref().map(|value| value.record_id);
-    sqlx::query!(
-        "UPDATE device_resync_sessions
-         SET base_cursor_collection = $4, base_cursor_record_id = $5,
-             base_complete = $6, updated_at = now()
-         WHERE tenant_id = $1 AND device_id = $2 AND generation = $3",
-        tenant_id,
-        auth.device_id,
-        generation,
-        next_collection,
-        next_record_id,
-        !has_more
-    )
-    .execute(&mut *tx)
-    .await?;
+    let (next_page_token, completion_token) = if has_more {
+        (
+            Some(
+                token_keys
+                    .sign(
+                        &ResyncTokenClaims::page_from(&claims, next_cursor.clone()),
+                        token_now,
+                    )
+                    .map_err(|_| AppError::internal())?,
+            ),
+            None,
+        )
+    } else {
+        (
+            None,
+            Some(
+                token_keys
+                    .sign(
+                        &ResyncTokenClaims::completion_from(
+                            &claims,
+                            next_cursor.clone().or_else(|| claims.cursor.clone()),
+                        ),
+                        token_now,
+                    )
+                    .map_err(|_| AppError::internal())?,
+            ),
+        )
+    };
     tx.commit().await?;
     Ok(BaseScanResponse {
         records,
         next_cursor,
         has_more,
+        next_page_token,
+        completion_token,
+    })
+}
+
+pub async fn complete_base(
+    pool: &PgPool,
+    token_keys: &ResyncTokenKeyring,
+    tenant_id: Uuid,
+    auth: AuthContext,
+    completion_token: &str,
+) -> Result<CompleteBaseResponse, AppError> {
+    let claims = token_keys
+        .verify(completion_token, Utc::now().timestamp())
+        .map_err(|_| AppError::conflict("invalid resync completion token"))?;
+    if claims.kind != ResyncTokenKind::Completion
+        || claims.tenant_id != tenant_id
+        || claims.device_id != auth.device_id
+    {
+        return Err(AppError::conflict("invalid resync completion token"));
+    }
+    let mut tx = db::begin_tenant_transaction(pool, tenant_id).await?;
+    let session = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT session.base_seq, continuity.required_generation
+         FROM device_resync_sessions AS session
+         JOIN tenant_device_continuity AS continuity
+           ON continuity.tenant_id = session.tenant_id
+          AND continuity.device_id = session.device_id
+         WHERE session.tenant_id = $1 AND session.device_id = $2
+           AND session.generation = $3
+         FOR UPDATE OF session, continuity",
+    )
+    .bind(tenant_id)
+    .bind(auth.device_id)
+    .bind(claims.generation)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| AppError::conflict("invalid resync completion token"))?;
+    if session.1 != claims.generation || session.0 != claims.base_seq {
+        return Err(AppError::conflict("invalid resync completion token"));
+    }
+    sqlx::query(
+        "UPDATE device_resync_sessions
+         SET base_complete = true, updated_at = now()
+         WHERE tenant_id = $1 AND device_id = $2 AND generation = $3",
+    )
+    .bind(tenant_id)
+    .bind(auth.device_id)
+    .bind(claims.generation)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(CompleteBaseResponse {
+        base_complete: true,
     })
 }
 
@@ -386,7 +481,7 @@ pub async fn push(
             if !op_ids.insert(op.op_id) {
                 return Err(AppError::bad_request("duplicate op id"));
             }
-            validate_push_op(op)
+            validate_push_op(op, auth.device_id)
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -1460,15 +1555,21 @@ async fn require_live_write_generation(
     Ok(())
 }
 
-fn validate_push_op(op: PushOp) -> Result<ValidatedPushOp, AppError> {
-    validate_hlc(&op.revision_hlc)?;
+fn validate_push_op(
+    op: PushOp,
+    authenticated_device_id: Uuid,
+) -> Result<ValidatedPushOp, AppError> {
+    let revision = validate_hlc(&op.revision_hlc)?;
+    if revision.device_id != authenticated_device_id.to_string() {
+        return Err(AppError::bad_request("hlc device mismatch"));
+    }
     if let Some(base) = &op.base_revision_hlc {
         validate_hlc(base)?;
     }
     let state = match op.state {
         SyncRecordState::Live { mutation_hlc, blob } => {
-            validate_hlc(&mutation_hlc)?;
-            if op.revision_hlc < mutation_hlc {
+            let mutation = validate_hlc(&mutation_hlc)?;
+            if revision < mutation {
                 return Err(AppError::bad_request(
                     "revision clock precedes semantic clock",
                 ));
@@ -1495,8 +1596,8 @@ fn validate_push_op(op: PushOp) -> Result<ValidatedPushOp, AppError> {
             }
         }
         SyncRecordState::Tombstone { delete_hlc } => {
-            validate_hlc(&delete_hlc)?;
-            if op.revision_hlc < delete_hlc {
+            let delete = validate_hlc(&delete_hlc)?;
+            if revision < delete {
                 return Err(AppError::bad_request(
                     "revision clock precedes semantic clock",
                 ));
@@ -1514,16 +1615,13 @@ fn validate_push_op(op: PushOp) -> Result<ValidatedPushOp, AppError> {
     })
 }
 
-fn validate_hlc(value: &str) -> Result<(), AppError> {
-    let hlc = WireHlc::decode(value).map_err(|_| AppError::bad_request("invalid hlc"))?;
-    if hlc.wall_ms
-        > Utc::now()
-            .timestamp_millis()
-            .saturating_add(ALLOWED_FUTURE_SKEW_MS)
-    {
-        return Err(AppError::bad_request("hlc too far in future"));
+fn validate_hlc(value: &str) -> Result<WireHlc, AppError> {
+    let hlc =
+        WireHlc::decode_observable(value).map_err(|_| AppError::bad_request("invalid hlc"))?;
+    if hlc.reaches_future_skew_boundary(Utc::now().timestamp_millis(), ALLOWED_FUTURE_SKEW_MS) {
+        return Err(AppError::retryable_clock_skew());
     }
-    Ok(())
+    Ok(hlc)
 }
 
 async fn apply_push_op(

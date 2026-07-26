@@ -14,41 +14,63 @@ where
     R: SyncKeyRefresher,
 {
     let mut refreshed_keys = false;
-    if store
-        .load_full_resync()
-        .map_err(|_| "sync failed".to_string())?
-        .is_none()
-    {
-        let start = engine
-            .begin_full_resync()
-            .await
-            .map_err(sync_engine_error_to_string)?;
-        let mut transaction = store
-            .begin_write_transaction()
-            .map_err(|_| "sync failed".to_string())?;
-        transaction
-            .start_full_resync(Uuid::now_v7(), start.generation, start.base_seq, now_ms()?)
-            .map_err(|_| "sync failed".to_string())?;
-        transaction
-            .commit()
-            .map_err(|_| "sync failed".to_string())?;
-    }
+    let mut resync_restart_performed = false;
 
     loop {
+        if store
+            .load_full_resync()
+            .map_err(|_| "sync failed".to_string())?
+            .is_none()
+        {
+            let start = engine
+                .begin_full_resync()
+                .await
+                .map_err(sync_engine_error_to_string)?;
+            let mut transaction = store
+                .begin_write_transaction()
+                .map_err(|_| "sync failed".to_string())?;
+            transaction
+                .start_full_resync(Uuid::now_v7(), start.generation, start.base_seq, now_ms()?)
+                .map_err(|_| "sync failed".to_string())?;
+            transaction.set_setting(
+                SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY,
+                &start.page_token,
+                now_ms()?,
+            )?;
+            transaction.set_setting(
+                SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY,
+                "",
+                now_ms()?,
+            )?;
+            transaction
+                .commit()
+                .map_err(|_| "sync failed".to_string())?;
+        }
         let progress = store
             .load_full_resync()
             .map_err(|_| "sync failed".to_string())?
             .ok_or_else(|| "sync failed".to_string())?;
         match progress.phase {
             LocalFullResyncPhase::Base => {
-                let page = engine
+                let page_token = store
+                    .get_setting(SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY)?
+                    .filter(|token| !token.is_empty())
+                    .ok_or_else(|| "sync failed".to_string())?;
+                let page = match engine
                     .scan_base_page(
-                        progress.continuity_generation,
+                        &page_token,
                         progress.base_cursor.as_ref(),
                         FULL_RESYNC_PAGE_LIMIT,
                     )
                     .await
-                    .map_err(sync_engine_error_to_string)?;
+                {
+                    Ok(page) => page,
+                    Err(SyncEngineError::ResyncRestartRequired) => {
+                        restart_invalid_resync_once(store, now_ms, &mut resync_restart_performed)?;
+                        continue;
+                    }
+                    Err(error) => return Err(sync_engine_error_to_string(error)),
+                };
                 if page.has_more && page.next_cursor.is_none() {
                     return Err("sync failed".to_string());
                 }
@@ -66,7 +88,28 @@ where
                             page.next_cursor.as_ref(),
                             base_complete,
                             page_updated_at,
-                        )
+                        )?;
+                        if let Some(next_page_token) = page.next_page_token.as_deref() {
+                            transaction.set_setting(
+                                SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY,
+                                next_page_token,
+                                page_updated_at,
+                            )?;
+                        } else {
+                            transaction.set_setting(
+                                SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY,
+                                "",
+                                page_updated_at,
+                            )?;
+                        }
+                        if let Some(completion_token) = page.completion_token.as_deref() {
+                            transaction.set_setting(
+                                SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY,
+                                completion_token,
+                                page_updated_at,
+                            )?;
+                        }
+                        Ok(())
                     },
                 );
                 let page_summary = match apply {
@@ -86,7 +129,28 @@ where
                                     page.next_cursor.as_ref(),
                                     base_complete,
                                     page_updated_at,
-                                )
+                                )?;
+                                if let Some(next_page_token) = page.next_page_token.as_deref() {
+                                    transaction.set_setting(
+                                        SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY,
+                                        next_page_token,
+                                        page_updated_at,
+                                    )?;
+                                } else {
+                                    transaction.set_setting(
+                                        SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY,
+                                        "",
+                                        page_updated_at,
+                                    )?;
+                                }
+                                if let Some(completion_token) = page.completion_token.as_deref() {
+                                    transaction.set_setting(
+                                        SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY,
+                                        completion_token,
+                                        page_updated_at,
+                                    )?;
+                                }
+                                Ok(())
                             },
                         ) {
                             Ok(summary) => summary,
@@ -104,6 +168,27 @@ where
                     Err(error) => return Err(page_apply_error_to_string(error)),
                 };
                 merge_summary(summary, page_summary);
+            }
+            LocalFullResyncPhase::BaseAwaitingAck => {
+                let completion_token = store
+                    .get_setting(SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY)?
+                    .filter(|token| !token.is_empty())
+                    .ok_or_else(|| "sync failed".to_string())?;
+                match engine.complete_resync_base(&completion_token).await {
+                    Ok(()) => {}
+                    Err(SyncEngineError::ResyncRestartRequired) => {
+                        restart_invalid_resync_once(store, now_ms, &mut resync_restart_performed)?;
+                        continue;
+                    }
+                    Err(error) => return Err(sync_engine_error_to_string(error)),
+                }
+                let mut transaction = store.begin_write_transaction()?;
+                transaction.set_setting(
+                    SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY,
+                    "",
+                    now_ms()?,
+                )?;
+                transaction.commit()?;
             }
             LocalFullResyncPhase::Delta => {
                 let page = engine
@@ -232,6 +317,28 @@ where
             }
         }
     }
+}
+
+fn restart_invalid_resync_once<S, N>(
+    store: &mut S,
+    now_ms: &mut N,
+    resync_restart_performed: &mut bool,
+) -> Result<(), String>
+where
+    S: LocalSyncAtomicStore,
+    N: FnMut() -> Result<i64, String>,
+{
+    if *resync_restart_performed {
+        return Err("sync failed".to_string());
+    }
+    let reset_at = now_ms()?;
+    let mut transaction = store.begin_write_transaction()?;
+    transaction.reset_full_resync()?;
+    transaction.set_setting(SYNC_FULL_RESYNC_PAGE_TOKEN_SETTING_KEY, "", reset_at)?;
+    transaction.set_setting(SYNC_FULL_RESYNC_COMPLETION_TOKEN_SETTING_KEY, "", reset_at)?;
+    transaction.commit()?;
+    *resync_restart_performed = true;
+    Ok(())
 }
 
 fn persist_full_resync_upgrade_block<S, N>(

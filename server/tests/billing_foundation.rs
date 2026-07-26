@@ -186,6 +186,7 @@ impl Fixture {
             pool: application_pool,
             billing,
             auth_issuer: "http://localhost".to_string(),
+            resync_tokens: taskveil_server::resync_token::ResyncTokenKeyring::for_tests(),
         });
         Self {
             app,
@@ -347,9 +348,9 @@ async fn negative_authorization_matrix_covers_every_sync_and_realtime_route() {
             json!(null),
         ),
         (
-            Method::GET,
-            format!("/v2/tenants/{tenant}/resync/base?generation=1"),
-            json!(null),
+            Method::POST,
+            format!("/v2/tenants/{tenant}/resync/base"),
+            json!({"page_token": "opaque", "limit": 100}),
         ),
         (
             Method::POST,
