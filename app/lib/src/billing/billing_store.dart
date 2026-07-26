@@ -88,6 +88,187 @@ abstract interface class BillingStore {
   Future<void> accountLoggedOut();
 }
 
+enum _BillingAdmissionState { uninitialized, closed, open }
+
+/// Serializes access to the process-wide billing SDK identity.
+///
+/// RevenueCat is a singleton SDK: `configure`/`logIn` from an obsolete
+/// account generation can otherwise finish after the next account has already
+/// configured the SDK. Every account-scoped action reasserts the server-issued
+/// identity inside the same FIFO before touching the store.
+class BillingStoreCoordinator {
+  BillingStoreCoordinator(this._store);
+
+  final BillingStore _store;
+  Future<void> _tail = Future<void>.value();
+  int _accountEpoch = 0;
+  _BillingAdmissionState _admissionState = _BillingAdmissionState.uninitialized;
+  (String, String)? _activeIdentity;
+
+  int get accountEpoch => _accountEpoch;
+
+  int closeAdmission() {
+    _accountEpoch += 1;
+    _admissionState = _BillingAdmissionState.closed;
+    _activeIdentity = null;
+    return _accountEpoch;
+  }
+
+  bool isCurrentEpoch(int accountEpoch) => accountEpoch == _accountEpoch;
+
+  bool isOpenEpoch(int accountEpoch) =>
+      isCurrentEpoch(accountEpoch) &&
+      _admissionState == _BillingAdmissionState.open;
+
+  void initializeAdmission({
+    required int accountEpoch,
+    required bool loggedIn,
+  }) {
+    if (!isCurrentEpoch(accountEpoch)) return;
+    if (_admissionState == _BillingAdmissionState.uninitialized) {
+      _admissionState = loggedIn
+          ? _BillingAdmissionState.open
+          : _BillingAdmissionState.closed;
+    } else if (_admissionState == _BillingAdmissionState.open && !loggedIn) {
+      closeAdmission();
+    }
+  }
+
+  bool openAdmission(int accountEpoch) {
+    if (!isCurrentEpoch(accountEpoch) ||
+        _admissionState != _BillingAdmissionState.closed) {
+      return false;
+    }
+    _accountEpoch += 1;
+    _admissionState = _BillingAdmissionState.open;
+    return true;
+  }
+
+  void closeAdmissionIfCurrent(int accountEpoch) {
+    if (isCurrentEpoch(accountEpoch) &&
+        _admissionState == _BillingAdmissionState.open) {
+      closeAdmission();
+    }
+  }
+
+  bool isAdmitted({
+    required int accountEpoch,
+    required String appUserId,
+    required String environment,
+  }) =>
+      isOpenEpoch(accountEpoch) && _activeIdentity == (appUserId, environment);
+
+  Future<List<BillingProduct>?> products({
+    required int accountEpoch,
+    required String appUserId,
+    required String environment,
+  }) => _serialize(() async {
+    if (!isOpenEpoch(accountEpoch)) return null;
+    await _store.configure(appUserId: appUserId, environment: environment);
+    if (!isOpenEpoch(accountEpoch)) return null;
+    _activeIdentity = (appUserId, environment);
+    final products = await _store.products();
+    return isAdmitted(
+          accountEpoch: accountEpoch,
+          appUserId: appUserId,
+          environment: environment,
+        )
+        ? products
+        : null;
+  });
+
+  Future<BillingPurchaseOutcome?> purchase({
+    required int accountEpoch,
+    required String appUserId,
+    required String environment,
+    required String productIdentifier,
+  }) => _serialize(() async {
+    if (!isAdmitted(
+      accountEpoch: accountEpoch,
+      appUserId: appUserId,
+      environment: environment,
+    )) {
+      return null;
+    }
+    await _store.configure(appUserId: appUserId, environment: environment);
+    if (!isAdmitted(
+      accountEpoch: accountEpoch,
+      appUserId: appUserId,
+      environment: environment,
+    )) {
+      return null;
+    }
+    return _store.purchase(productIdentifier);
+  });
+
+  Future<BillingPurchaseOutcome?> restore({
+    required int accountEpoch,
+    required String appUserId,
+    required String environment,
+  }) => _serialize(() async {
+    if (!isAdmitted(
+      accountEpoch: accountEpoch,
+      appUserId: appUserId,
+      environment: environment,
+    )) {
+      return null;
+    }
+    await _store.configure(appUserId: appUserId, environment: environment);
+    if (!isAdmitted(
+      accountEpoch: accountEpoch,
+      appUserId: appUserId,
+      environment: environment,
+    )) {
+      return null;
+    }
+    return _store.restore();
+  });
+
+  Future<Uri?> managementUrl({
+    required int accountEpoch,
+    required String appUserId,
+    required String environment,
+  }) => _serialize(() async {
+    if (!isAdmitted(
+      accountEpoch: accountEpoch,
+      appUserId: appUserId,
+      environment: environment,
+    )) {
+      return null;
+    }
+    await _store.configure(appUserId: appUserId, environment: environment);
+    if (!isAdmitted(
+      accountEpoch: accountEpoch,
+      appUserId: appUserId,
+      environment: environment,
+    )) {
+      return null;
+    }
+    return _store.managementUrl();
+  });
+
+  Future<void> accountLoggedOut({required int accountEpoch}) =>
+      _serialize(() async {
+        if (!isCurrentEpoch(accountEpoch) ||
+            _admissionState != _BillingAdmissionState.closed) {
+          return;
+        }
+        await _store.accountLoggedOut();
+      });
+
+  Future<bool> drainClosedAdmission({required int accountEpoch}) => _serialize(
+    () async =>
+        isCurrentEpoch(accountEpoch) &&
+        _admissionState == _BillingAdmissionState.closed,
+  );
+
+  Future<T> _serialize<T>(Future<T> Function() operation) {
+    final scheduled = _tail.then((_) => operation());
+    _tail = scheduled.then<void>((_) {}, onError: (_, _) {});
+    return scheduled;
+  }
+}
+
 class RevenueCatBillingStore implements BillingStore {
   RevenueCatBillingStore({
     BillingStorePlatform? platform,

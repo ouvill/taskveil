@@ -53,9 +53,25 @@ entitlementを保持したまま再取得できるようにする。
   providerを再構築する。freshな初期snapshotでは不要なserver refreshを行わない。
 - provider generationと`ref.mounted`によりlogout / invalidate後の遅延完了をpublish
   しない。回帰testへlogout中refresh、明示invalidate、購入中refreshを追加した。
+- process-wide RevenueCat identityを`uninitialized / closed / open` admission stateと
+  epoch tokenで管理する。login / register / logout開始時に同期的に旧admissionを閉じ、
+  認証成功時だけ新epochを発行する。初期化後の旧session rebuild、closed中に開始した
+  catalog取得、旧accountのFIFO backlogはadmissionを再開できない。
+- login / register / logout失敗時は実sessionを再照合し、同じuser / tenantなら
+  admissionとbilling providerを復旧する。signed-outならその状態を反映し、identityを
+  確認できない場合はtyped errorを表示してfail closedにする。
+- notifierのrefresh、store action queue、single-flightをgeneration単位へ分離した。
+  process-wide coordinatorだけがSDK操作をFIFO化し、旧accountの停止したnetwork
+  refreshは次accountを阻害しない。logoutはclosed admissionのSDK FIFOをdrainしてから
+  bridge credentialを削除するため、provider invalidate中のnative transactionも跨がない。
+- native store actionの完了後は`storeTransactionBusy`を解除し、server entitlement
+  refreshだけが停止してもlogoutできる。store未接続/cached-only状態ではstore操作を
+  無効化してretryだけを提示する。
 - Retryは標準`TextButton`の48×48以上のtap targetとbutton semanticsを維持する。
-- 最新typed FRB error HEADへrebase後、課金・Account・同期・native bridgeの対象36件、
-  Flutter全313件と`flutter analyze --no-pub`がPASSした。visual QA harness 1件のみ
+- 最新typed FRB error HEADへrebase後、最終課金provider/store対象46件、
+  Flutter全331件と`flutter analyze --no-pub`がPASSした。visual QA harness 1件のみ
   intentional skip。hardcoded strings、client boundary、`git diff --check`もPASS。
 - 初回独立レビューのP1 2件、P2 2件（no-cache回復、課金操作競合、破棄後publish、
-  tap target）を修正し、追加20件のbilling testで固定した。未解決P0/P1/P2なし。
+  tap target）と、再レビューのidentity admission / auth failure recovery /
+  cross-generation queue / in-flight logout / store readiness指摘を修正した。最終独立
+  レビューはP0〜P3未解決なしで合格した。

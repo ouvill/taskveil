@@ -106,6 +106,45 @@ void main() {
     expect(bridge.refreshCalls, 0);
   });
 
+  test(
+    'successful purchase keeps its outcome when entitlement refresh fails',
+    () async {
+      final bridge = _BillingBridge()..refreshFailuresRemaining = 1;
+      final store = _FakeBillingStore();
+      final container = ProviderContainer(
+        overrides: [
+          bridgeServiceProvider.overrideWithValue(bridge),
+          billingStoreProvider.overrideWithValue(store),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container
+          .read(accountProvider.notifier)
+          .login(email: 'alice@example.com', password: 'correct password');
+      await container.read(billingProvider.future);
+
+      await container
+          .read(billingProvider.notifier)
+          .purchase('com.taskveil.app.pro.monthly');
+
+      final stale = container.read(billingProvider).value!;
+      expect(store.purchaseCalls, 1);
+      expect(stale.lastOutcome, BillingPurchaseOutcome.purchased);
+      expect(stale.entitlement.status, 'free');
+      expect(stale.isStale, isTrue);
+      expect(stale.lastRefreshError?.code, BridgeErrorCodeDto.syncFailure);
+      expect(stale.busy, isFalse);
+
+      await container.read(billingProvider.notifier).refreshFromServer();
+
+      final recovered = container.read(billingProvider).value!;
+      expect(recovered.entitlement.status, 'active');
+      expect(recovered.isStale, isFalse);
+      expect(recovered.lastRefreshError, isNull);
+      expect(bridge.refreshCalls, 2);
+    },
+  );
+
   test('restore activates UI only after a fresh server snapshot', () async {
     final bridge = _BillingBridge();
     final store = _FakeBillingStore();
@@ -159,6 +198,56 @@ void main() {
       expect(store.configuredAppUserId, isNull);
     },
   );
+
+  test('cache read failure still attempts the server bootstrap', () async {
+    final bridge = _BillingBridge()..throwOnCachedBilling = true;
+    final container = ProviderContainer(
+      overrides: [
+        bridgeServiceProvider.overrideWithValue(bridge),
+        billingStoreProvider.overrideWithValue(_FakeBillingStore()),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container
+        .read(accountProvider.notifier)
+        .login(email: 'alice@example.com', password: 'correct password');
+
+    final billing = await container.read(billingProvider.future);
+
+    expect(bridge.cacheCalls, 1);
+    expect(bridge.bootstrapCalls, 1);
+    expect(billing?.entitlement.status, 'free');
+    expect(billing?.isStale, isFalse);
+  });
+
+  test('cache and bootstrap failure surface only a typed error', () async {
+    final bridge = _BillingBridge()
+      ..throwOnCachedBilling = true
+      ..failBootstrap = true;
+    final container = ProviderContainer(
+      overrides: [
+        bridgeServiceProvider.overrideWithValue(bridge),
+        billingStoreProvider.overrideWithValue(_FakeBillingStore()),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container
+        .read(accountProvider.notifier)
+        .login(email: 'alice@example.com', password: 'correct password');
+
+    await expectLater(
+      container.read(billingProvider.future),
+      throwsA(
+        isA<BridgeErrorDto>().having(
+          (error) => error.code,
+          'code',
+          BridgeErrorCodeDto.internal,
+        ),
+      ),
+    );
+    expect(bridge.cacheCalls, 1);
+    expect(bridge.bootstrapCalls, 1);
+  });
 
   test(
     'store configuration failure keeps the latest server entitlement',
@@ -331,6 +420,101 @@ void main() {
   );
 
   test(
+    'only exact duplicate store actions coalesce and distinct actions stay FIFO',
+    () async {
+      final bridge = _BillingBridge();
+      final store = _FakeBillingStore()
+        ..purchaseGate = Completer<BillingPurchaseOutcome>();
+      final container = ProviderContainer(
+        overrides: [
+          bridgeServiceProvider.overrideWithValue(bridge),
+          billingStoreProvider.overrideWithValue(store),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container
+          .read(accountProvider.notifier)
+          .login(email: 'alice@example.com', password: 'correct password');
+      await container.read(billingProvider.future);
+
+      final monthly = container
+          .read(billingProvider.notifier)
+          .purchase('com.taskveil.app.pro.monthly');
+      final monthlyDuplicate = container
+          .read(billingProvider.notifier)
+          .purchase('com.taskveil.app.pro.monthly');
+      final restore = container.read(billingProvider.notifier).restore();
+      final yearly = container
+          .read(billingProvider.notifier)
+          .purchase('com.taskveil.app.pro.yearly');
+      await Future<void>.delayed(Duration.zero);
+
+      expect(store.actionLog, ['purchase:com.taskveil.app.pro.monthly']);
+
+      store.purchaseGate!.complete(BillingPurchaseOutcome.purchased);
+      await Future.wait([monthly, monthlyDuplicate, restore, yearly]);
+
+      expect(store.actionLog, [
+        'purchase:com.taskveil.app.pro.monthly',
+        'restore',
+        'purchase:com.taskveil.app.pro.yearly',
+      ]);
+      expect(store.purchaseCalls, 2);
+      expect(store.restoreCalls, 1);
+      expect(bridge.refreshCalls, 3);
+    },
+  );
+
+  test(
+    'account switch serializes configure and reasserts the latest identity',
+    () async {
+      const nextAppUserId = '00000000-0000-4000-8000-000000000002';
+      final bridge = _BillingBridge();
+      final store = _FakeBillingStore()..firstConfigureGate = Completer<void>();
+      final container = ProviderContainer(
+        overrides: [
+          bridgeServiceProvider.overrideWithValue(bridge),
+          billingStoreProvider.overrideWithValue(store),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container
+          .read(accountProvider.notifier)
+          .login(email: 'alice@example.com', password: 'correct password');
+      final firstBilling = container.read(billingProvider.future);
+      await Future<void>.delayed(Duration.zero);
+      expect(store.configureCalls, [_appUserId]);
+
+      bridge.providerAppUserId = nextAppUserId;
+      await container
+          .read(accountProvider.notifier)
+          .login(email: 'bob@example.com', password: 'correct password');
+      final nextBilling = container.read(billingProvider.future);
+      await Future<void>.delayed(Duration.zero);
+      expect(store.configureCalls, [_appUserId]);
+
+      await container
+          .read(billingProvider.notifier)
+          .purchase('com.taskveil.app.pro.monthly');
+      expect(store.actionLog, isEmpty);
+
+      store.firstConfigureGate!.complete();
+      await firstBilling;
+      final switched = await nextBilling;
+      expect(switched?.entitlement.providerAppUserId, nextAppUserId);
+      expect(store.configureCalls, [_appUserId, nextAppUserId]);
+      expect(store.configuredAppUserId, nextAppUserId);
+
+      await container
+          .read(billingProvider.notifier)
+          .purchase('com.taskveil.app.pro.monthly');
+
+      expect(store.configureCalls.last, nextAppUserId);
+      expect(store.purchaseAppUserIds, [nextAppUserId]);
+    },
+  );
+
+  test(
     'realtime connection recovery retries a failed billing refresh',
     () async {
       final bridge = _BillingBridge()..refreshFailuresRemaining = 1;
@@ -377,7 +561,7 @@ void main() {
           .login(email: 'alice@example.com', password: 'correct password');
       await expectLater(
         container.read(billingProvider.future),
-        throwsA(isA<StateError>()),
+        throwsA(isA<BridgeErrorDto>()),
       );
       await container.read(syncStatusProvider.future);
 
@@ -449,6 +633,381 @@ void main() {
       expect(await container.read(billingProvider.future), isNull);
     },
   );
+
+  test(
+    'logout closes billing admission before slow work and next account reopens it',
+    () async {
+      const nextAppUserId = '00000000-0000-4000-8000-000000000002';
+      final bridge = _BillingBridge();
+      final store = _FakeBillingStore();
+      final container = ProviderContainer(
+        overrides: [
+          bridgeServiceProvider.overrideWithValue(bridge),
+          billingStoreProvider.overrideWithValue(store),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container
+          .read(accountProvider.notifier)
+          .login(email: 'alice@example.com', password: 'correct password');
+      await container.read(billingProvider.future);
+
+      store.managementGate = Completer<Uri?>();
+      final oldManagementUrl = container
+          .read(billingProvider.notifier)
+          .managementUrl();
+      await Future<void>.delayed(Duration.zero);
+      expect(store.managementCalls, 1);
+      final queuedOldPurchase = container
+          .read(billingProvider.notifier)
+          .purchase('com.taskveil.app.pro.monthly');
+      await Future<void>.delayed(Duration.zero);
+
+      bridge.logoutGate = Completer<void>();
+      final logout = container.read(accountProvider.notifier).logout();
+      await Future.wait([
+        container
+            .read(billingProvider.notifier)
+            .purchase('com.taskveil.app.pro.monthly'),
+        container.read(billingProvider.notifier).restore(),
+      ]);
+      final blockedManagementUrl = await container
+          .read(billingProvider.notifier)
+          .managementUrl();
+
+      expect(store.purchaseCalls, 0);
+      expect(store.restoreCalls, 0);
+      expect(store.managementCalls, 1);
+      expect(blockedManagementUrl, isNull);
+
+      store.managementGate!.complete(
+        Uri.parse('https://apps.apple.com/account/subscriptions'),
+      );
+      expect(await oldManagementUrl, isNull);
+      await queuedOldPurchase;
+      expect(store.purchaseCalls, 0);
+      bridge.logoutGate!.complete();
+      await logout;
+
+      bridge.providerAppUserId = nextAppUserId;
+      await container
+          .read(accountProvider.notifier)
+          .login(email: 'bob@example.com', password: 'correct password');
+      await container.read(billingProvider.future);
+      await container
+          .read(billingProvider.notifier)
+          .purchase('com.taskveil.app.pro.monthly');
+
+      expect(store.purchaseCalls, 1);
+      expect(store.purchaseAppUserIds, [nextAppUserId]);
+    },
+  );
+
+  test(
+    'slow logout invalidation cannot reopen the old account admission',
+    () async {
+      final bridge = _BillingBridge();
+      final store = _FakeBillingStore();
+      final container = ProviderContainer(
+        overrides: [
+          bridgeServiceProvider.overrideWithValue(bridge),
+          billingStoreProvider.overrideWithValue(store),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container
+          .read(accountProvider.notifier)
+          .login(email: 'alice@example.com', password: 'correct password');
+      await container.read(billingProvider.future);
+      final configureCallsBeforeLogout = store.configureCalls.length;
+      final bootstrapCallsBeforeLogout = bridge.bootstrapCalls;
+
+      bridge.logoutGate = Completer<void>();
+      final logout = container.read(accountProvider.notifier).logout();
+      container.invalidate(accountProvider);
+      final rebuiltAccount = await container.read(accountProvider.future);
+      expect(rebuiltAccount.loggedIn, isTrue);
+
+      container.invalidate(billingProvider);
+      expect(await container.read(billingProvider.future), isNull);
+      expect(store.configureCalls.length, configureCallsBeforeLogout);
+      expect(bridge.bootstrapCalls, bootstrapCallsBeforeLogout);
+
+      await container
+          .read(billingProvider.notifier)
+          .purchase('com.taskveil.app.pro.monthly');
+      expect(store.purchaseCalls, 0);
+
+      bridge.logoutGate!.complete();
+      await logout;
+    },
+  );
+
+  for (final operation in ['login', 'register', 'logout']) {
+    test(
+      '$operation failure restores the unchanged account admission',
+      () async {
+        final bridge = _BillingBridge();
+        final store = _FakeBillingStore();
+        final container = ProviderContainer(
+          overrides: [
+            bridgeServiceProvider.overrideWithValue(bridge),
+            billingStoreProvider.overrideWithValue(store),
+          ],
+        );
+        addTearDown(container.dispose);
+        await container
+            .read(accountProvider.notifier)
+            .login(email: 'alice@example.com', password: 'correct password');
+        final originalAccount = await container.read(accountProvider.future);
+        await container.read(billingProvider.future);
+
+        Future<void> failedOperation;
+        switch (operation) {
+          case 'login':
+            bridge.failLogin = true;
+            failedOperation = container
+                .read(accountProvider.notifier)
+                .login(email: 'bob@example.com', password: 'correct password');
+          case 'register':
+            await container
+                .read(accountProvider.notifier)
+                .registrationBegin(email: 'bob@example.com');
+            await container
+                .read(accountProvider.notifier)
+                .registrationVerifyOtp('12345678');
+            bridge.failRegister = true;
+            failedOperation = container
+                .read(accountProvider.notifier)
+                .registrationComplete(password: 'correct password');
+          default:
+            bridge.failLogout = true;
+            failedOperation = container.read(accountProvider.notifier).logout();
+        }
+
+        await expectLater(failedOperation, throwsA(isA<BridgeErrorDto>()));
+        expect(container.read(accountProvider).value, originalAccount);
+        final recovered = await container.read(billingProvider.future);
+        expect(recovered?.entitlement.providerAppUserId, _appUserId);
+
+        await container
+            .read(billingProvider.notifier)
+            .purchase('com.taskveil.app.pro.monthly');
+        expect(store.purchaseCalls, 1);
+      },
+    );
+  }
+
+  test(
+    'unknown session after auth failure remains a typed visible error',
+    () async {
+      final bridge = _BillingBridge();
+      final container = ProviderContainer(
+        overrides: [
+          bridgeServiceProvider.overrideWithValue(bridge),
+          billingStoreProvider.overrideWithValue(_FakeBillingStore()),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container
+          .read(accountProvider.notifier)
+          .login(email: 'alice@example.com', password: 'correct password');
+      await container.read(accountProvider.future);
+
+      bridge
+        ..failLogin = true
+        ..sessionReadFailuresRemaining = 1;
+      await expectLater(
+        container
+            .read(accountProvider.notifier)
+            .login(email: 'bob@example.com', password: 'correct password'),
+        throwsA(
+          isA<BridgeErrorDto>().having(
+            (error) => error.code,
+            'code',
+            BridgeErrorCodeDto.internal,
+          ),
+        ),
+      );
+
+      expect(
+        container.read(accountProvider).error,
+        isA<BridgeErrorDto>().having(
+          (error) => error.code,
+          'code',
+          BridgeErrorCodeDto.internal,
+        ),
+      );
+      await expectLater(
+        container.read(billingProvider.future),
+        throwsA(isA<BridgeErrorDto>()),
+      );
+    },
+  );
+
+  test(
+    'a hung old refresh does not block the next account generation',
+    () async {
+      const nextAppUserId = '00000000-0000-4000-8000-000000000002';
+      final bridge = _BillingBridge();
+      final store = _FakeBillingStore();
+      final container = ProviderContainer(
+        overrides: [
+          bridgeServiceProvider.overrideWithValue(bridge),
+          billingStoreProvider.overrideWithValue(store),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container
+          .read(accountProvider.notifier)
+          .login(email: 'alice@example.com', password: 'correct password');
+      await container.read(billingProvider.future);
+
+      final oldRefreshGate = Completer<BillingStateDto>();
+      bridge.refreshGate = oldRefreshGate;
+      final oldRefresh = container
+          .read(billingProvider.notifier)
+          .refreshFromServer();
+      await Future<void>.delayed(Duration.zero);
+      expect(bridge.refreshCalls, 1);
+
+      bridge
+        ..refreshGate = null
+        ..providerAppUserId = nextAppUserId;
+      await container
+          .read(accountProvider.notifier)
+          .login(email: 'bob@example.com', password: 'correct password');
+      await container.read(billingProvider.future);
+      await container.read(billingProvider.notifier).refreshFromServer();
+      await container
+          .read(billingProvider.notifier)
+          .purchase('com.taskveil.app.pro.monthly');
+
+      expect(bridge.refreshCalls, 3);
+      expect(store.purchaseAppUserIds, [nextAppUserId]);
+
+      oldRefreshGate.complete(_billingState());
+      await oldRefresh;
+    },
+  );
+
+  test(
+    'the next account waits for an uncancellable in-flight store purchase',
+    () async {
+      const nextAppUserId = '00000000-0000-4000-8000-000000000002';
+      final bridge = _BillingBridge();
+      final store = _FakeBillingStore()
+        ..purchaseGate = Completer<BillingPurchaseOutcome>();
+      final container = ProviderContainer(
+        overrides: [
+          bridgeServiceProvider.overrideWithValue(bridge),
+          billingStoreProvider.overrideWithValue(store),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container
+          .read(accountProvider.notifier)
+          .login(email: 'alice@example.com', password: 'correct password');
+      await container.read(billingProvider.future);
+
+      final oldPurchase = container
+          .read(billingProvider.notifier)
+          .purchase('com.taskveil.app.pro.monthly');
+      await Future<void>.delayed(Duration.zero);
+      expect(store.purchaseCalls, 1);
+
+      bridge.providerAppUserId = nextAppUserId;
+      await container
+          .read(accountProvider.notifier)
+          .login(email: 'bob@example.com', password: 'correct password');
+      final nextBilling = container.read(billingProvider.future);
+      var nextReady = false;
+      nextBilling.then((_) => nextReady = true);
+      await Future<void>.delayed(Duration.zero);
+      expect(nextReady, isFalse);
+
+      store.purchaseGate!.complete(BillingPurchaseOutcome.cancelled);
+      await oldPurchase;
+      expect((await nextBilling)?.entitlement.providerAppUserId, nextAppUserId);
+    },
+  );
+
+  test(
+    'logout drains an in-flight purchase even after billing invalidation',
+    () async {
+      final bridge = _BillingBridge();
+      final store = _FakeBillingStore()
+        ..purchaseGate = Completer<BillingPurchaseOutcome>();
+      final container = ProviderContainer(
+        overrides: [
+          bridgeServiceProvider.overrideWithValue(bridge),
+          billingStoreProvider.overrideWithValue(store),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container
+          .read(accountProvider.notifier)
+          .login(email: 'alice@example.com', password: 'correct password');
+      await container.read(billingProvider.future);
+
+      final purchase = container
+          .read(billingProvider.notifier)
+          .purchase('com.taskveil.app.pro.monthly');
+      await Future<void>.delayed(Duration.zero);
+      expect(store.purchaseCalls, 1);
+
+      container.invalidate(billingProvider);
+      final logout = container.read(accountProvider.notifier).logout();
+      await Future<void>.delayed(Duration.zero);
+      expect(bridge.logoutCalls, 0);
+
+      store.purchaseGate!.complete(BillingPurchaseOutcome.cancelled);
+      await Future.wait([purchase, logout]);
+
+      expect(bridge.logoutCalls, 1);
+      expect((await container.read(accountProvider.future)).loggedIn, isFalse);
+      expect(await container.read(billingProvider.future), isNull);
+    },
+  );
+
+  test('logout does not wait for post-purchase entitlement refresh', () async {
+    final bridge = _BillingBridge()..refreshGate = Completer<BillingStateDto>();
+    final store = _FakeBillingStore();
+    final container = ProviderContainer(
+      overrides: [
+        bridgeServiceProvider.overrideWithValue(bridge),
+        billingStoreProvider.overrideWithValue(store),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container
+        .read(accountProvider.notifier)
+        .login(email: 'alice@example.com', password: 'correct password');
+    await container.read(billingProvider.future);
+
+    final purchase = container
+        .read(billingProvider.notifier)
+        .purchase('com.taskveil.app.pro.monthly');
+    while (bridge.refreshCalls == 0) {
+      await Future<void>.delayed(Duration.zero);
+    }
+    expect(store.purchaseCalls, 1);
+    expect(container.read(billingProvider).value?.busy, isTrue);
+    expect(
+      container.read(billingProvider).value?.storeTransactionBusy,
+      isFalse,
+    );
+
+    await container.read(accountProvider.notifier).logout();
+    expect(bridge.logoutCalls, 1);
+    expect((await container.read(accountProvider.future)).loggedIn, isFalse);
+
+    bridge.refreshGate!.complete(
+      _billingState(status: 'active', syncAllowed: true),
+    );
+    await purchase;
+    expect(await container.read(billingProvider.future), isNull);
+  });
 
   test(
     'explicit invalidation during refresh ignores the old completion',
@@ -577,6 +1136,141 @@ void main() {
     },
   );
 
+  testWidgets('logout busy state disables billing purchase and restore', (
+    tester,
+  ) async {
+    final bridge = _BillingBridge()..logoutGate = Completer<void>();
+    await bridge.accountLogin(
+      email: 'alice@example.com',
+      password: 'correct password',
+    );
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          bridgeServiceProvider.overrideWithValue(bridge),
+          billingStoreProvider.overrideWithValue(_FakeBillingStore()),
+        ],
+        child: const MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: AccountScreen(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final logout = find.byKey(const ValueKey('account-logout'));
+    await tester.ensureVisible(logout);
+    await tester.tap(logout);
+    await tester.pump();
+
+    final purchase = find.widgetWithText(FilledButton, 'Start Pro');
+    final restore = find.widgetWithText(TextButton, 'Restore purchases');
+    await tester.ensureVisible(restore);
+    await tester.pump();
+    expect(tester.widget<FilledButton>(purchase).onPressed, isNull);
+    expect(tester.widget<TextButton>(restore).onPressed, isNull);
+
+    bridge.logoutGate!.complete();
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets(
+    'store transaction disables logout but entitlement refresh does not',
+    (tester) async {
+      final bridge = _BillingBridge();
+      await bridge.accountLogin(
+        email: 'alice@example.com',
+        password: 'correct password',
+      );
+      final store = _FakeBillingStore()
+        ..purchaseGate = Completer<BillingPurchaseOutcome>();
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            bridgeServiceProvider.overrideWithValue(bridge),
+            billingStoreProvider.overrideWithValue(store),
+          ],
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: AccountScreen(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final purchase = find.widgetWithText(FilledButton, 'Start Pro').first;
+      final logout = find.byKey(const ValueKey('account-logout'));
+      final logoutTapTarget = find.descendant(
+        of: logout,
+        matching: find.byType(InkWell),
+      );
+      await tester.ensureVisible(purchase);
+      await tester.tap(purchase);
+      await tester.pump();
+      expect(tester.widget<InkWell>(logoutTapTarget).onTap, isNull);
+
+      store.purchaseGate!.complete(BillingPurchaseOutcome.cancelled);
+      await tester.pumpAndSettle();
+      expect(tester.widget<InkWell>(logoutTapTarget).onTap, isNotNull);
+
+      bridge.refreshGate = Completer<BillingStateDto>();
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(AccountScreen)),
+      );
+      final refresh = container
+          .read(billingProvider.notifier)
+          .refreshFromServer();
+      await tester.pump();
+      expect(tester.widget<InkWell>(logoutTapTarget).onTap, isNotNull);
+
+      bridge.refreshGate!.complete(_billingState());
+      await refresh;
+      await tester.pumpAndSettle();
+    },
+  );
+
+  testWidgets('store-unavailable fallback disables store controls', (
+    tester,
+  ) async {
+    final bridge = _BillingBridge()
+      ..failBootstrap = true
+      ..cachedState = _billingState(status: 'active', syncAllowed: true);
+    await bridge.accountLogin(
+      email: 'alice@example.com',
+      password: 'correct password',
+    );
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          bridgeServiceProvider.overrideWithValue(bridge),
+          billingStoreProvider.overrideWithValue(_FakeBillingStore()),
+        ],
+        child: const MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: AccountScreen(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final restore = find.widgetWithText(TextButton, 'Restore purchases');
+    final manage = find.widgetWithText(TextButton, 'Manage subscription');
+    expect(tester.widget<TextButton>(restore).onPressed, isNull);
+    expect(tester.widget<TextButton>(manage).onPressed, isNull);
+    expect(
+      tester
+          .widget<TextButton>(find.widgetWithText(TextButton, 'Retry').first)
+          .onPressed,
+      isNotNull,
+    );
+  });
+
   testWidgets('Pro section is localized and remains readable at large type', (
     tester,
   ) async {
@@ -646,9 +1340,10 @@ const _appUserId = '00000000-0000-4000-8000-000000000001';
 BillingStateDto _billingState({
   String status = 'free',
   bool syncAllowed = false,
+  String appUserId = _appUserId,
 }) => BillingStateDto(
   provider: 'revenuecat',
-  providerAppUserId: _appUserId,
+  providerAppUserId: appUserId,
   lookupKey: 'pro',
   status: status,
   syncAllowed: syncAllowed,
@@ -658,24 +1353,86 @@ BillingStateDto _billingState({
 );
 
 class _BillingBridge extends FakeBridgeService {
+  int cacheCalls = 0;
   int bootstrapCalls = 0;
   int refreshCalls = 0;
   int refreshFailuresRemaining = 0;
+  int logoutCalls = 0;
   Completer<BillingStateDto>? refreshGate;
+  Completer<void>? logoutGate;
+  int sessionReadFailuresRemaining = 0;
   bool failBootstrap = false;
+  bool failLogin = false;
+  bool failRegister = false;
+  bool failLogout = false;
+  bool throwOnCachedBilling = false;
   bool returnDefaultCachedState = true;
   BillingStateDto? cachedState;
+  String providerAppUserId = _appUserId;
+
+  @override
+  Future<AccountSessionStateDto> getAccountSessionState() async {
+    if (sessionReadFailuresRemaining > 0) {
+      sessionReadFailuresRemaining -= 1;
+      throw StateError('account session unavailable');
+    }
+    return super.getAccountSessionState();
+  }
+
+  @override
+  Future<AccountAuthResultDto> accountLogin({
+    required String email,
+    required String password,
+    String? serverUrl,
+    String? deviceName,
+  }) async {
+    if (failLogin) throw StateError('login unavailable');
+    return super.accountLogin(
+      email: email,
+      password: password,
+      serverUrl: serverUrl,
+      deviceName: deviceName,
+    );
+  }
+
+  @override
+  Future<AccountAuthResultDto> accountRegistrationComplete({
+    required String password,
+    String? deviceName,
+  }) async {
+    if (failRegister) throw StateError('registration unavailable');
+    return super.accountRegistrationComplete(
+      password: password,
+      deviceName: deviceName,
+    );
+  }
+
+  @override
+  Future<void> accountLogout() async {
+    await logoutGate?.future;
+    if (failLogout) throw StateError('logout unavailable');
+    logoutCalls += 1;
+    await super.accountLogout();
+  }
 
   @override
   Future<BillingStateDto> billingBootstrap() async {
     bootstrapCalls += 1;
     if (failBootstrap) throw StateError('billing bootstrap unavailable');
-    return _billingState();
+    return _billingState(appUserId: providerAppUserId);
   }
 
   @override
-  Future<BillingStateDto?> getCachedBilling() async =>
-      cachedState ?? (returnDefaultCachedState ? _billingState() : null);
+  Future<BillingStateDto?> getCachedBilling() async {
+    cacheCalls += 1;
+    if (throwOnCachedBilling) {
+      throw StateError('billing cache unavailable');
+    }
+    return cachedState ??
+        (returnDefaultCachedState
+            ? _billingState(appUserId: providerAppUserId)
+            : null);
+  }
 
   @override
   Future<BillingStateDto> refreshBilling() async {
@@ -690,15 +1447,26 @@ class _BillingBridge extends FakeBridgeService {
     }
     final gate = refreshGate;
     if (gate != null) return gate.future;
-    return _billingState(status: 'active', syncAllowed: true);
+    return _billingState(
+      status: 'active',
+      syncAllowed: true,
+      appUserId: providerAppUserId,
+    );
   }
 }
 
 class _FakeBillingStore implements BillingStore {
   String? configuredAppUserId;
   String? configuredEnvironment;
+  final List<String> configureCalls = [];
+  final List<String> actionLog = [];
+  final List<String?> purchaseAppUserIds = [];
   int purchaseCalls = 0;
+  int restoreCalls = 0;
+  int managementCalls = 0;
+  Completer<void>? firstConfigureGate;
   Completer<BillingPurchaseOutcome>? purchaseGate;
+  Completer<Uri?>? managementGate;
   BillingPurchaseOutcome purchaseOutcome = BillingPurchaseOutcome.purchased;
   bool throwOnConfigure = false;
   bool throwOnProducts = false;
@@ -709,9 +1477,13 @@ class _FakeBillingStore implements BillingStore {
     required String appUserId,
     required String environment,
   }) async {
+    configureCalls.add(appUserId);
+    if (configureCalls.length == 1) {
+      await firstConfigureGate?.future;
+    }
+    if (throwOnConfigure) throw StateError('store unavailable');
     configuredAppUserId = appUserId;
     configuredEnvironment = environment;
-    if (throwOnConfigure) throw StateError('store unavailable');
   }
 
   @override
@@ -731,6 +1503,8 @@ class _FakeBillingStore implements BillingStore {
   @override
   Future<BillingPurchaseOutcome> purchase(String productIdentifier) async {
     purchaseCalls += 1;
+    actionLog.add('purchase:$productIdentifier');
+    purchaseAppUserIds.add(configuredAppUserId);
     if (throwOnPurchase) throw StateError('store unavailable');
     final gate = purchaseGate;
     if (gate != null) return gate.future;
@@ -738,12 +1512,20 @@ class _FakeBillingStore implements BillingStore {
   }
 
   @override
-  Future<BillingPurchaseOutcome> restore() async =>
-      BillingPurchaseOutcome.purchased;
+  Future<BillingPurchaseOutcome> restore() async {
+    restoreCalls += 1;
+    actionLog.add('restore');
+    return BillingPurchaseOutcome.purchased;
+  }
 
   @override
-  Future<Uri?> managementUrl() async =>
-      Uri.parse('https://apps.apple.com/account/subscriptions');
+  Future<Uri?> managementUrl() async {
+    managementCalls += 1;
+    actionLog.add('manage');
+    final gate = managementGate;
+    if (gate != null) return gate.future;
+    return Uri.parse('https://apps.apple.com/account/subscriptions');
+  }
 
   @override
   Future<void> accountLoggedOut() async {}
