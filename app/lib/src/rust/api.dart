@@ -8,7 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'api.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `account_registration_pending_to_dto`, `account_registration_state_to_dto`
+// These functions are ignored because they are not marked as `pub`: `account_registration_pending_to_dto`, `account_registration_state_to_dto`, `reminder_notification_command_to_dto`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `from`
 
 Future<String> greet({required String name}) =>
@@ -448,6 +448,28 @@ Future<ReminderDto> snoozeReminder({
 }) => RustLib.instance.api.crateApiSnoozeReminder(
   reminderId: reminderId,
   snoozedUntil: snoozedUntil,
+);
+
+Future<List<ReminderNotificationCommandDto>>
+prepareReminderNotificationReconciliation({required PlatformInt64 nowMs}) =>
+    RustLib.instance.api.crateApiPrepareReminderNotificationReconciliation(
+      nowMs: nowMs,
+    );
+
+Future<List<ReminderNotificationCommandDto>> listReminderNotificationCommands({
+  required PlatformInt64 nowMs,
+  required int limit,
+}) => RustLib.instance.api.crateApiListReminderNotificationCommands(
+  nowMs: nowMs,
+  limit: limit,
+);
+
+Future<bool> ackReminderNotificationCommand({
+  required String reminderId,
+  required PlatformInt64 revision,
+}) => RustLib.instance.api.crateApiAckReminderNotificationCommand(
+  reminderId: reminderId,
+  revision: revision,
 );
 
 class AccountAuthResultDto {
@@ -988,6 +1010,51 @@ class ReminderDto {
           remindAt == other.remindAt &&
           snoozedUntil == other.snoozedUntil &&
           createdAt == other.createdAt;
+}
+
+enum ReminderNotificationActionDto { schedule, cancel }
+
+class ReminderNotificationCommandDto {
+  final String reminderId;
+  final int platformId;
+  final PlatformInt64 revision;
+  final ReminderNotificationActionDto action;
+  final String? taskId;
+  final String? listId;
+  final PlatformInt64? scheduledAt;
+
+  const ReminderNotificationCommandDto({
+    required this.reminderId,
+    required this.platformId,
+    required this.revision,
+    required this.action,
+    this.taskId,
+    this.listId,
+    this.scheduledAt,
+  });
+
+  @override
+  int get hashCode =>
+      reminderId.hashCode ^
+      platformId.hashCode ^
+      revision.hashCode ^
+      action.hashCode ^
+      taskId.hashCode ^
+      listId.hashCode ^
+      scheduledAt.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ReminderNotificationCommandDto &&
+          runtimeType == other.runtimeType &&
+          reminderId == other.reminderId &&
+          platformId == other.platformId &&
+          revision == other.revision &&
+          action == other.action &&
+          taskId == other.taskId &&
+          listId == other.listId &&
+          scheduledAt == other.scheduledAt;
 }
 
 class SettlementSummaryDto {

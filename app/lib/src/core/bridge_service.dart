@@ -613,4 +613,23 @@ class FrbBridgeService implements BridgeService {
     reminderId: reminderId,
     snoozedUntil: snoozedUntil,
   );
+
+  @override
+  Future<List<rust_api.ReminderNotificationCommandDto>>
+  prepareReminderNotificationReconciliation({required int nowMs}) =>
+      rust_api.prepareReminderNotificationReconciliation(nowMs: nowMs);
+
+  @override
+  Future<List<rust_api.ReminderNotificationCommandDto>>
+  listReminderNotificationCommands({required int nowMs, required int limit}) =>
+      rust_api.listReminderNotificationCommands(nowMs: nowMs, limit: limit);
+
+  @override
+  Future<bool> ackReminderNotificationCommand({
+    required String reminderId,
+    required int revision,
+  }) => rust_api.ackReminderNotificationCommand(
+    reminderId: reminderId,
+    revision: revision,
+  );
 }

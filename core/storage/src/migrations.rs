@@ -39,6 +39,11 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         name: "settings_metadata_boundary",
         sql: include_str!("../migrations/0005_settings_metadata_boundary.sql"),
     },
+    Migration {
+        version: 5,
+        name: "reminder_notification_reconciliation",
+        sql: include_str!("../migrations/0005_reminder_notification_reconciliation.sql"),
+    },
 ];
 
 #[derive(Clone, Copy)]
@@ -271,7 +276,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(version, LATEST_MIGRATION_VERSION);
-        assert_eq!(name, "settings_metadata_boundary");
+        assert_eq!(name, "reminder_notification_reconciliation");
         assert_eq!(checksum_length, 48);
         assert!(table_exists(&connection, "tasks").unwrap());
     }
@@ -665,6 +670,89 @@ mod tests {
     }
 
     #[test]
+    fn reminder_notification_reconciliation_migrates_v4_reminders_with_stable_mapping() {
+        let file = NamedTempFile::new().unwrap();
+        let mut connection = open_raw(file.path());
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        transaction.execute_batch(CREATE_MIGRATION_TABLE).unwrap();
+        for migration in &MIGRATIONS[..4] {
+            transaction.execute_batch(migration.sql).unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO _taskveil_migrations (version, name, checksum)
+                     VALUES (?1, ?2, ?3)",
+                    params![
+                        migration.version,
+                        migration.name,
+                        migration_checksum(migration)
+                    ],
+                )
+                .unwrap();
+        }
+        let list_id = Uuid::now_v7();
+        let task_id = Uuid::now_v7();
+        let reminder_id = Uuid::now_v7();
+        transaction
+            .execute(
+                "INSERT INTO lists (
+                     id, name, color, icon, sort_order, created_at, updated_at
+                 ) VALUES (?1, 'Inbox', '', '', 'a0', 1, 1)",
+                [list_id.to_string()],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO tasks (
+                     id, list_id, title, note, status, priority, sort_order,
+                     created_at, updated_at
+                 ) VALUES (?1, ?2, '', '', 'todo', 0, 'a0', 1, 1)",
+                params![task_id.to_string(), list_id.to_string()],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO reminders (
+                     id, task_id, remind_at, snoozed_until, created_at
+                 ) VALUES (?1, ?2, 1000, NULL, 1)",
+                params![reminder_id.to_string(), task_id.to_string()],
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+        drop(connection);
+
+        let connection = open_encrypted(file.path(), &KEY).unwrap();
+        let (platform_id, revision): (i64, i64) = connection
+            .query_row(
+                "SELECT platform_id, command_revision
+                 FROM reminder_notification_ids
+                 WHERE reminder_id = ?1",
+                [reminder_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(platform_id, 1);
+        assert_eq!(revision, 1);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT action
+                     FROM reminder_notification_commands
+                     WHERE reminder_id = ?1",
+                    [reminder_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "schedule"
+        );
+        assert_eq!(
+            ledger_count(&connection),
+            i64::from(LATEST_MIGRATION_VERSION)
+        );
+    }
+
+    #[test]
     fn checksum_mismatch_is_rejected_without_database_changes() {
         let file = NamedTempFile::new().unwrap();
         drop(open_encrypted(file.path(), &KEY).unwrap());
@@ -789,6 +877,11 @@ mod tests {
             },
             Migration {
                 version: 4,
+                name: "boundary",
+                sql: "CREATE TABLE boundary (id INTEGER);",
+            },
+            Migration {
+                version: 5,
                 name: "failing",
                 sql: "CREATE TABLE partial (id INTEGER);
                       SELECT value FROM missing_failure_injection_table;",
@@ -800,7 +893,7 @@ mod tests {
         assert!(matches!(
             result,
             Err(StorageError::MigrationFailed {
-                target_version: 4,
+                target_version: 5,
                 migration: "failing",
                 ..
             })

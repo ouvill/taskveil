@@ -52,7 +52,6 @@ Future<void> main() async {
     try {
       await notificationService.initialize(notificationContent);
       reminderNotificationService = notificationService;
-      await notificationService.reconcilePending(notificationContent);
     } catch (error) {
       debugPrint(
         'Taskveil reminder notification initialization failed: $error',
@@ -93,6 +92,11 @@ Future<void> main() async {
       ],
     ),
   );
+  if (reminderNotificationService != null) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      reminderNotificationService!.requestReconciliation(rebuild: true);
+    });
+  }
 }
 
 Locale _resolveStartupLocale(Locale platformLocale) {

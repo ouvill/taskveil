@@ -188,7 +188,7 @@ return completed(_that.completedAt);case _:
 
 class CalendarOccurrenceKindDto_DateDue extends CalendarOccurrenceKindDto {
   const CalendarOccurrenceKindDto_DateDue({required this.dueOn}): super._();
-
+  
 
  final  String dueOn;
 
@@ -254,7 +254,7 @@ as String,
 
 class CalendarOccurrenceKindDto_DateTimeDue extends CalendarOccurrenceKindDto {
   const CalendarOccurrenceKindDto_DateTimeDue({required this.dueAt, required this.timeZone}): super._();
-
+  
 
  final  DateTime dueAt;
  final  String timeZone;
@@ -322,7 +322,7 @@ as String,
 
 class CalendarOccurrenceKindDto_Scheduled extends CalendarOccurrenceKindDto {
   const CalendarOccurrenceKindDto_Scheduled({required this.scheduledAt}): super._();
-
+  
 
  final  DateTime scheduledAt;
 
@@ -388,7 +388,7 @@ as DateTime,
 
 class CalendarOccurrenceKindDto_Completed extends CalendarOccurrenceKindDto {
   const CalendarOccurrenceKindDto_Completed({required this.completedAt}): super._();
-
+  
 
  final  DateTime completedAt;
 
@@ -614,7 +614,7 @@ return billingRequired();case _:
 
 class SyncNowOutcomeDto_Synced extends SyncNowOutcomeDto {
   const SyncNowOutcomeDto_Synced({required this.status}): super._();
-
+  
 
  final  SyncStatusDto status;
 
@@ -680,7 +680,7 @@ as SyncStatusDto,
 
 class SyncNowOutcomeDto_BillingRequired extends SyncNowOutcomeDto {
   const SyncNowOutcomeDto_BillingRequired(): super._();
-
+  
 
 
 
@@ -872,7 +872,7 @@ return dateTime(_that.dueAt,_that.timeZone);case _:
 
 class TaskDueDto_Date extends TaskDueDto {
   const TaskDueDto_Date({required this.dueOn}): super._();
-
+  
 
  final  String dueOn;
 
@@ -938,7 +938,7 @@ as String,
 
 class TaskDueDto_DateTime extends TaskDueDto {
   const TaskDueDto_DateTime({required this.dueAt, required this.timeZone}): super._();
-
+  
 
  final  DateTime dueAt;
  final  String timeZone;
@@ -1166,7 +1166,7 @@ return dateTime(_that.dueAt,_that.timeZone);case _:
 
 class TaskDueInput_Date extends TaskDueInput {
   const TaskDueInput_Date({required this.dueOn}): super._();
-
+  
 
  final  String dueOn;
 
@@ -1232,7 +1232,7 @@ as String,
 
 class TaskDueInput_DateTime extends TaskDueInput {
   const TaskDueInput_DateTime({required this.dueAt, required this.timeZone}): super._();
-
+  
 
  final  DateTime dueAt;
  final  String timeZone;

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
@@ -259,7 +260,7 @@ class FlutterLocalReminderNotificationGateway
             request.payload,
           );
           if (legacy == null ||
-              request.id != notificationIdForReminder(legacy.reminderId)) {
+              request.id != _legacyNotificationId(legacy.reminderId)) {
             return null;
           }
           return PendingReminderNotification(
@@ -286,6 +287,11 @@ class ReminderNotificationService {
   final BridgeService bridge;
   final ReminderNotificationGateway gateway;
   ReminderNotificationContent? _content;
+  Future<void>? _reconciliation;
+  bool _reconcileAgain = false;
+  bool _rebuildRequested = false;
+
+  static const _commandBatchSize = 128;
 
   Future<void> initialize(ReminderNotificationContent content) async {
     _content = content;
@@ -306,105 +312,143 @@ class ReminderNotificationService {
     }
   }
 
-  Future<void> scheduleReminder({
-    required ReminderDto reminder,
-    required String listId,
-    required ReminderNotificationContent content,
-  }) async {
-    final scheduledAt = DateTime.fromMillisecondsSinceEpoch(
-      effectiveReminderAt(reminder),
-    );
-    if (!scheduledAt.isAfter(DateTime.now())) {
-      return;
-    }
-    await gateway.schedule(
-      notificationId: notificationIdForReminder(reminder.id),
-      scheduledAt: scheduledAt,
-      content: content,
-      payload: ReminderNotificationPayload(
-        reminderId: reminder.id,
-        taskId: reminder.taskId,
-        listId: listId,
-      ),
+  void requestReconciliation({bool rebuild = false}) {
+    unawaited(
+      reconcilePending(rebuild: rebuild).catchError((Object error) {
+        debugPrint('Taskveil reminder reconciliation deferred after failure.');
+      }),
     );
   }
 
-  Future<void> cancelReminder(ReminderDto reminder) {
-    return gateway.cancel(notificationIdForReminder(reminder.id));
+  Future<void> reconcilePending({bool rebuild = false}) {
+    _reconcileAgain = true;
+    _rebuildRequested = _rebuildRequested || rebuild;
+    final running = _reconciliation;
+    if (running != null) {
+      return running;
+    }
+    final reconciliation = _runReconciliation();
+    _reconciliation = reconciliation;
+    return reconciliation;
   }
 
-  Future<void> cancelReminders(Iterable<ReminderDto> reminders) async {
-    for (final reminder in reminders) {
-      await cancelReminder(reminder);
+  Future<void> _runReconciliation() async {
+    try {
+      while (_reconcileAgain) {
+        _reconcileAgain = false;
+        final rebuild = _rebuildRequested;
+        _rebuildRequested = false;
+        await _reconcileOnce(rebuild: rebuild);
+      }
+    } finally {
+      _reconciliation = null;
     }
   }
 
-  Future<void> scheduleTaskReminders(String taskId) async {
+  Future<void> _reconcileOnce({required bool rebuild}) async {
     final content = _content;
     if (content == null) {
       return;
     }
-    final task = await _findTask(taskId);
-    if (task == null || task.status == 'done' || task.status == 'wont_do') {
-      return;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final initialCommands = rebuild
+        ? await bridge.prepareReminderNotificationReconciliation(nowMs: nowMs)
+        : await bridge.listReminderNotificationCommands(
+            nowMs: nowMs,
+            limit: _commandBatchSize,
+          );
+    if (rebuild) {
+      await _removeNoncanonicalPendingNotifications(initialCommands);
     }
-    final reminders = await bridge.getTaskReminders(taskId: taskId);
-    var failedCount = 0;
-    for (final reminder in reminders) {
-      try {
-        await scheduleReminder(
-          reminder: reminder,
-          listId: task.listId,
-          content: content,
-        );
-      } catch (_) {
-        failedCount += 1;
+    var commands = initialCommands;
+    while (commands.isNotEmpty) {
+      var failedCount = 0;
+      var staleAckObserved = false;
+      for (final command in commands) {
+        try {
+          await _applyCommand(command, content);
+          final acknowledged = await bridge.ackReminderNotificationCommand(
+            reminderId: command.reminderId,
+            revision: command.revision,
+          );
+          staleAckObserved = staleAckObserved || !acknowledged;
+        } catch (_) {
+          failedCount += 1;
+        }
       }
-    }
-    if (failedCount > 0) {
-      debugPrint(
-        'Taskveil reminder reopen could not schedule '
-        '$failedCount notification(s).',
+      if (failedCount > 0) {
+        debugPrint(
+          'Taskveil reminder reconciliation deferred '
+          '$failedCount notification command(s).',
+        );
+        return;
+      }
+      if (!staleAckObserved &&
+          (rebuild || commands.length < _commandBatchSize)) {
+        return;
+      }
+      commands = await bridge.listReminderNotificationCommands(
+        nowMs: DateTime.now().millisecondsSinceEpoch,
+        limit: _commandBatchSize,
       );
     }
   }
 
-  Future<void> reconcilePending(ReminderNotificationContent content) async {
-    final reminders = await bridge.listPendingReminders(
-      nowMs: DateTime.now().millisecondsSinceEpoch,
-    );
-    final reminderIds = reminders.map((reminder) => reminder.id).toSet();
+  Future<void> _removeNoncanonicalPendingNotifications(
+    List<ReminderNotificationCommandDto> commands,
+  ) async {
+    final expected = {
+      for (final command in commands)
+        if (command.action == ReminderNotificationActionDto.schedule)
+          command.reminderId: command.platformId,
+    };
     final scheduled = await gateway.pendingReminderNotifications();
-    for (final notification in scheduled) {
-      final isCanonicalId =
-          notification.notificationId ==
-          notificationIdForReminder(notification.payload.reminderId);
-      if (!isCanonicalId ||
-          !reminderIds.contains(notification.payload.reminderId)) {
-        await gateway.cancel(notification.notificationId);
-      }
-    }
     var failedCount = 0;
-    for (final reminder in reminders) {
-      final task = await _findTask(reminder.taskId);
-      if (task == null) {
+    for (final notification in scheduled) {
+      if (expected[notification.payload.reminderId] ==
+          notification.notificationId) {
         continue;
       }
       try {
-        await scheduleReminder(
-          reminder: reminder,
-          listId: task.listId,
-          content: content,
-        );
+        await gateway.cancel(notification.notificationId);
       } catch (_) {
         failedCount += 1;
       }
     }
     if (failedCount > 0) {
       debugPrint(
-        'Taskveil reminder reconciliation could not schedule '
-        '$failedCount notification(s).',
+        'Taskveil reminder reconciliation deferred '
+        '$failedCount stale notification cancellation(s).',
       );
+    }
+  }
+
+  Future<void> _applyCommand(
+    ReminderNotificationCommandDto command,
+    ReminderNotificationContent content,
+  ) async {
+    switch (command.action) {
+      case ReminderNotificationActionDto.schedule:
+        final taskId = command.taskId;
+        final listId = command.listId;
+        final scheduledAt = command.scheduledAt;
+        if (taskId == null || listId == null || scheduledAt == null) {
+          throw StateError('schedule command is missing context');
+        }
+        await gateway.schedule(
+          notificationId: command.platformId,
+          scheduledAt: DateTime.fromMillisecondsSinceEpoch(scheduledAt),
+          content: content,
+          payload: ReminderNotificationPayload(
+            reminderId: command.reminderId,
+            taskId: taskId,
+            listId: listId,
+          ),
+        );
+        return;
+      case ReminderNotificationActionDto.cancel:
+        await gateway.cancel(command.platformId);
+        return;
     }
   }
 
@@ -416,36 +460,19 @@ class ReminderNotificationService {
         response.actionId != reminderSnoozeActionId) {
       return;
     }
-    final task = await _findTask(payload.taskId);
-    if (task == null || task.status == 'done' || task.status == 'wont_do') {
-      await gateway.cancel(notificationIdForReminder(payload.reminderId));
-      return;
-    }
     final snoozedUntil = DateTime.now()
         .add(reminderSnoozeDuration)
         .millisecondsSinceEpoch;
-    final reminder = await bridge.snoozeReminder(
-      reminderId: payload.reminderId,
-      snoozedUntil: snoozedUntil,
-    );
-    await scheduleReminder(
-      reminder: reminder,
-      listId: payload.listId,
-      content: content,
-    );
-  }
-
-  Future<TaskDto?> _findTask(String taskId) async {
-    final lists = await bridge.getLists();
-    for (final list in lists) {
-      final tasks = await bridge.getTasks(listId: list.id);
-      for (final task in tasks) {
-        if (task.id == taskId) {
-          return task;
-        }
-      }
+    try {
+      await bridge.snoozeReminder(
+        reminderId: payload.reminderId,
+        snoozedUntil: snoozedUntil,
+      );
+    } catch (_) {
+      requestReconciliation();
+      return;
     }
-    return null;
+    requestReconciliation();
   }
 }
 
@@ -469,8 +496,7 @@ ReminderNotificationResponse _fromPluginResponse(
 int effectiveReminderAt(ReminderDto reminder) =>
     reminder.snoozedUntil ?? reminder.remindAt;
 
-@visibleForTesting
-int notificationIdForReminder(String reminderId) {
+int _legacyNotificationId(String reminderId) {
   var hash = 0x811c9dc5;
   for (final codeUnit in reminderId.codeUnits) {
     hash ^= codeUnit;

@@ -146,6 +146,20 @@ pub trait ReminderRepository {
     ) -> Result<Reminder, StorageError>;
 }
 
+/// Durable command projection from reminder/task state to OS notifications.
+pub trait ReminderNotificationRepository {
+    fn prepare_reconciliation(
+        &mut self,
+        now_ms: i64,
+    ) -> Result<Vec<ReminderNotificationCommand>, StorageError>;
+    fn list_commands(
+        &mut self,
+        now_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<ReminderNotificationCommand>, StorageError>;
+    fn ack_command(&mut self, reminder_id: Uuid, revision: i64) -> Result<bool, StorageError>;
+}
+
 /// 同期outboxとpull cursorの永続化を担うリポジトリ。
 pub trait SyncStateRepository {
     fn put_outbox_head(

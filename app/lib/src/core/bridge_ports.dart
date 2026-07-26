@@ -303,4 +303,15 @@ abstract interface class ReminderBridgePort {
     required String reminderId,
     required int snoozedUntil,
   });
+
+  Future<List<rust_api.ReminderNotificationCommandDto>>
+  prepareReminderNotificationReconciliation({required int nowMs});
+
+  Future<List<rust_api.ReminderNotificationCommandDto>>
+  listReminderNotificationCommands({required int nowMs, required int limit});
+
+  Future<bool> ackReminderNotificationCommand({
+    required String reminderId,
+    required int revision,
+  });
 }

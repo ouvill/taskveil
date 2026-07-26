@@ -8,7 +8,8 @@ use taskveil_domain::{
 use taskveil_storage::{
     open_encrypted, AppSettingKey, AppSettingsRepository, CalendarOccurrence,
     CalendarOccurrenceKind as StorageCalendarOccurrenceKind, CalendarRange as StorageCalendarRange,
-    HomeTask, ListRepository, Reminder, ReminderRepository, SqliteWriteTx, StorageError,
+    HomeTask, ListRepository, Reminder, ReminderNotificationAction, ReminderNotificationCommand,
+    ReminderNotificationRepository, ReminderRepository, SqliteWriteTx, StorageError,
     TaskRepository, TaskUndoEntry, TaskUndoOperation, TimerSessionRepository,
 };
 use zeroize::Zeroizing;
@@ -147,6 +148,23 @@ pub struct ReminderView {
     pub remind_at: i64,
     pub snoozed_until: Option<i64>,
     pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReminderNotificationActionView {
+    Schedule,
+    Cancel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReminderNotificationCommandView {
+    pub reminder_id: Uuid,
+    pub platform_id: i32,
+    pub revision: i64,
+    pub action: ReminderNotificationActionView,
+    pub task_id: Option<Uuid>,
+    pub list_id: Option<Uuid>,
+    pub scheduled_at: Option<i64>,
 }
 
 enum CreateListMode {
@@ -726,6 +744,46 @@ impl TaskveilClient {
             })
         })
     }
+
+    pub fn prepare_reminder_notification_reconciliation(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<ReminderNotificationCommandView>, ClientError> {
+        let _guard = self.operation_guard()?;
+        self.with_reminder_notification_repository(|repository| {
+            Ok(repository
+                .prepare_reconciliation(now_ms)?
+                .into_iter()
+                .map(ReminderNotificationCommandView::from)
+                .collect())
+        })
+    }
+
+    pub fn list_reminder_notification_commands(
+        &self,
+        now_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<ReminderNotificationCommandView>, ClientError> {
+        let _guard = self.operation_guard()?;
+        self.with_reminder_notification_repository(|repository| {
+            Ok(repository
+                .list_commands(now_ms, limit)?
+                .into_iter()
+                .map(ReminderNotificationCommandView::from)
+                .collect())
+        })
+    }
+
+    pub fn ack_reminder_notification_command(
+        &self,
+        reminder_id: Uuid,
+        revision: i64,
+    ) -> Result<bool, ClientError> {
+        let _guard = self.operation_guard()?;
+        self.with_reminder_notification_repository(|repository| {
+            Ok(repository.ack_command(reminder_id, revision)?)
+        })
+    }
 }
 
 fn app_setting_key(key: FrontendSettingKey) -> Option<AppSettingKey> {
@@ -1202,6 +1260,23 @@ impl From<Reminder> for ReminderView {
             remind_at: value.remind_at,
             snoozed_until: value.snoozed_until,
             created_at: value.created_at,
+        }
+    }
+}
+
+impl From<ReminderNotificationCommand> for ReminderNotificationCommandView {
+    fn from(value: ReminderNotificationCommand) -> Self {
+        Self {
+            reminder_id: value.reminder_id,
+            platform_id: value.platform_id,
+            revision: value.revision,
+            action: match value.action {
+                ReminderNotificationAction::Schedule => ReminderNotificationActionView::Schedule,
+                ReminderNotificationAction::Cancel => ReminderNotificationActionView::Cancel,
+            },
+            task_id: value.task_id,
+            list_id: value.list_id,
+            scheduled_at: value.scheduled_at,
         }
     }
 }

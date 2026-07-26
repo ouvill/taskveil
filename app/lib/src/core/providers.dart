@@ -630,6 +630,7 @@ class SyncStatusNotifier extends AsyncNotifier<SyncStatusDto> {
       ref.invalidate(taskRemindersProvider);
       ref.invalidate(completedTimerSessionsProvider);
       ref.invalidate(timerEngineProvider);
+      ref.read(reminderNotificationServiceProvider).requestReconciliation();
       ref.read(taskSearchProvider.notifier).refresh();
     } catch (_) {
       final failed = state.value;
@@ -966,6 +967,7 @@ class ListsNotifier extends AsyncNotifier<List<ListDto>> {
     final bridge = ref.read(bridgeServiceProvider);
     await bridge.deleteList(listId: listId);
     ref.read(syncStatusProvider.notifier).triggerRealtimeSync();
+    ref.read(reminderNotificationServiceProvider).requestReconciliation();
     ref.invalidateSelf();
     ref.invalidate(archivedListsProvider);
     ref.invalidate(calendarOccurrencesProvider);
@@ -1315,9 +1317,6 @@ class TasksNotifier extends AsyncNotifier<List<TaskDto>> {
     String? closedReason,
   }) async {
     final bridge = ref.read(bridgeServiceProvider);
-    final reminders = status == 'done' || status == 'wont_do'
-        ? await bridge.getTaskReminders(taskId: taskId)
-        : const <ReminderDto>[];
     Future<void> persistStatus() async {
       await bridge.setTaskStatus(
         taskId: taskId,
@@ -1334,16 +1333,10 @@ class TasksNotifier extends AsyncNotifier<List<TaskDto>> {
       await persistStatus();
     }
     ref.read(syncStatusProvider.notifier).triggerRealtimeSync();
+    ref.read(reminderNotificationServiceProvider).requestReconciliation();
     if (status == 'done' || status == 'wont_do') {
-      await ref
-          .read(reminderNotificationServiceProvider)
-          .cancelReminders(reminders);
       ref.invalidate(latestTaskUndoProvider);
       ref.invalidate(taskRemindersProvider(taskId));
-    } else {
-      await ref
-          .read(reminderNotificationServiceProvider)
-          .scheduleTaskReminders(taskId);
     }
     ref.invalidate(homeTasksProvider);
     ref.invalidate(calendarOccurrencesProvider);
@@ -1358,12 +1351,9 @@ class TasksNotifier extends AsyncNotifier<List<TaskDto>> {
   /// Permanently deletes `taskId` and its descendants, then refreshes the list.
   Future<void> deleteTask(String taskId) async {
     final bridge = ref.read(bridgeServiceProvider);
-    final reminders = await bridge.getTaskSubtreeReminders(taskId: taskId);
     await bridge.deleteTask(taskId: taskId);
     ref.read(syncStatusProvider.notifier).triggerRealtimeSync();
-    await ref
-        .read(reminderNotificationServiceProvider)
-        .cancelReminders(reminders);
+    ref.read(reminderNotificationServiceProvider).requestReconciliation();
     ref.invalidate(taskRemindersProvider(taskId));
     ref.invalidate(completedTimerSessionsProvider(taskId));
     ref.invalidate(timerEngineProvider);
@@ -1440,9 +1430,6 @@ class HomeTasksNotifier extends AsyncNotifier<List<HomeTaskDto>> {
     String? closedReason,
   }) async {
     final bridge = ref.read(bridgeServiceProvider);
-    final reminders = status == 'done' || status == 'wont_do'
-        ? await bridge.getTaskReminders(taskId: taskId)
-        : const <ReminderDto>[];
     Future<TaskDto> persistStatus() => bridge.setTaskStatus(
       taskId: taskId,
       status: status,
@@ -1454,16 +1441,10 @@ class HomeTasksNotifier extends AsyncNotifier<List<HomeTaskDto>> {
               .complete(taskId: taskId, setDone: persistStatus)
         : await persistStatus();
     ref.read(syncStatusProvider.notifier).triggerRealtimeSync();
+    ref.read(reminderNotificationServiceProvider).requestReconciliation();
     if (status == 'done' || status == 'wont_do') {
-      await ref
-          .read(reminderNotificationServiceProvider)
-          .cancelReminders(reminders);
       ref.invalidate(latestTaskUndoProvider);
       ref.invalidate(taskRemindersProvider(taskId));
-    } else {
-      await ref
-          .read(reminderNotificationServiceProvider)
-          .scheduleTaskReminders(taskId);
     }
     ref.invalidate(tasksProvider(updated.listId));
     ref.invalidate(calendarOccurrencesProvider);
@@ -1533,9 +1514,7 @@ class LatestTaskUndoNotifier extends AsyncNotifier<TaskUndoDto?> {
         .read(bridgeServiceProvider)
         .undoTaskOperation(undoId: undoId);
     ref.read(syncStatusProvider.notifier).triggerRealtimeSync();
-    await ref
-        .read(reminderNotificationServiceProvider)
-        .scheduleTaskReminders(restored.id);
+    ref.read(reminderNotificationServiceProvider).requestReconciliation();
     ref.invalidate(tasksProvider(restored.listId));
     ref.invalidate(homeTasksProvider);
     ref.invalidate(calendarOccurrencesProvider);
@@ -1566,6 +1545,7 @@ class TaskRemindersNotifier extends AsyncNotifier<List<ReminderDto>> {
     final reminder = await ref
         .read(reminderBridgeProvider)
         .createTaskReminder(taskId: taskId, remindAt: remindAt);
+    ref.read(reminderNotificationServiceProvider).requestReconciliation();
     ref.invalidateSelf();
     return reminder;
   }
@@ -1574,6 +1554,7 @@ class TaskRemindersNotifier extends AsyncNotifier<List<ReminderDto>> {
     final reminder = await ref
         .read(reminderBridgeProvider)
         .updateReminder(reminderId: reminderId, remindAt: remindAt);
+    ref.read(reminderNotificationServiceProvider).requestReconciliation();
     ref.invalidateSelf();
     return reminder;
   }
@@ -1582,9 +1563,7 @@ class TaskRemindersNotifier extends AsyncNotifier<List<ReminderDto>> {
     final reminder = await ref
         .read(reminderBridgeProvider)
         .deleteReminder(reminderId: reminderId);
-    await ref
-        .read(reminderNotificationServiceProvider)
-        .cancelReminder(reminder);
+    ref.read(reminderNotificationServiceProvider).requestReconciliation();
     ref.invalidateSelf();
     return reminder;
   }
@@ -1593,9 +1572,7 @@ class TaskRemindersNotifier extends AsyncNotifier<List<ReminderDto>> {
     final reminders = await ref
         .read(reminderBridgeProvider)
         .clearTaskReminders(taskId: taskId);
-    await ref
-        .read(reminderNotificationServiceProvider)
-        .cancelReminders(reminders);
+    ref.read(reminderNotificationServiceProvider).requestReconciliation();
     ref.invalidateSelf();
     return reminders;
   }

@@ -24,6 +24,7 @@ mod local_crypto_repository;
 mod migrations;
 mod models;
 mod profile_coordination;
+mod reminder_notification_repository;
 mod reminder_repository;
 mod row;
 mod settings_repository;
@@ -53,13 +54,15 @@ pub use local_crypto_repository::SqliteLocalCryptoRepository;
 pub use models::{
     CalendarOccurrence, CalendarOccurrenceKind, CalendarRange, CalendarRangeError, FullResyncPhase,
     FullResyncProgress, FullResyncStableCursor, FullResyncSweepSummary, HomeTask, ListAlias,
-    LocalProfileBinding, LocalTenantRootKeyBundle, NewSyncOutboxEntry, Reminder, SyncCursor,
-    SyncOutboxEntry, SyncOutboxState, SyncQuarantineEntry, SyncRecordSemanticState,
-    SyncRecordState, TaskUndoEntry, TaskUndoOperation, MAX_REMINDERS_PER_TASK,
+    LocalProfileBinding, LocalTenantRootKeyBundle, NewSyncOutboxEntry, Reminder,
+    ReminderNotificationAction, ReminderNotificationCommand, SyncCursor, SyncOutboxEntry,
+    SyncOutboxState, SyncQuarantineEntry, SyncRecordSemanticState, SyncRecordState, TaskUndoEntry,
+    TaskUndoOperation, MAX_REMINDERS_PER_TASK,
 };
 pub use profile_coordination::{
     ProfileRuntimeState, SqliteProfileCoordinationRepository, SyncLease,
 };
+pub use reminder_notification_repository::SqliteReminderNotificationRepository;
 pub use reminder_repository::SqliteReminderRepository;
 pub use settings_repository::{
     AppSettingKey, SqliteAppSettingsRepository, SqliteInternalMetadataRepository,
@@ -70,8 +73,8 @@ pub use template_series_repository::SqliteTemplateSeriesRepository;
 pub use timer_repository::SqliteTimerSessionRepository;
 pub use traits::{
     AppSettingsRepository, InternalMetadataRepository, ListRepository, LocalCryptoRepository,
-    ReminderRepository, SyncStateRepository, TaskRepository, TemplateSeriesRepository,
-    TimerSessionRepository,
+    ReminderNotificationRepository, ReminderRepository, SyncStateRepository, TaskRepository,
+    TemplateSeriesRepository, TimerSessionRepository,
 };
 pub use transaction::{OwnedSqliteWriteTx, SqliteWriteTx};
 

@@ -6,11 +6,12 @@ use taskveil_client::{
     CalendarOccurrenceView, CalendarRange, CivilDate, ClientError, CompletedTimerSession,
     CreateTaskCommand, CreateTaskSeriesFromTaskCommand, CreateTaskSeriesFromTemplateCommand,
     CreateTemplateCommand, FrontendSettingKey, HomeTaskView, List, OrganizationSafetyState,
-    RealtimeTicket, ReminderView, ReorderTaskCommand, ReplaceTaskBlueprintCommand,
-    SaveTemplateCommand, SetTaskStatusCommand, SettlementSummary, Streak, SyncStatus, Task,
-    TaskBlueprint, TaskBlueprintNode, TaskContent, TaskDue, TaskSeries, TaskStatus, TaskTemplate,
-    TaskUndoKind, TaskUndoView, TimerFinishKind, TimerMode, TimerPhase, TimerRunState,
-    UpdateTaskCommand, UpdateTaskSeriesCommand, UpdateTemplateCommand, UtcInstant, Uuid,
+    RealtimeTicket, ReminderNotificationActionView, ReminderNotificationCommandView, ReminderView,
+    ReorderTaskCommand, ReplaceTaskBlueprintCommand, SaveTemplateCommand, SetTaskStatusCommand,
+    SettlementSummary, Streak, SyncStatus, Task, TaskBlueprint, TaskBlueprintNode, TaskContent,
+    TaskDue, TaskSeries, TaskStatus, TaskTemplate, TaskUndoKind, TaskUndoView, TimerFinishKind,
+    TimerMode, TimerPhase, TimerRunState, UpdateTaskCommand, UpdateTaskSeriesCommand,
+    UpdateTemplateCommand, UtcInstant, Uuid,
 };
 
 use crate::client_handle::{client, init_client};
@@ -237,6 +238,21 @@ pub struct ReminderDto {
     pub remind_at: i64,
     pub snoozed_until: Option<i64>,
     pub created_at: i64,
+}
+
+pub enum ReminderNotificationActionDto {
+    Schedule,
+    Cancel,
+}
+
+pub struct ReminderNotificationCommandDto {
+    pub reminder_id: String,
+    pub platform_id: i32,
+    pub revision: i64,
+    pub action: ReminderNotificationActionDto,
+    pub task_id: Option<String>,
+    pub list_id: Option<String>,
+    pub scheduled_at: Option<i64>,
 }
 
 #[derive(Clone)]
@@ -979,6 +995,55 @@ pub fn snooze_reminder(reminder_id: String, snoozed_until: i64) -> Result<Remind
     client_result(client()?.snooze_reminder(reminder_id, snoozed_until)).map(reminder_to_dto)
 }
 
+pub fn prepare_reminder_notification_reconciliation(
+    now_ms: i64,
+) -> Result<Vec<ReminderNotificationCommandDto>, String> {
+    client_result(client()?.prepare_reminder_notification_reconciliation(now_ms)).map(|commands| {
+        commands
+            .into_iter()
+            .map(reminder_notification_command_to_dto)
+            .collect()
+    })
+}
+
+pub fn list_reminder_notification_commands(
+    now_ms: i64,
+    limit: u32,
+) -> Result<Vec<ReminderNotificationCommandDto>, String> {
+    let limit = usize::try_from(limit).map_err(|_| "invalid command limit".to_string())?;
+    client_result(client()?.list_reminder_notification_commands(now_ms, limit)).map(|commands| {
+        commands
+            .into_iter()
+            .map(reminder_notification_command_to_dto)
+            .collect()
+    })
+}
+
+pub fn ack_reminder_notification_command(
+    reminder_id: String,
+    revision: i64,
+) -> Result<bool, String> {
+    let reminder_id = parse_uuid(&reminder_id)?;
+    client_result(client()?.ack_reminder_notification_command(reminder_id, revision))
+}
+
+fn reminder_notification_command_to_dto(
+    command: ReminderNotificationCommandView,
+) -> ReminderNotificationCommandDto {
+    ReminderNotificationCommandDto {
+        reminder_id: command.reminder_id.to_string(),
+        platform_id: command.platform_id,
+        revision: command.revision,
+        action: match command.action {
+            ReminderNotificationActionView::Schedule => ReminderNotificationActionDto::Schedule,
+            ReminderNotificationActionView::Cancel => ReminderNotificationActionDto::Cancel,
+        },
+        task_id: command.task_id.map(|value| value.to_string()),
+        list_id: command.list_id.map(|value| value.to_string()),
+        scheduled_at: command.scheduled_at,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::future::Future;
@@ -1118,6 +1183,11 @@ mod tests {
         let _: fn(String) -> Result<Vec<ReminderDto>, String> = get_list_reminders;
         let _: fn(i64) -> Result<Vec<ReminderDto>, String> = list_pending_reminders;
         let _: fn(String, i64) -> Result<ReminderDto, String> = snooze_reminder;
+        let _: fn(i64) -> Result<Vec<ReminderNotificationCommandDto>, String> =
+            prepare_reminder_notification_reconciliation;
+        let _: fn(i64, u32) -> Result<Vec<ReminderNotificationCommandDto>, String> =
+            list_reminder_notification_commands;
+        let _: fn(String, i64) -> Result<bool, String> = ack_reminder_notification_command;
     }
 
     #[test]
