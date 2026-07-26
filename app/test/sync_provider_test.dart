@@ -1,6 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:taskveil/src/core/providers.dart';
+import 'package:taskveil/src/rust/api.dart';
 
 import 'support/fake_bridge_service.dart';
 import 'support/fake_realtime.dart';
@@ -160,6 +161,65 @@ void main() {
       expect((await fake.getTasks(listId: inbox.id)).single.id, first.id);
     },
   );
+
+  for (final testCase in [
+    (code: BridgeErrorCodeDto.credentialUnavailable, failStatusRecovery: false),
+    (
+      code: BridgeErrorCodeDto.accountBoundUnavailable,
+      failStatusRecovery: true,
+    ),
+  ]) {
+    test('sync provider preserves ${testCase.code.name} when status recovery '
+        '${testCase.failStatusRecovery ? 'fails' : 'succeeds'}', () async {
+      final failure = BridgeErrorDto(
+        code: testCase.code,
+        arguments: const [],
+        retryable: false,
+      );
+      final fake = _PreRunFailingSyncBridge(
+        failure: failure,
+        failStatusRecovery: testCase.failStatusRecovery,
+      );
+      final container = ProviderContainer(
+        overrides: [bridgeServiceProvider.overrideWithValue(fake)],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(syncStatusProvider.future);
+
+      await expectLater(
+        container.read(syncStatusProvider.notifier).syncNow(),
+        completes,
+      );
+
+      final state = container.read(syncStatusProvider);
+      expect(state.hasError, isTrue);
+      expect(state.error, same(failure));
+      expect(state.value?.running, isFalse);
+    });
+  }
+}
+
+class _PreRunFailingSyncBridge extends FakeBridgeService {
+  _PreRunFailingSyncBridge({
+    required this.failure,
+    required this.failStatusRecovery,
+  });
+
+  final BridgeErrorDto failure;
+  final bool failStatusRecovery;
+  int _getSyncStatusCalls = 0;
+
+  @override
+  Future<SyncNowOutcomeDto> syncNowOutcome() => Future.error(failure);
+
+  @override
+  Future<SyncStatusDto> getSyncStatus() {
+    if (_getSyncStatusCalls++ > 0 && failStatusRecovery) {
+      return Future.error(StateError('status recovery failed'));
+    }
+    return super.getSyncStatus();
+  }
 }
 
 Future<void> _pumpAsync() async {

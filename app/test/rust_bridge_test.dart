@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
+import 'package:taskveil/src/core/bridge_service.dart';
 import 'package:taskveil/src/rust/api.dart';
 import 'package:taskveil/src/rust/frb_generated.dart';
 
@@ -49,6 +50,31 @@ void main() {
             )
             .having((error) => error.arguments, 'arguments', isEmpty)
             .having((error) => error.retryable, 'retryable', isFalse),
+      ),
+    );
+  });
+
+  test('FrbBridgeService propagates typed registration errors', () async {
+    const bridge = FrbBridgeService();
+
+    await expectLater(
+      bridge.accountRegistrationCancel(),
+      throwsA(
+        isA<BridgeErrorDto>().having(
+          (error) => error.code,
+          'code',
+          BridgeErrorCodeDto.busy,
+        ),
+      ),
+    );
+    await expectLater(
+      bridge.accountRegistrationAckRecoveryKey(),
+      throwsA(
+        isA<BridgeErrorDto>().having(
+          (error) => error.code,
+          'code',
+          BridgeErrorCodeDto.credentialUnavailable,
+        ),
       ),
     );
   });

@@ -632,19 +632,22 @@ class SyncStatusNotifier extends AsyncNotifier<SyncStatusDto> {
       ref.invalidate(timerEngineProvider);
       ref.read(reminderNotificationServiceProvider).requestReconciliation();
       ref.read(taskSearchProvider.notifier).refresh();
-    } catch (_) {
+    } catch (error, stackTrace) {
       final failed = state.value;
-      if (failed != null) {
-        state = AsyncData(_copySyncStatus(failed, running: false));
-      }
+      SyncStatusDto? recovered;
       try {
-        final recovered = await ref.read(syncBridgeProvider).getSyncStatus();
-        state = AsyncData(_copySyncStatus(recovered, running: false));
+        recovered = await ref.read(syncBridgeProvider).getSyncStatus();
       } catch (_) {
-        // Preserve the non-running snapshot above when status recovery also
-        // fails. Sync failures are represented by SyncStatus, never by an
-        // unhandled Future from automatic polling or a button callback.
+        // The original sync error is the actionable failure. Status recovery
+        // is best-effort and must not replace it with a secondary error.
       }
+      final snapshot = recovered ?? failed;
+      if (snapshot != null) {
+        state = AsyncData(_copySyncStatus(snapshot, running: false));
+      }
+      // Contain the exception so scheduler-triggered syncs cannot create an
+      // unhandled Future, while retaining its typed code for the UI.
+      state = AsyncError(error, stackTrace);
     }
   }
 
