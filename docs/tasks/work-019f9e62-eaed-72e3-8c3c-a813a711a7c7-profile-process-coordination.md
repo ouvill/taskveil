@@ -1,5 +1,5 @@
 ---
-id: 019f9c87-9bff-7676-ae89-7f4a8d4c040e
+id: 019f9e62-eaed-72e3-8c3c-a813a711a7c7
 title: Shared profile process coordination
 status: active
 lane: critical
@@ -190,7 +190,7 @@ OS別fail-closed契約は未確定である。本work itemはこれらを
 - HLC parent work itemのdevice再束縛transactionとnetwork前preflightを維持し、
   coordination実装で旧device nodeのoutbox送信を再導入しない。
 - migrationは既存の適用済みSQLを変更せず、HLC親統合後の次の空きversionへ追加する。
-- 本worktreeの変更は親branchへ統合するまでpushしない。
+- 本worktreeの変更はレビュー可能な単位でcommitし、公開前に統合HEADの品質ゲートを通す。
 - public文書へprivate security情報、secret、未公開環境情報を記録しない。
 
 ## 8. 完了報告に含めるべき内容
@@ -223,7 +223,7 @@ OS別fail-closed契約は未確定である。本work itemはこれらを
   stale root swap、同時mutation / sync testを追加した。WindowsにはINHERIT_ONLY ACE、
   explicit child ACL、junction alias、root handle lifetimeのtestを追加した。
   `cargo test -p taskveil-client -- --nocapture`は109件とdoc-test 4件が通過した。
-  先行するlogin privacy / HLC remediationへ載せ替えた統合HEADでも
+  HLC / resync hardeningと認可policyを含む統合HEADでも
   `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
   `cargo fmt --all -- --check`、client boundary 2種、ADR structure、
   `git diff --check`が通過した。独立レビューで見つかった

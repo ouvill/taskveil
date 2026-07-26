@@ -26,7 +26,7 @@ use testcontainers_modules::{
 use tower::ServiceExt;
 use uuid::Uuid;
 
-const AUTHORIZATION_MATRIX_ROUTE_COUNT: usize = 14;
+const AUTHORIZATION_MATRIX_ROUTE_COUNT: usize = 15;
 
 #[derive(Clone)]
 struct FakeProvider {
@@ -354,6 +354,11 @@ async fn negative_authorization_matrix_covers_every_sync_and_realtime_route() {
         ),
         (
             Method::POST,
+            format!("/v2/tenants/{tenant}/resync/base/complete"),
+            json!({"completion_token": "opaque"}),
+        ),
+        (
+            Method::POST,
             format!("/v2/tenants/{tenant}/continuity/ack"),
             json!({
                 "proof": {
@@ -532,9 +537,14 @@ async fn assert_policy_precedes_request_validation(fixture: &Fixture) {
             Body::empty(),
         ),
         (
-            Method::GET,
-            format!("/v2/tenants/{tenant}/resync/base?generation=not-an-integer"),
-            Body::empty(),
+            Method::POST,
+            format!("/v2/tenants/{tenant}/resync/base"),
+            Body::from("{not-json"),
+        ),
+        (
+            Method::POST,
+            format!("/v2/tenants/{tenant}/resync/base/complete"),
+            Body::from("{not-json"),
         ),
         (
             Method::POST,

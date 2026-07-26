@@ -187,8 +187,8 @@ async fn begin_full_resync(
         authorized.tenant_id,
         authorized.auth_context,
     )
-        .await
-        .map(Json)
+    .await
+    .map(Json)
 }
 
 async fn scan_base(

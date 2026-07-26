@@ -166,7 +166,7 @@ fallible dataとして扱い、client/serverの両境界でpanic不能にする�
     旧mutable cursor列を削除する。local migrationはv8のin-flight full resyncを破棄し、
     v9 token chainを新規開始する。再同期restart時は旧session rowも削除し、
     start response消失の反復でrowが無制限増加しないようにした。server migrationは
-    既存のmigration sequenceと整合する`202607260002_resync_page_tokens.sql`、
+    既存のmigration sequenceと整合する`202607260003_resync_page_tokens.sql`、
     別DBであるclient SQLiteは`0003_resync_page_tokens.sql`とした。
 - 証拠:
   - HLC unit testで`u32::MAX`、`u32::MAX - 1`、受理境界、wall優位、
