@@ -170,7 +170,8 @@ OSローカル通知を再構築可能なderived stateとして扱い、domain m
   domain mutationをbridgeへ直接commitしてからservice failureを1回注入する。
   独立レビュー修正後は同一service回復等を加えた15件とAndroid通知3件、合計18件が
   最終差分でPASSした。
-- `flutter test`: 300件PASS、visual QA harness 1件intentional skip。
+- 独立レビュー修正後の`flutter test --no-pub`: 305件PASS、visual QA harness
+  1件intentional skip。
 - config同値の`flutter_rust_bridge_codegen generate`を独立再実行し、生成差分なし。
 - hardcoded strings、client boundary、boundary fixtureの3 scriptsと
   `git diff --check`: PASS。
