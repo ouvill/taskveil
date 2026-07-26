@@ -1269,6 +1269,13 @@ class AppLocalizationsEn extends AppLocalizations {
   String get billingUnavailable => 'Billing is unavailable right now.';
 
   @override
+  String get billingRetryButton => 'Retry';
+
+  @override
+  String get billingStaleNotice =>
+      'Showing the last known subscription status. Sync access is still checked by the server.';
+
+  @override
   String get billingCancelled => 'Purchase cancelled.';
 
   @override

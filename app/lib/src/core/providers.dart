@@ -18,6 +18,8 @@ import 'package:taskveil/src/rust/api.dart'
         AccountRegistrationStateDto,
         AccountSessionStateDto,
         BillingStateDto,
+        BridgeErrorCodeDto,
+        BridgeErrorDto,
         CalendarOccurrenceDto,
         CalendarOccurrenceKindDto_Completed,
         CalendarOccurrenceKindDto_DateDue,
@@ -440,102 +442,196 @@ class BillingUiState {
     required this.entitlement,
     required this.products,
     this.busy = false,
+    this.isStale = false,
+    this.lastRefreshError,
     this.lastOutcome,
   });
 
   final BillingStateDto entitlement;
   final List<BillingProduct> products;
   final bool busy;
+  final bool isStale;
+  final BridgeErrorDto? lastRefreshError;
   final BillingPurchaseOutcome? lastOutcome;
 
   BillingUiState copyWith({
     BillingStateDto? entitlement,
     List<BillingProduct>? products,
     bool? busy,
+    bool? isStale,
+    BridgeErrorDto? lastRefreshError,
+    bool clearLastRefreshError = false,
     BillingPurchaseOutcome? lastOutcome,
   }) => BillingUiState(
     entitlement: entitlement ?? this.entitlement,
     products: products ?? this.products,
     busy: busy ?? this.busy,
+    isStale: isStale ?? this.isStale,
+    lastRefreshError: clearLastRefreshError
+        ? null
+        : lastRefreshError ?? this.lastRefreshError,
     lastOutcome: lastOutcome ?? this.lastOutcome,
   );
 }
 
 class BillingNotifier extends AsyncNotifier<BillingUiState?> {
+  Future<void> _operationTail = Future<void>.value();
+  Future<void>? _refreshInFlight;
+  Future<void>? _storeActionInFlight;
+  int _generation = 0;
+
   @override
   Future<BillingUiState?> build() async {
-    final account = await ref.watch(accountProvider.future);
-    if (!account.loggedIn) return null;
+    final generation = ++_generation;
+    ref.onDispose(() => _generation += 1);
+    final accountFuture = ref.watch(accountProvider.future);
     final bridge = ref.watch(billingBridgeProvider);
+    final store = ref.watch(billingStoreProvider);
+    final account = await accountFuture;
+    if (!_isCurrent(generation)) return null;
+    if (!account.loggedIn) return null;
     final cached = await bridge.getCachedBilling();
+    if (!_isCurrent(generation)) return null;
     late final BillingStateDto entitlement;
     try {
       entitlement = await bridge.billingBootstrap();
-    } catch (_) {
+      if (!_isCurrent(generation)) return null;
+    } catch (error) {
+      if (!_isCurrent(generation)) return null;
       if (cached == null) rethrow;
-      return BillingUiState(entitlement: cached, products: const []);
+      return BillingUiState(
+        entitlement: cached,
+        products: const [],
+        isStale: true,
+        lastRefreshError: _safeBillingRefreshError(error),
+      );
     }
-    return _withStoreCatalog(entitlement);
+    return await _withStoreCatalog(entitlement, store, generation) ??
+        BillingUiState(entitlement: entitlement, products: const []);
   }
 
-  Future<BillingUiState> _withStoreCatalog(BillingStateDto entitlement) async {
-    final store = ref.read(billingStoreProvider);
+  Future<BillingUiState?> _withStoreCatalog(
+    BillingStateDto entitlement,
+    BillingStore store,
+    int generation,
+  ) async {
     try {
       await store.configure(
         appUserId: entitlement.providerAppUserId,
         environment: entitlement.environment,
       );
-      return BillingUiState(
-        entitlement: entitlement,
-        products: await store.products(),
-      );
+      if (!_isCurrent(generation)) return null;
+      final products = await store.products();
+      if (!_isCurrent(generation)) return null;
+      return BillingUiState(entitlement: entitlement, products: products);
     } catch (_) {
+      if (!_isCurrent(generation)) return null;
       return BillingUiState(entitlement: entitlement, products: const []);
     }
   }
 
-  Future<void> refreshFromServer() async {
+  Future<void> refreshFromServer() {
+    if (!ref.mounted) return Future<void>.value();
+    final inFlight = _refreshInFlight;
+    if (inFlight != null) return inFlight;
+    if (state.value == null) {
+      ref.invalidateSelf();
+      return Future<void>.value();
+    }
+
+    late final Future<void> operation;
+    operation = _enqueue(_refreshFromServerOnce).whenComplete(() {
+      if (identical(_refreshInFlight, operation)) {
+        _refreshInFlight = null;
+      }
+    });
+    _refreshInFlight = operation;
+    return operation;
+  }
+
+  Future<void> _refreshFromServerOnce(int generation) async {
+    if (!_isCurrent(generation)) return;
     final current = state.value;
     if (current == null) return;
     state = AsyncData(current.copyWith(busy: true));
     try {
-      final entitlement = await ref
-          .read(billingBridgeProvider)
-          .refreshBilling();
-      state = AsyncData(await _withStoreCatalog(entitlement));
-    } catch (error, stackTrace) {
-      state = AsyncError(error, stackTrace);
+      final bridge = ref.read(billingBridgeProvider);
+      final store = ref.read(billingStoreProvider);
+      final entitlement = await bridge.refreshBilling();
+      if (!_isCurrent(generation)) return;
+      final refreshed = await _withStoreCatalog(entitlement, store, generation);
+      if (!_isCurrent(generation) || refreshed == null) return;
+      state = AsyncData(refreshed);
+    } catch (error) {
+      if (!_isCurrent(generation)) return;
+      state = AsyncData(
+        current.copyWith(
+          busy: false,
+          isStale: true,
+          lastRefreshError: _safeBillingRefreshError(error),
+        ),
+      );
     }
   }
 
-  Future<void> purchase(String productIdentifier) async {
-    await _runStoreAction(
+  Future<void> purchase(String productIdentifier) {
+    return _runStoreAction(
       () => ref.read(billingStoreProvider).purchase(productIdentifier),
     );
   }
 
-  Future<void> restore() async {
-    await _runStoreAction(() => ref.read(billingStoreProvider).restore());
+  Future<void> restore() {
+    return _runStoreAction(() => ref.read(billingStoreProvider).restore());
   }
 
   Future<void> _runStoreAction(
     Future<BillingPurchaseOutcome> Function() action,
+  ) {
+    if (!ref.mounted) return Future<void>.value();
+    final inFlight = _storeActionInFlight;
+    if (inFlight != null) return inFlight;
+
+    late final Future<void> operation;
+    operation =
+        _enqueue(
+          (generation) => _runStoreActionOnce(action, generation),
+        ).whenComplete(() {
+          if (identical(_storeActionInFlight, operation)) {
+            _storeActionInFlight = null;
+          }
+        });
+    _storeActionInFlight = operation;
+    return operation;
+  }
+
+  Future<void> _runStoreActionOnce(
+    Future<BillingPurchaseOutcome> Function() action,
+    int generation,
   ) async {
+    if (!_isCurrent(generation)) return;
     final current = state.value;
     if (current == null || current.busy) return;
     state = AsyncData(current.copyWith(busy: true));
     try {
+      final bridge = ref.read(billingBridgeProvider);
+      final store = ref.read(billingStoreProvider);
       final outcome = await action();
+      if (!_isCurrent(generation)) return;
       if (outcome == BillingPurchaseOutcome.purchased) {
-        final entitlement = await ref
-            .read(billingBridgeProvider)
-            .refreshBilling();
-        final refreshed = await _withStoreCatalog(entitlement);
+        final entitlement = await bridge.refreshBilling();
+        if (!_isCurrent(generation)) return;
+        final refreshed = await _withStoreCatalog(
+          entitlement,
+          store,
+          generation,
+        );
+        if (!_isCurrent(generation) || refreshed == null) return;
         state = AsyncData(refreshed.copyWith(lastOutcome: outcome));
       } else {
         state = AsyncData(current.copyWith(busy: false, lastOutcome: outcome));
       }
     } catch (_) {
+      if (!_isCurrent(generation)) return;
       state = AsyncData(
         current.copyWith(
           busy: false,
@@ -544,6 +640,34 @@ class BillingNotifier extends AsyncNotifier<BillingUiState?> {
       );
     }
   }
+
+  Future<void> _enqueue(Future<void> Function(int generation) operation) {
+    final generation = _generation;
+    final scheduled = _operationTail.then((_) async {
+      if (!_isCurrent(generation)) return;
+      try {
+        await operation(generation);
+      } catch (_) {
+        // Public billing operations are also called from lifecycle and
+        // realtime callbacks. Operation-specific paths publish a safe state;
+        // disposal and unexpected adapter failures must never escape an
+        // unawaited automatic recovery callback.
+      }
+    });
+    _operationTail = scheduled;
+    return scheduled;
+  }
+
+  bool _isCurrent(int generation) => ref.mounted && generation == _generation;
+}
+
+BridgeErrorDto _safeBillingRefreshError(Object error) {
+  if (error is BridgeErrorDto) return error;
+  return const BridgeErrorDto(
+    code: BridgeErrorCodeDto.internal,
+    arguments: [],
+    retryable: false,
+  );
 }
 
 final billingProvider = AsyncNotifierProvider<BillingNotifier, BillingUiState?>(
@@ -554,6 +678,7 @@ class SyncStatusNotifier extends AsyncNotifier<SyncStatusDto> {
   RealtimeSyncScheduler? _scheduler;
   bool _foreground = true;
   bool _connected = false;
+  bool _observedRealtimeConnectionState = false;
 
   @override
   FutureOr<SyncStatusDto> build() async {
@@ -596,8 +721,28 @@ class SyncStatusNotifier extends AsyncNotifier<SyncStatusDto> {
   ]) => _scheduler?.trigger(kind);
 
   void setRealtimeConnected(bool connected) {
+    final recovered =
+        _observedRealtimeConnectionState && connected && !_connected;
+    _observedRealtimeConnectionState = true;
     _connected = connected;
     _scheduler?.setConnected(connected);
+    if (connected && (recovered || _billingNeedsRecovery())) {
+      unawaited(_recoverBillingWithoutEscaping());
+    }
+  }
+
+  bool _billingNeedsRecovery() {
+    final billing = ref.read(billingProvider);
+    return billing.hasError || billing.value?.isStale == true;
+  }
+
+  Future<void> _recoverBillingWithoutEscaping() async {
+    try {
+      await ref.read(billingProvider.notifier).refreshFromServer();
+    } catch (_) {
+      // Automatic network recovery is best effort. BillingNotifier preserves
+      // a typed stale/error state and retries at the next recovery trigger.
+    }
   }
 
   void setForeground(bool foreground) {

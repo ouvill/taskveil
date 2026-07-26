@@ -1017,7 +1017,17 @@ class _BillingSection extends ConsumerWidget {
         const SizedBox(height: AppSpacing.sm),
         billingAsync.when(
           loading: () => const LinearProgressIndicator(minHeight: 2),
-          error: (_, _) => Text(l10n.billingUnavailable),
+          error: (_, _) => Row(
+            children: [
+              Expanded(child: Text(l10n.billingUnavailable)),
+              const SizedBox(width: AppSpacing.sm),
+              TextButton(
+                onPressed: () =>
+                    ref.read(billingProvider.notifier).refreshFromServer(),
+                child: Text(l10n.billingRetryButton),
+              ),
+            ],
+          ),
           data: (value) {
             if (value == null) return Text(l10n.billingStatusFree);
             final entitlement = value.entitlement;
@@ -1060,6 +1070,23 @@ class _BillingSection extends ConsumerWidget {
                 if (value.lastOutcome case final outcome?) ...[
                   const SizedBox(height: AppSpacing.sm),
                   Text(_billingOutcome(l10n, outcome)),
+                ],
+                if (value.lastRefreshError case final error?) ...[
+                  const SizedBox(height: AppSpacing.sm),
+                  Text(bridgeErrorMessage(l10n, error)),
+                  if (value.isStale)
+                    Text(
+                      l10n.billingStaleNotice,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  TextButton(
+                    onPressed: value.busy
+                        ? null
+                        : () => ref
+                              .read(billingProvider.notifier)
+                              .refreshFromServer(),
+                    child: Text(l10n.billingRetryButton),
+                  ),
                 ],
                 const SizedBox(height: AppSpacing.sm),
                 Wrap(
