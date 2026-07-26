@@ -3,16 +3,15 @@ use taskveil_client::{
     pomodoro_target_reached_at as domain_pomodoro_target_reached_at, AccountAuthResult,
     AccountRegistrationPending, AccountRegistrationPhase, AccountRegistrationState,
     AccountSessionState, ActiveTimerSession, BillingState, CalendarOccurrenceKind,
-    CalendarOccurrenceView, CalendarRange, CivilDate, ClientError, ClientErrorKind,
-    CompletedTimerSession, CreateTaskCommand, CreateTaskSeriesFromTaskCommand,
-    CreateTaskSeriesFromTemplateCommand, CreateTemplateCommand, FrontendSettingKey, HomeTaskView,
-    List, OrganizationSafetyState, RealtimeTicket, ReminderNotificationActionView,
-    ReminderNotificationCommandView, ReminderView, ReorderTaskCommand, ReplaceTaskBlueprintCommand,
-    SaveTemplateCommand, SetTaskStatusCommand, SettlementSummary, Streak, SyncFailure, SyncStatus,
-    Task, TaskBlueprint, TaskBlueprintNode, TaskContent, TaskDue, TaskSeries, TaskStatus,
-    TaskTemplate, TaskUndoKind, TaskUndoView, TimerFinishKind, TimerMode, TimerPhase,
-    TimerRunState, UpdateTaskCommand, UpdateTaskSeriesCommand, UpdateTemplateCommand, UtcInstant,
-    Uuid,
+    CalendarOccurrenceView, CalendarRange, CivilDate, ClientError, CompletedTimerSession,
+    CreateTaskCommand, CreateTaskSeriesFromTaskCommand, CreateTaskSeriesFromTemplateCommand,
+    CreateTemplateCommand, FrontendSettingKey, HomeTaskView, List, OrganizationSafetyState,
+    RealtimeTicket, ReminderNotificationActionView, ReminderNotificationCommandView, ReminderView,
+    ReorderTaskCommand, ReplaceTaskBlueprintCommand, SaveTemplateCommand, SetTaskStatusCommand,
+    SettlementSummary, Streak, SyncFailure, SyncStatus, Task, TaskBlueprint, TaskBlueprintNode,
+    TaskContent, TaskDue, TaskSeries, TaskStatus, TaskTemplate, TaskUndoKind, TaskUndoView,
+    TimerFinishKind, TimerMode, TimerPhase, TimerRunState, UpdateTaskCommand,
+    UpdateTaskSeriesCommand, UpdateTemplateCommand, UtcInstant, Uuid,
 };
 
 use crate::client_handle::{client, init_client};
@@ -519,8 +518,8 @@ pub async fn account_registration_begin(
         .map(account_registration_pending_to_dto)
 }
 
-pub async fn account_registration_resend(
-) -> Result<AccountRegistrationPendingDto, BridgeErrorDto> {
+pub async fn account_registration_resend() -> Result<AccountRegistrationPendingDto, BridgeErrorDto>
+{
     client()?
         .account_registration_resend()
         .await
@@ -1125,6 +1124,7 @@ fn reminder_notification_command_to_dto(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use taskveil_client::ClientErrorKind;
 
     #[test]
     fn internal_error_details_are_reduced_to_allowlisted_codes() {

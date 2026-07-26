@@ -712,7 +712,7 @@ impl AccountClient {
         let response = response
             .json::<RegistrationRequestResponse>()
             .await
-            .map_err(AccountClientError::Http)?;
+            .map_err(AccountClientError::ProtocolDecode)?;
         mailbox.apply_resend_response(&response);
         Ok(())
     }
@@ -749,7 +749,7 @@ impl AccountClient {
         let response = response
             .json::<RegistrationVerifyResponse>()
             .await
-            .map_err(AccountClientError::Http)?;
+            .map_err(AccountClientError::ProtocolDecode)?;
         Ok(AccountRegistrationVerified {
             version: 1,
             origin: mailbox.origin.clone(),
@@ -950,7 +950,7 @@ impl AccountClient {
         let response = response
             .json::<RegistrationStatusResponse>()
             .await
-            .map_err(AccountClientError::Http)?;
+            .map_err(AccountClientError::ProtocolDecode)?;
         match (response.status.as_str(), response.result) {
             ("pending", None) => Ok(AccountRegistrationReconcile::Pending),
             ("committed", Some(session)) => Self::registration_outcome(prepared, session)
@@ -1602,7 +1602,7 @@ impl AccountClient {
             let response = match response {
                 Ok(response) => response,
                 Err(error) => {
-                    last_error = Some(error);
+                    last_error = Some(AccountClientError::Transport(error));
                     if attempt < 2 {
                         continue;
                     }
@@ -1615,16 +1615,14 @@ impl AccountClient {
             match response.json::<T>().await {
                 Ok(response) => return Ok(response),
                 Err(error) => {
-                    last_error = Some(error);
+                    last_error = Some(AccountClientError::ProtocolDecode(error));
                     if attempt < 2 {
                         continue;
                     }
                 }
             }
         }
-        Err(AccountClientError::Http(last_error.expect(
-            "an idempotent request attempt always records an error",
-        )))
+        Err(last_error.expect("an idempotent request attempt always records an error"))
     }
 }
 

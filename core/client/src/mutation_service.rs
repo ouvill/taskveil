@@ -36,6 +36,12 @@ pub enum ClientError {
     KeyStore(#[source] taskveil_crypto::KeyStoreError),
     #[error("account request failed")]
     AccountRequest,
+    #[error("account input is invalid")]
+    InvalidAccountInput,
+    #[error("remote account resource was not found")]
+    AccountNotFound,
+    #[error("remote account state conflicts with the request")]
+    AccountConflict,
     #[error("remote authentication is required")]
     Unauthorized,
     #[error("remote account credential is unavailable")]
@@ -154,7 +160,8 @@ impl ClientError {
                 | StorageError::DefaultListProtected { .. },
             )
             | Self::ProfileAlreadyBound
-            | Self::ActiveTimerConflict(_) => ClientErrorKind::Conflict,
+            | Self::ActiveTimerConflict(_)
+            | Self::AccountConflict => ClientErrorKind::Conflict,
             Self::Storage(
                 StorageError::ReminderTimeNotFuture
                 | StorageError::ReminderTaskClosed
@@ -166,7 +173,9 @@ impl ClientError {
             | Self::InvalidPriority
             | Self::InvalidEstimatedMinutes
             | Self::InvalidCalendarRange
-            | Self::InvalidFrontendSetting => ClientErrorKind::InvalidInput,
+            | Self::InvalidFrontendSetting
+            | Self::InvalidAccountInput => ClientErrorKind::InvalidInput,
+            Self::AccountNotFound => ClientErrorKind::NotFound,
             Self::Storage(StorageError::InvalidDatabaseKey)
             | Self::KeyStore(_)
             | Self::LocalKeyState
@@ -614,6 +623,18 @@ mod tests {
         assert_eq!(
             ClientError::AccountRequest.kind(),
             ClientErrorKind::Internal
+        );
+        assert_eq!(
+            ClientError::InvalidAccountInput.kind(),
+            ClientErrorKind::InvalidInput
+        );
+        assert_eq!(
+            ClientError::AccountNotFound.kind(),
+            ClientErrorKind::NotFound
+        );
+        assert_eq!(
+            ClientError::AccountConflict.kind(),
+            ClientErrorKind::Conflict
         );
         for error in [
             ClientError::AccountBoundUnavailable,

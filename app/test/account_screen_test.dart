@@ -32,6 +32,32 @@ Future<void> _enterCredentials(WidgetTester tester) async {
   await tester.enterText(find.byType(TextField).at(1), 'correct password');
 }
 
+Future<void> _beginRegistration(WidgetTester tester) async {
+  await tester.tap(find.text('Register'));
+  await tester.pumpAndSettle();
+  await tester.enterText(find.byType(TextField).first, 'alice@example.com');
+  await tester.tap(find.widgetWithText(FilledButton, 'Register').last);
+  await tester.pumpAndSettle();
+}
+
+Future<void> _verifyRegistrationOtp(WidgetTester tester) async {
+  await tester.enterText(find.byType(TextField).first, '12345678');
+  final verify = find.widgetWithText(FilledButton, 'Verify code').last;
+  await tester.ensureVisible(verify);
+  await tester.tap(verify);
+  await tester.pumpAndSettle();
+}
+
+Future<void> _completeRegistration(WidgetTester tester) async {
+  await tester.enterText(find.byType(TextField).first, 'correct password');
+  final finish = find
+      .widgetWithText(FilledButton, 'Set password and finish')
+      .last;
+  await tester.ensureVisible(finish);
+  await tester.tap(finish);
+  await tester.pumpAndSettle();
+}
+
 Finder _accountScrollable() => find.byWidgetPredicate(
   (widget) =>
       widget is Scrollable && widget.axisDirection == AxisDirection.down,
@@ -45,9 +71,16 @@ const _typedFailure = BridgeErrorDto(
 
 enum _AccountFailurePoint {
   accountLoad,
+  registrationState,
+  recoveryKeyLoad,
   serverUrlLoad,
   serverUrlSave,
-  register,
+  registrationBegin,
+  registrationResend,
+  registrationVerifyOtp,
+  registrationComplete,
+  registrationCancel,
+  recoveryKeyAck,
   login,
   logout,
   organizationSafety,
@@ -81,19 +114,60 @@ class _FailingAccountBridgeService extends FakeBridgeService {
   }
 
   @override
-  Future<AccountAuthResultDto> accountRegister({
+  Future<AccountRegistrationStateDto?> accountRegistrationState() async {
+    if (point == _AccountFailurePoint.registrationState) _fail();
+    return super.accountRegistrationState();
+  }
+
+  @override
+  Future<String?> accountRegistrationRecoveryKey() async {
+    if (point == _AccountFailurePoint.recoveryKeyLoad) _fail();
+    return super.accountRegistrationRecoveryKey();
+  }
+
+  @override
+  Future<AccountRegistrationPendingDto> accountRegistrationBegin({
     required String email,
-    required String password,
     String? serverUrl,
+  }) async {
+    if (point == _AccountFailurePoint.registrationBegin) _fail();
+    return super.accountRegistrationBegin(email: email, serverUrl: serverUrl);
+  }
+
+  @override
+  Future<AccountRegistrationPendingDto> accountRegistrationResend() async {
+    if (point == _AccountFailurePoint.registrationResend) _fail();
+    return super.accountRegistrationResend();
+  }
+
+  @override
+  Future<void> accountRegistrationVerifyOtp({required String otp}) async {
+    if (point == _AccountFailurePoint.registrationVerifyOtp) _fail();
+    return super.accountRegistrationVerifyOtp(otp: otp);
+  }
+
+  @override
+  Future<AccountAuthResultDto> accountRegistrationComplete({
+    required String password,
     String? deviceName,
   }) async {
-    if (point == _AccountFailurePoint.register) _fail();
-    return super.accountRegister(
-      email: email,
+    if (point == _AccountFailurePoint.registrationComplete) _fail();
+    return super.accountRegistrationComplete(
       password: password,
-      serverUrl: serverUrl,
       deviceName: deviceName,
     );
+  }
+
+  @override
+  Future<void> accountRegistrationCancel() async {
+    if (point == _AccountFailurePoint.registrationCancel) _fail();
+    return super.accountRegistrationCancel();
+  }
+
+  @override
+  Future<void> accountRegistrationAckRecoveryKey() async {
+    if (point == _AccountFailurePoint.recoveryKeyAck) _fail();
+    return super.accountRegistrationAckRecoveryKey();
   }
 
   @override
@@ -324,7 +398,10 @@ void main() {
     );
     await _pumpAccountScreen(tester, fake);
 
-    expect(find.text('Could not load account state.'), findsOneWidget);
+    expect(
+      find.text('Taskveil could not complete the operation.'),
+      findsOneWidget,
+    );
     expect(find.text('Try again'), findsOneWidget);
     expect(find.byType(TextField), findsNothing);
 
@@ -343,7 +420,10 @@ void main() {
     fake.seedRecoveryPendingAccount('recovery@example.com');
     await _pumpAccountScreen(tester, fake);
 
-    expect(find.text('Could not load account state.'), findsOneWidget);
+    expect(
+      find.text('Taskveil could not complete the operation.'),
+      findsOneWidget,
+    );
     expect(find.byKey(const ValueKey('account-logout')), findsNothing);
     await tester.tap(find.text('Try again'));
     await tester.pumpAndSettle();
@@ -486,6 +566,18 @@ void main() {
           act: (_) async {},
         ),
         (
+          name: 'registration state restore',
+          point: _AccountFailurePoint.registrationState,
+          signedIn: false,
+          act: (_) async {},
+        ),
+        (
+          name: 'Recovery Key restore',
+          point: _AccountFailurePoint.recoveryKeyLoad,
+          signedIn: false,
+          act: (_) async {},
+        ),
+        (
           name: 'server URL load',
           point: _AccountFailurePoint.serverUrlLoad,
           signedIn: false,
@@ -509,16 +601,86 @@ void main() {
           },
         ),
         (
-          name: 'registration',
-          point: _AccountFailurePoint.register,
+          name: 'registration begin',
+          point: _AccountFailurePoint.registrationBegin,
           signedIn: false,
           act: (tester) async {
             await tester.tap(find.text('Register'));
             await tester.pumpAndSettle();
-            await _enterCredentials(tester);
+            await tester.enterText(
+              find.byType(TextField).first,
+              'alice@example.com',
+            );
             await tester.tap(
               find.widgetWithText(FilledButton, 'Register').last,
             );
+          },
+        ),
+        (
+          name: 'registration resend',
+          point: _AccountFailurePoint.registrationResend,
+          signedIn: false,
+          act: (tester) async {
+            await _beginRegistration(tester);
+            final resend = find.widgetWithText(TextButton, 'Resend code');
+            await tester.ensureVisible(resend);
+            await tester.tap(resend);
+          },
+        ),
+        (
+          name: 'registration OTP verification',
+          point: _AccountFailurePoint.registrationVerifyOtp,
+          signedIn: false,
+          act: (tester) async {
+            await _beginRegistration(tester);
+            await tester.enterText(find.byType(TextField).first, '12345678');
+            final verify = find
+                .widgetWithText(FilledButton, 'Verify code')
+                .last;
+            await tester.ensureVisible(verify);
+            await tester.tap(verify);
+          },
+        ),
+        (
+          name: 'registration completion',
+          point: _AccountFailurePoint.registrationComplete,
+          signedIn: false,
+          act: (tester) async {
+            await _beginRegistration(tester);
+            await _verifyRegistrationOtp(tester);
+            await tester.enterText(
+              find.byType(TextField).first,
+              'correct password',
+            );
+            final finish = find
+                .widgetWithText(FilledButton, 'Set password and finish')
+                .last;
+            await tester.ensureVisible(finish);
+            await tester.tap(finish);
+          },
+        ),
+        (
+          name: 'registration cancellation',
+          point: _AccountFailurePoint.registrationCancel,
+          signedIn: false,
+          act: (tester) async {
+            await _beginRegistration(tester);
+            final cancel = find.text('Cancel registration');
+            await tester.ensureVisible(cancel);
+            await tester.tap(cancel);
+          },
+        ),
+        (
+          name: 'Recovery Key acknowledgement',
+          point: _AccountFailurePoint.recoveryKeyAck,
+          signedIn: false,
+          act: (tester) async {
+            await _beginRegistration(tester);
+            await _verifyRegistrationOtp(tester);
+            await _completeRegistration(tester);
+            final acknowledge = find.text('I saved my Recovery Key');
+            await tester.ensureVisible(acknowledge);
+            await tester.tap(acknowledge);
           },
         ),
         (

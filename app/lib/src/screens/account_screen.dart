@@ -37,6 +37,7 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
   bool _busy = false;
   bool _restoringAccountFlow = true;
   bool _recoveryRestoreFailed = false;
+  String? _recoveryRestoreError;
   bool _registrationCanCancel = false;
   int? _nextRetryAtMs;
   Timer? _resendTimer;
@@ -55,6 +56,7 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
       setState(() {
         _restoringAccountFlow = true;
         _recoveryRestoreFailed = false;
+        _recoveryRestoreError = null;
       });
     }
     try {
@@ -77,9 +79,13 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
           _setNextRetryAt(registration.nextRetryAtMs);
         }
       });
-    } catch (_) {
+    } catch (error) {
       if (mounted) {
-        setState(() => _recoveryRestoreFailed = true);
+        final l10n = AppLocalizations.of(context)!;
+        setState(() {
+          _recoveryRestoreFailed = true;
+          _recoveryRestoreError = bridgeErrorMessage(l10n, error);
+        });
       }
     } finally {
       if (mounted) {
@@ -131,7 +137,7 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
                 (account.recoveryPending && _recoveryKey == null)) {
               return AppEmptyState(
                 icon: LucideIcons.keyRound300,
-                title: l10n.accountLoadFailed,
+                title: _recoveryRestoreError ?? l10n.accountLoadFailed,
                 action: FilledButton(
                   onPressed: _restoreAccountFlow,
                   child: Text(l10n.retryButton),

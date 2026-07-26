@@ -3082,8 +3082,20 @@ pub(super) fn map_account_client_error(error: AccountClientError) -> ClientError
         AccountClientError::EntitlementRequired => ClientError::EntitlementRequired,
         AccountClientError::InvalidGrant
         | AccountClientError::AuthRejected
-        | AccountClientError::Server(401) => ClientError::Unauthorized,
+        | AccountClientError::Server(401 | 403) => ClientError::Unauthorized,
+        AccountClientError::EmptyServerUrl
+        | AccountClientError::InvalidServerOrigin
+        | AccountClientError::EmailVerificationExpired
+        | AccountClientError::Server(400 | 422) => ClientError::InvalidAccountInput,
+        AccountClientError::Server(404 | 410) => ClientError::AccountNotFound,
+        AccountClientError::Server(409) => ClientError::AccountConflict,
+        AccountClientError::EmailVerificationRetryAt(_) | AccountClientError::Server(429) => {
+            ClientError::Busy
+        }
         AccountClientError::Transport(_) => ClientError::SyncRun,
+        AccountClientError::Server(status) if status == 408 || status >= 500 => {
+            ClientError::SyncRun
+        }
         _ => ClientError::AccountRequest,
     }
 }
@@ -3560,7 +3572,27 @@ mod tests {
         ));
         assert!(matches!(
             map_account_client_error(AccountClientError::Server(500)),
-            ClientError::AccountRequest
+            ClientError::SyncRun
+        ));
+        assert!(matches!(
+            map_account_client_error(AccountClientError::InvalidServerOrigin),
+            ClientError::InvalidAccountInput
+        ));
+        assert!(matches!(
+            map_account_client_error(AccountClientError::EmailVerificationExpired),
+            ClientError::InvalidAccountInput
+        ));
+        assert!(matches!(
+            map_account_client_error(AccountClientError::EmailVerificationRetryAt(42)),
+            ClientError::Busy
+        ));
+        assert!(matches!(
+            map_account_client_error(AccountClientError::Server(404)),
+            ClientError::AccountNotFound
+        ));
+        assert!(matches!(
+            map_account_client_error(AccountClientError::Server(409)),
+            ClientError::AccountConflict
         ));
     }
 
