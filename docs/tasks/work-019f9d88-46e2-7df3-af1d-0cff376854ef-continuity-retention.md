@@ -1,7 +1,7 @@
 ---
 id: 019f9d88-46e2-7df3-af1d-0cff376854ef
 title: Bound continuity proof and resync session retention
-status: active
+status: done
 lane: critical
 milestone: maintenance
 ---
@@ -112,7 +112,7 @@ continuity proofはACK response lossに対する冪等再送を維持する必�
 - [x] `sh app/tool/check_client_boundaries.sh`
 - [x] `sh app/tool/test_client_boundaries.sh`
 - [x] `git diff --check`
-- [ ] 独立検証でP1 / P2相当の未解決指摘がない。
+- [x] 独立検証でP1 / P2相当の未解決指摘がない。
 
 ## 7. 制約・注意事項
 
@@ -160,15 +160,16 @@ continuity proofはACK response lossに対する冪等再送を維持する必�
   `cargo clippy --workspace -- -D warnings`、`cargo test --workspace`、
   `sh app/tool/check_client_boundaries.sh`、`sh app/tool/test_client_boundaries.sh`、
   `git diff --check`はすべて成功した。Flutter変更がないためFlutter固有gateは対象外。
-- Commit: この実装結果を含むcommit（最終hashはGit履歴を正本とする）。
-- 未解決: 初回独立review指摘は修正し全品質ゲートを再実行済み。独立再検証を行う。
+- Commit: `e7fbd76ae3eefffcb282ee1a0fa3bc960f5bb38a`
+- 未解決: なし。
 
 ### 独立検証
 
-- 判定: 初回不合格、修正確認待ち
-- 根拠: P1としてpull、ACK、scan、completion、begin間のrow lock取得順が明示的に
-  統一されていない点、P2としてlegacy resync sessionのDB compaction / unique境界と
-  大規模DB向けmigration preflightが不足している点を指摘された。実装側でlock helper、
-  並行回帰test、session unique migration、runbookのstaged concurrent index手順を
-  追加して再検証する。
-- 検証者: 実装を担当していない独立review agent
+- 判定: 合格
+- 根拠: 初回のP1 / P2指摘に対する修正後差分を再reviewし、P0 / P1 / P2相当の
+  未解決指摘がないことを確認した。
+  `concurrent_pull_then_ack_obeys_continuity_proof_session_lock_order`と
+  `concurrent_ack_then_completion_replay_obeys_lock_order_without_deadlock`は2件中2件、
+  `continuity_retention_migration_compacts_existing_proofs_before_unique_index`は1件中1件、
+  独立環境で成功した。
+- 検証者: `/root/continuity_review`
