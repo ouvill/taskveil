@@ -28,7 +28,7 @@ async fn get_billing(
     Path(tenant_id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<BillingResponse>, AppError> {
-    let token = super::sync::bearer_token(&headers)?;
+    let token = super::authorized_sync::bearer_token(&headers)?;
     let context = auth::authenticate(&state.pool, token, tenant_id).await?;
     billing::get_billing(
         &state.pool,
@@ -45,7 +45,7 @@ async fn refresh_billing(
     Path(tenant_id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<BillingResponse>, AppError> {
-    let token = super::sync::bearer_token(&headers)?;
+    let token = super::authorized_sync::bearer_token(&headers)?;
     let context = auth::authenticate(&state.pool, token, tenant_id).await?;
     billing::refresh_billing(&state.pool, &state.billing, tenant_id, context.user_id)
         .await

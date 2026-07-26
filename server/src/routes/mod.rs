@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use crate::SharedState;
 
 pub mod auth;
+mod authorized_sync;
 pub mod billing;
 pub mod realtime;
 pub mod sync;

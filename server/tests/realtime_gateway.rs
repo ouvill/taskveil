@@ -217,6 +217,7 @@ impl Fixture {
     fn request(&self, path: &str, body: Body) -> Request<Body> {
         Request::post(path)
             .header("Authorization", format!("Bearer {}", self.token))
+            .header(SYNC_PROTOCOL_VERSION_HEADER, SYNC_PROTOCOL_VERSION)
             .body(body)
             .unwrap()
     }

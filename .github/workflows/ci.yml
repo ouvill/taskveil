@@ -125,6 +125,8 @@ jobs:
           sh app/tool/test_client_boundaries.sh
           sh tool/ci/check_protocol_boundaries.sh
           sh tool/ci/test_protocol_boundaries.sh
+          sh tool/ci/check_authorized_sync_routes.sh
+          sh tool/ci/test_authorized_sync_routes.sh
 
       - name: SQLx offline metadata
         run: env -u DATABASE_URL cargo check -p taskveil-server --all-targets

@@ -63,6 +63,8 @@ struct Fixture {
     admin_pool: PgPool,
     user_id: Uuid,
     tenant_id: Uuid,
+    device_id: Uuid,
+    family_id: Uuid,
     provider_app_user_id: Uuid,
     token: String,
     provider: FakeProvider,
@@ -188,6 +190,8 @@ impl Fixture {
             admin_pool,
             user_id,
             tenant_id,
+            device_id,
+            family_id,
             provider_app_user_id,
             token,
             provider,
@@ -196,22 +200,38 @@ impl Fixture {
     }
 
     async fn request(&self, method: Method, path: &str, body: Body) -> (StatusCode, Value) {
+        self.request_with_policy_headers(
+            method,
+            path,
+            body,
+            Some(&self.token),
+            Some(SYNC_PROTOCOL_VERSION),
+        )
+        .await
+    }
+
+    async fn request_with_policy_headers(
+        &self,
+        method: Method,
+        path: &str,
+        body: Body,
+        bearer_token: Option<&str>,
+        protocol_version: Option<u16>,
+    ) -> (StatusCode, Value) {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("Content-Type", "application/json");
+        if let Some(token) = bearer_token {
+            request = request.header("Authorization", format!("Bearer {token}"));
+        }
+        if let Some(version) = protocol_version {
+            request = request.header(SYNC_PROTOCOL_VERSION_HEADER, version.to_string());
+        }
         let response = self
             .app
             .clone()
-            .oneshot(
-                Request::builder()
-                    .method(method)
-                    .uri(path)
-                    .header("Authorization", format!("Bearer {}", self.token))
-                    .header(
-                        SYNC_PROTOCOL_VERSION_HEADER,
-                        SYNC_PROTOCOL_VERSION.to_string(),
-                    )
-                    .header("Content-Type", "application/json")
-                    .body(body)
-                    .unwrap(),
-            )
+            .oneshot(request.body(body).unwrap())
             .await
             .unwrap();
         let status = response.status();
@@ -298,12 +318,12 @@ async fn refresh_converges_states_and_sync_uses_request_time_402() {
 }
 
 #[tokio::test]
-async fn free_account_is_rejected_by_every_sync_and_realtime_route() {
+async fn negative_authorization_matrix_covers_every_sync_and_realtime_route() {
     let fixture = Fixture::setup().await;
     let tenant = fixture.tenant_id;
     let device = Uuid::now_v7();
     let proof = Uuid::now_v7();
-    let cases = [
+    let cases = vec![
         (
             Method::GET,
             format!("/v2/tenants/{tenant}/preflight?since=0"),
@@ -389,15 +409,130 @@ async fn free_account_is_rejected_by_every_sync_and_realtime_route() {
         ),
     ];
 
+    let stale_protocol = SYNC_PROTOCOL_VERSION.checked_add(1).unwrap();
+    assert_route_matrix(
+        &fixture,
+        &cases,
+        Some("not-a-session"),
+        Some(stale_protocol),
+        StatusCode::UNAUTHORIZED,
+        "unauthorized",
+        "session",
+    )
+    .await;
+
+    query("UPDATE access_tokens SET revoked_at = now() WHERE family_id = $1")
+        .bind(fixture.family_id)
+        .execute(&fixture.admin_pool)
+        .await
+        .unwrap();
+    assert_route_matrix(
+        &fixture,
+        &cases,
+        Some(&fixture.token),
+        Some(stale_protocol),
+        StatusCode::UNAUTHORIZED,
+        "unauthorized",
+        "revoked session",
+    )
+    .await;
+    query("UPDATE access_tokens SET revoked_at = NULL WHERE family_id = $1")
+        .bind(fixture.family_id)
+        .execute(&fixture.admin_pool)
+        .await
+        .unwrap();
+
+    query("UPDATE devices SET revoked_at = now() WHERE id = $1")
+        .bind(fixture.device_id)
+        .execute(&fixture.admin_pool)
+        .await
+        .unwrap();
+    assert_route_matrix(
+        &fixture,
+        &cases,
+        Some(&fixture.token),
+        Some(stale_protocol),
+        StatusCode::UNAUTHORIZED,
+        "unauthorized",
+        "device",
+    )
+    .await;
+    query("UPDATE devices SET revoked_at = NULL WHERE id = $1")
+        .bind(fixture.device_id)
+        .execute(&fixture.admin_pool)
+        .await
+        .unwrap();
+
+    query("DELETE FROM tenant_members WHERE tenant_id = $1 AND user_id = $2")
+        .bind(fixture.tenant_id)
+        .bind(fixture.user_id)
+        .execute(&fixture.admin_pool)
+        .await
+        .unwrap();
+    assert_route_matrix(
+        &fixture,
+        &cases,
+        Some(&fixture.token),
+        Some(stale_protocol),
+        StatusCode::UNAUTHORIZED,
+        "unauthorized",
+        "membership",
+    )
+    .await;
+    query("INSERT INTO tenant_members (tenant_id, user_id, role) VALUES ($1, $2, 'owner')")
+        .bind(fixture.tenant_id)
+        .bind(fixture.user_id)
+        .execute(&fixture.admin_pool)
+        .await
+        .unwrap();
+
+    assert_route_matrix(
+        &fixture,
+        &cases,
+        Some(&fixture.token),
+        Some(stale_protocol),
+        StatusCode::PAYMENT_REQUIRED,
+        "entitlement_required",
+        "entitlement",
+    )
+    .await;
+
+    fixture
+        .provider
+        .set(snapshot(SubscriptionStatus::Active, true));
+    assert_eq!(fixture.refresh().await.0, StatusCode::OK);
+    assert_route_matrix(
+        &fixture,
+        &cases,
+        Some(&fixture.token),
+        Some(stale_protocol),
+        StatusCode::CONFLICT,
+        "sync protocol upgrade required",
+        "protocol",
+    )
+    .await;
+}
+
+async fn assert_route_matrix(
+    fixture: &Fixture,
+    cases: &[(Method, String, Value)],
+    bearer_token: Option<&str>,
+    protocol_version: Option<u16>,
+    expected_status: StatusCode,
+    expected_error: &str,
+    gate: &str,
+) {
     for (method, path, body) in cases {
         let body = if body.is_null() {
             Body::empty()
         } else {
-            Body::from(serde_json::to_vec(&body).unwrap())
+            Body::from(serde_json::to_vec(body).unwrap())
         };
-        let (status, response) = fixture.request(method, &path, body).await;
-        assert_eq!(status, StatusCode::PAYMENT_REQUIRED, "{path}");
-        assert_eq!(response, json!({"error": "entitlement_required"}), "{path}");
+        let (status, response) = fixture
+            .request_with_policy_headers(method.clone(), path, body, bearer_token, protocol_version)
+            .await;
+        assert_eq!(status, expected_status, "{gate}: {path}");
+        assert_eq!(response, json!({"error": expected_error}), "{gate}: {path}");
     }
 }
 
