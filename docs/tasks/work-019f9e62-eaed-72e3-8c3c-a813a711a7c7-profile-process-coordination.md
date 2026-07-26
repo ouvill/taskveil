@@ -1,7 +1,7 @@
 ---
 id: 019f9e62-eaed-72e3-8c3c-a813a711a7c7
 title: Shared profile process coordination
-status: active
+status: done
 lane: critical
 milestone: maintenance
 ---
@@ -132,41 +132,41 @@ OS別fail-closed契約は未確定である。本work itemはこれらを
 
 ## 6. 受け入れ基準
 
-- [ ] 同一profileへのprocess-local / OS lock順序が全call siteで一貫している。
-- [ ] auth、migration、Device Key rotation中は別processのprofile operationが開始されない。
-- [ ] stale `Anonymous` instanceがaccount bind後にoutboxなしのdomain mutationを
+- [x] 同一profileへのprocess-local / OS lock順序が全call siteで一貫している。
+- [x] auth、migration、Device Key rotation中は別processのprofile operationが開始されない。
+- [x] stale `Anonymous` instanceがaccount bind後にoutboxなしのdomain mutationを
       commitできない。
-- [ ] stale `Ready`、Tenant key、device ID、DB keyがruntime epochまたは
+- [x] stale `Ready`、Tenant key、device ID、DB keyがruntime epochまたは
       capsule generation変更後に使用されない。
-- [ ] account/device bindingとTenant Root Key cacheの変更が`runtime_epoch`と同じ
+- [x] account/device bindingとTenant Root Key cacheの変更が`runtime_epoch`と同じ
       transactionで発行され、device再束縛がepoch発行前にlocal HLC、quarantine、
       全outbox head、account device markerを原子的に更新する。
-- [ ] 同一profileのsync leaseを同時に取得できるprocessは1つだけである。
-- [ ] lease takeover後、旧ownerはACK、cursor、pull apply、full-resync stateを
+- [x] 同一profileのsync leaseを同時に取得できるprocessは1つだけである。
+- [x] lease takeover後、旧ownerはACK、cursor、pull apply、full-resync stateを
       commitできない。
-- [ ] owner process強制終了後、lockfile削除や手動修復なしにprofileを再openできる。
-- [ ] SQLiteは未commit transactionをrollbackし、pending capsule / credentialは
+- [x] owner process強制終了後、lockfile削除や手動修復なしにprofileを再openできる。
+- [x] SQLiteは未commit transactionをrollbackし、pending capsule / credentialは
       既存のdurable recovery手順で収束する。
-- [ ] 同じprofileを相対path、symlink / junction、case差で指定しても同じlockへ収束する。
-- [ ] 異なるprofileは別processから並行利用できる。
-- [ ] OS lockが安全に利用できないproduction環境でSQLite-only動作へ降格しない。
-- [ ] error、log、lock metadataへsecret、credential、復号済みcontent、生profile pathを
+- [x] 同じprofileを相対path、symlink / junction、case差で指定しても同じlockへ収束する。
+- [x] 異なるprofileは別processから並行利用できる。
+- [x] OS lockが安全に利用できないproduction環境でSQLite-only動作へ降格しない。
+- [x] error、log、lock metadataへsecret、credential、復号済みcontent、生profile pathを
       出力しない。
-- [ ] CLI / MCPのshared profile実接続がdesktop全対象OSの実process test完了まで
+- [x] CLI / MCPのshared profile実接続がdesktop全対象OSの実process test完了まで
       release gateで拒否される。
-- [ ] barrierで同期する実child process testが、stale owner、crash、lease expiry、
+- [x] barrierで同期する実child process testが、stale owner、crash、lease expiry、
       同時mutation / sync、path aliasをsleep依存なしで再現する。
-- [ ] `cargo fmt --all -- --check`
-- [ ] `cargo clippy --workspace -- -D warnings`
-- [ ] `cargo test --workspace`
-- [ ] `cd app && flutter analyze`（Flutter / FRB変更時）
-- [ ] `cd app/rust && env CARGO_TARGET_DIR=target cargo build --release` の後
+- [x] `cargo fmt --all -- --check`
+- [x] `cargo clippy --workspace -- -D warnings`
+- [x] `cargo test --workspace`
+- [x] `cd app && flutter analyze`（Flutter / FRB変更時）
+- [x] `cd app/rust && env CARGO_TARGET_DIR=target cargo build --release` の後
       `cd app && flutter test`（Flutter / FRB変更時）
-- [ ] `sh app/tool/check_hardcoded_strings.sh`（Flutter変更時）
-- [ ] `sh app/tool/check_client_boundaries.sh`
-- [ ] `sh app/tool/test_client_boundaries.sh`
-- [ ] `git diff --check`
-- [ ] 独立検証でP1 / P2相当の未解決指摘がない。
+- [x] `sh app/tool/check_hardcoded_strings.sh`（Flutter変更時）
+- [x] `sh app/tool/check_client_boundaries.sh`
+- [x] `sh app/tool/test_client_boundaries.sh`
+- [x] `git diff --check`
+- [x] 独立検証でP1 / P2相当の未解決指摘がない。
 
 ## 7. 制約・注意事項
 
@@ -239,12 +239,13 @@ OS別fail-closed契約は未確定である。本work itemはこれらを
 - Commit subject: `feat(client): coordinate shared profiles across processes`
 - 未解決: macOS hostからのWindows cross compileはWindows SDK header不在により
   `ring` / `aws-lc-sys`で停止するため、Windows固有testの実行確認はGitHub Actionsの
-  `windows-2025` matrixを正本とする。platform matrixの最終結果は公開可能な
-  統合branchのCIで確定する。
+  `windows-2025` matrixを正本とした。CI run `30206666985`でLinux、macOS、
+  Windowsのprofile coordination jobがすべて成功し、Windowsでは全client test、
+  実process acceptance test、継承DACL acceptance testが成功した。
 
 ### 独立検証
 
-- 判定: code review APPROVE、Windows CI再検証待ち
+- 判定: APPROVE
 - 根拠: 独立レビューのP0 / P1指摘はなく、残ったP2 2件へ実process testと
   request body limitを追加した。統合担当が`origin/main...2d8e257`の差分と
   security ancestryを再確認し、login privacy commitを含まないcurrent main直上の
@@ -263,7 +264,11 @@ OS別fail-closed契約は未確定である。本work itemはこれらを
   untrusted writer拒否は維持した。さらに、effective access確認へ渡すsecurity
   descriptorをowner + DACLだけで取得していたため、必須のgroup SIDがなく
   `AccessCheck`が`ERROR_INVALID_SECURITY_DESCR`を返す原因を特定した。
-  `GROUP_SECURITY_INFORMATION`を含む完全なdescriptorへ修正し、Windows platform
-  matrixを再検証する。runner tempには`BUILTIN\Users`へのchild create / write ACEも
+  `GROUP_SECURITY_INFORMATION`を含む完全なdescriptorへ修正した。runner tempには
+  `BUILTIN\Users`へのchild create / write ACEも
   明示的に残っていたため、製品側で許容せずWindows CI fixtureからgrantを除去した。
+  最終再検証では`GetExplicitEntriesFromAclW`が合法な0件・NULLを返す場合にRustの
+  `from_raw_parts`へNULLを渡していた未定義動作も特定し、0件を明示的な空sliceとして
+  扱うよう修正した。CI run `30206666985`のLinux、macOS、Windows各platform jobは
+  すべて成功し、P1 / P2相当の未解決指摘がないことを確認した。
 - 検証者: 独立review agent、Codex root orchestrator
