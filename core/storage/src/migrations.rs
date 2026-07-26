@@ -40,9 +40,9 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../migrations/0005_settings_metadata_boundary.sql"),
     },
     Migration {
-        version: 5,
+        version: 6,
         name: "reminder_notification_reconciliation",
-        sql: include_str!("../migrations/0005_reminder_notification_reconciliation.sql"),
+        sql: include_str!("../migrations/0006_reminder_notification_reconciliation.sql"),
     },
 ];
 
@@ -670,14 +670,14 @@ mod tests {
     }
 
     #[test]
-    fn reminder_notification_reconciliation_migrates_v4_reminders_with_stable_mapping() {
+    fn reminder_notification_reconciliation_migrates_v5_reminders_with_stable_mapping() {
         let file = NamedTempFile::new().unwrap();
         let mut connection = open_raw(file.path());
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .unwrap();
         transaction.execute_batch(CREATE_MIGRATION_TABLE).unwrap();
-        for migration in &MIGRATIONS[..4] {
+        for migration in &MIGRATIONS[..5] {
             transaction.execute_batch(migration.sql).unwrap();
             transaction
                 .execute(
@@ -877,11 +877,6 @@ mod tests {
             },
             Migration {
                 version: 4,
-                name: "boundary",
-                sql: "CREATE TABLE boundary (id INTEGER);",
-            },
-            Migration {
-                version: 5,
                 name: "failing",
                 sql: "CREATE TABLE partial (id INTEGER);
                       SELECT value FROM missing_failure_injection_table;",
@@ -893,7 +888,7 @@ mod tests {
         assert!(matches!(
             result,
             Err(StorageError::MigrationFailed {
-                target_version: 5,
+                target_version: 4,
                 migration: "failing",
                 ..
             })

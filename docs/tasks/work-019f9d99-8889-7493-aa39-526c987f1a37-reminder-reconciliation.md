@@ -13,8 +13,10 @@ UI操作全体が失敗扱いになり、DBとOS通知の状態が恒久的に�
 起動時reconcileはreminderごとに全list / taskを探索して`runApp`前に待機し、
 platform notification IDはUUIDの31bit hashだけで衝突を検出しない。
 
-本作業はsettings boundaryまで統合したcommit
-`b07b0028c9a590a07afd7f1427dc959f48617248`を基点とする。DBを唯一の正本、
+初回実装はsettings boundaryまで統合したcommit
+`b07b0028c9a590a07afd7f1427dc959f48617248`を基点とし、公開前の統合時に
+settings boundaryを含む`18ad3c94456ae7a1ae19219753f9016624eb7ecf`上へ
+Issue #57固有の3コミットだけを再構成した。DBを唯一の正本、
 OSローカル通知を再構築可能なderived stateとして扱い、domain mutationと通知pluginの
 可用性を分離する。
 
@@ -51,7 +53,7 @@ OSローカル通知を再構築可能なderived stateとして扱い、domain m
 
 ### やること
 
-- local migration `0005`を追加し、platform ID mapping、notification command outbox、
+- local migration `0006`を追加し、platform ID mapping、notification command outbox、
   reminder / task mutation triggerを導入する。
 - SQLiteの一意な正整数allocatorをplatform IDへ使用し、hash衝突を設計上排除する。
 - 起動時にDB正本からschedule / cancelのdesired stateを再構築する。
@@ -66,12 +68,12 @@ OSローカル通知を再構築可能なderived stateとして扱い、domain m
 
 - server push通知、APNs / FCM、reminder同期protocolの追加。
 - 通知本文へtask title / note等のコンテンツを追加すること。
-- 適用済み`0001`〜`0004` migrationの変更。
+- 適用済み`0001`〜`0005` migrationの変更。
 - private repository、push、PR作成、main / candidateへのmerge。
 
 ## 5. 実装手順
 
-1. v5 migrationへ永続mapping、versioned command、mutation triggerを定義する。
+1. v6 migrationへ永続mapping、versioned command、mutation triggerを定義する。
 2. migration / repository testで既存reminder移行、JOIN、ID永続性、占有ID、
    stale ACKを固定する。
 3. client / FRBへprepare、batch list、ACK APIとtyped DTOを追加する。
@@ -82,7 +84,7 @@ OSローカル通知を再構築可能なderived stateとして扱い、domain m
 
 ## 6. 受け入れ基準
 
-- [x] `LATEST_MIGRATION_VERSION`が5で、`0001`〜`0004`が不変である。
+- [x] `LATEST_MIGRATION_VERSION`が6で、`0001`〜`0005`が不変である。
 - [x] reminder作成・更新・snoozeはschedule、削除・task close / deleteはcancel、
       reopen / list移動はschedule commandを同じDB transactionで記録する。
 - [x] platform IDはDBに永続化され、正整数・一意で、占有済みIDを再利用しない。
@@ -122,8 +124,9 @@ OSローカル通知を再構築可能なderived stateとして扱い、domain m
 
 ### 実装
 
-- Parent commitは`b07b0028c9a590a07afd7f1427dc959f48617248`。既存
-  `0001`〜`0004`を変更せず、forward migration `0005`を追加した。
+- 公開統合時のparent commitは
+  `18ad3c94456ae7a1ae19219753f9016624eb7ecf`。既存`0001`〜`0005`を
+  変更せず、forward migration `0006`を追加した。
 - `reminder_notification_ids`でUUIDから正のsigned 32bit platform IDへの永続一意
   mappingとcommand revisionを管理する。cancel ACK後はmappingをretired reservation
   として保持し、ID再利用と起動ごとの不要なcancel再生成を防ぐ。
@@ -144,12 +147,13 @@ OSローカル通知を再構築可能なderived stateとして扱い、domain m
   鍵、token等を含めない。旧3-ID payloadは既存navigation / snooze / cleanupのdecode互換
   に限定した。
 - Rust client / FRBへprepare、batch list、revision ACKのtyped APIを追加し、FRB
-  2.12.0のconfig同値生成を行った。正規config-file commandはsandbox内のFlutter SDK
-  cache書込制約により実行できず、独立検証側で生成差分を再確認する。
+  2.12.0のconfig同値生成を行った。公開統合時は正規の
+  `flutter_rust_bridge_codegen generate --config-file flutter_rust_bridge.yaml`を
+  sandbox外で再実行し、FRB生成物に追加差分がないことを確認した。
 
 ### テスト
 
-- migration v4→v5、JOIN context、占有済みplatform ID、mappingの再open後永続性、
+- migration v5→v6、JOIN context、占有済みplatform ID、mappingの再open後永続性、
   stale ACK、cancel後retire、起動時再構築、task close / reopenをRust testで固定した。
 - Flutter testへschedule失敗、cancel失敗、service restart、DB-first provider、
   permission denial、task lifecycle、orphan / 非canonical ID cleanup、snooze、
@@ -157,12 +161,16 @@ OSローカル通知を再構築可能なderived stateとして扱い、domain m
   同一service内でのbackoff回復、retry上限、background cancel / foreground resume、
   dispose、permission成功、最小payloadと旧3-ID decode互換を追加した。
 - `cargo fmt --all -- --check`: PASS。
-- `cargo clippy --workspace -- -D warnings`: PASS。
-- `cargo test -p taskveil-storage`: 93件PASS、既存performance test 1件のみintentional
+- `cargo clippy --workspace --all-targets -- -D warnings`: PASS。
+- `cargo test -p taskveil-storage`: 96件PASS、既存performance test 1件のみintentional
   ignore。
-- `cargo test --workspace`: sandbox外の独立再実行で全件PASS
-  （storage 93件 + performance 1件intentional ignore、client 123件、
-  sync 103件、server unit / integration、bridge 3件を含む）。
+- `cargo test -p taskveil-client`: sandbox外で125件PASS。sandbox内初回の3件は
+  localhost bind拒否だけで失敗し、同一試験をsandbox外で再実行して成功した。
+- `cargo test --workspace -- --test-threads=1`: sandbox外で全件PASS
+  （storage 96件 + performance 1件intentional ignore、client 125件、
+  sync 98件、server unit / Docker・Postgres integration、bridge 3件を含む）。
+  通常のworkspace並列実行では既存client testが一度だけSQLCipher初期化エラーになったが、
+  単独再実行と直列workspace再実行では再現せず成功した。
 - `env CARGO_TARGET_DIR=target cargo build --release`（`app/rust`）: PASS。
 - Dart analyzerと`flutter analyze`: PASS。
 - 初回の`flutter test test/reminder_notifications_test.dart`: 10件PASS。providerの
@@ -170,17 +178,19 @@ OSローカル通知を再構築可能なderived stateとして扱い、domain m
   domain mutationをbridgeへ直接commitしてからservice failureを1回注入する。
   独立レビュー修正後は同一service回復等を加えた15件とAndroid通知3件、合計18件が
   最終差分でPASSした。
-- 独立レビュー修正後の`flutter test --no-pub`: 305件PASS、visual QA harness
+- 公開統合時の`flutter test --no-pub`: 306件PASS、visual QA harness
   1件intentional skip。
-- config同値の`flutter_rust_bridge_codegen generate`を独立再実行し、生成差分なし。
+- 正規configの`flutter_rust_bridge_codegen generate`を再実行し、FRB生成差分なし。
 - hardcoded strings、client boundary、boundary fixtureの3 scriptsと
   `git diff --check`: PASS。
-- `0001`〜`0004`に対するbase commitとの差分がないことを確認した。
+- `0001`〜`0005`に対する公開統合parentとの差分がないことを確認した。
 
 ### Commit
 
-- `85fe508 fix: reconcile reminders from durable state`
-- 独立レビュー修正と本完了報告を含むfollow-up commit。
+- `e46d72e fix: reconcile reminders from durable state`
+- `db70ca6 fix: retry reminder reconciliation in foreground`
+- `1351eff docs: record reminder reconciliation full test`
+- 公開統合時のmigration連番修正と本完了報告を含むfollow-up commit。
 
 ### 未解決事項・独立検証
 
@@ -193,4 +203,9 @@ OSローカル通知を再構築可能なderived stateとして扱い、domain m
   hardcoded strings、client boundary、boundary fixtureもPASSした。初回統合HEADでは
   full Flutter 300件PASS、visual QA 1件intentional skip、workspace Rust全件PASSを確認済み。
   最終修正はRust / FRB生成物を変更していない。
+- 公開統合レビューで、Issue #56のsettings migrationが先にv5を使用したため
+  reminder migrationとversionが重複するP1を検出した。reminderをforward migration v6へ
+  移し、v5→v6 upgrade test、連続manifest、既存`0001`〜`0005`不変を再検証した。
+  同じ旧version前提を持っていたrollback fixtureも現行mainの正しい4-version fixtureへ
+  戻した。修正後の残存P0 / P1 / P2 / P3は0件。
 - 判定: 指摘3件は解消され、Issue #57の受け入れ基準に対して合格。

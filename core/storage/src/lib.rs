@@ -82,7 +82,7 @@ pub use transaction::{OwnedSqliteWriteTx, SqliteWriteTx};
 use migrations::ensure_schema_at_version;
 use migrations::{ensure_schema, MIGRATIONS};
 
-pub const LATEST_MIGRATION_VERSION: i32 = 5;
+pub const LATEST_MIGRATION_VERSION: i32 = 6;
 const LOCAL_DB_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[cfg(test)]
