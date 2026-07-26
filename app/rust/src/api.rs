@@ -81,49 +81,31 @@ impl BridgeErrorDto {
 
 impl From<ClientError> for BridgeErrorDto {
     fn from(error: ClientError) -> Self {
-        let code = match error.kind() {
-            ClientErrorKind::InvalidInput => BridgeErrorCodeDto::InvalidInput,
-            ClientErrorKind::NotFound => BridgeErrorCodeDto::NotFound,
-            ClientErrorKind::Conflict => BridgeErrorCodeDto::Conflict,
-            ClientErrorKind::Unauthorized => BridgeErrorCodeDto::Unauthorized,
-            ClientErrorKind::CredentialUnavailable => BridgeErrorCodeDto::CredentialUnavailable,
-            ClientErrorKind::AccountBoundUnavailable => BridgeErrorCodeDto::AccountBoundUnavailable,
-            ClientErrorKind::EntitlementRequired => BridgeErrorCodeDto::EntitlementRequired,
-            ClientErrorKind::UpgradeRequired => BridgeErrorCodeDto::UpgradeRequired,
-            ClientErrorKind::Busy => BridgeErrorCodeDto::Busy,
-            ClientErrorKind::LeaseLost => BridgeErrorCodeDto::LeaseLost,
-            ClientErrorKind::ClockSkew => BridgeErrorCodeDto::ClockSkew,
-            ClientErrorKind::CryptoUnavailable => BridgeErrorCodeDto::CryptoUnavailable,
-            ClientErrorKind::StorageFailure => BridgeErrorCodeDto::StorageFailure,
-            ClientErrorKind::SyncFailure => BridgeErrorCodeDto::SyncFailure,
-            ClientErrorKind::Internal => BridgeErrorCodeDto::Internal,
-        };
-        Self::new(code, error.retryable())
+        SyncFailure::from(error.kind()).into()
     }
 }
 
 impl From<SyncFailure> for BridgeErrorDto {
     fn from(error: SyncFailure) -> Self {
-        match error {
-            SyncFailure::Unauthorized => Self::new(BridgeErrorCodeDto::Unauthorized, false),
-            SyncFailure::UpgradeRequired => Self::new(BridgeErrorCodeDto::UpgradeRequired, false),
-            SyncFailure::EntitlementRequired => {
-                Self::new(BridgeErrorCodeDto::EntitlementRequired, false)
-            }
-            SyncFailure::SyncLeaseBusy
-            | SyncFailure::DatabaseBusy
-            | SyncFailure::ProfileBusy
-            | SyncFailure::CredentialBusy => Self::new(BridgeErrorCodeDto::Busy, true),
-            SyncFailure::LeaseLost => Self::new(BridgeErrorCodeDto::LeaseLost, true),
-            SyncFailure::ClockSkewRetryable => Self::new(BridgeErrorCodeDto::ClockSkew, true),
-            SyncFailure::CredentialUnavailable => {
-                Self::new(BridgeErrorCodeDto::CredentialUnavailable, false)
-            }
-            SyncFailure::AccountBoundUnavailable => {
-                Self::new(BridgeErrorCodeDto::AccountBoundUnavailable, false)
-            }
-            SyncFailure::SyncFailed => Self::new(BridgeErrorCodeDto::SyncFailure, true),
-        }
+        let kind = error.kind();
+        let code = match error {
+            SyncFailure::InvalidInput => BridgeErrorCodeDto::InvalidInput,
+            SyncFailure::NotFound => BridgeErrorCodeDto::NotFound,
+            SyncFailure::Conflict => BridgeErrorCodeDto::Conflict,
+            SyncFailure::Unauthorized => BridgeErrorCodeDto::Unauthorized,
+            SyncFailure::CredentialUnavailable => BridgeErrorCodeDto::CredentialUnavailable,
+            SyncFailure::AccountBoundUnavailable => BridgeErrorCodeDto::AccountBoundUnavailable,
+            SyncFailure::EntitlementRequired => BridgeErrorCodeDto::EntitlementRequired,
+            SyncFailure::UpgradeRequired => BridgeErrorCodeDto::UpgradeRequired,
+            SyncFailure::Busy => BridgeErrorCodeDto::Busy,
+            SyncFailure::LeaseLost => BridgeErrorCodeDto::LeaseLost,
+            SyncFailure::ClockSkew => BridgeErrorCodeDto::ClockSkew,
+            SyncFailure::CryptoUnavailable => BridgeErrorCodeDto::CryptoUnavailable,
+            SyncFailure::StorageFailure => BridgeErrorCodeDto::StorageFailure,
+            SyncFailure::SyncFailure => BridgeErrorCodeDto::SyncFailure,
+            SyncFailure::Internal => BridgeErrorCodeDto::Internal,
+        };
+        Self::new(code, kind.retryable())
     }
 }
 
@@ -1185,6 +1167,34 @@ mod tests {
             let mapped = BridgeErrorDto::from(source);
             assert_eq!(mapped.code, code);
             assert_eq!(mapped.retryable, retryable);
+            assert!(mapped.arguments.is_empty());
+        }
+    }
+
+    #[test]
+    fn every_core_kind_maps_identically_for_direct_and_sync_status_errors() {
+        let expected = [
+            BridgeErrorCodeDto::InvalidInput,
+            BridgeErrorCodeDto::NotFound,
+            BridgeErrorCodeDto::Conflict,
+            BridgeErrorCodeDto::Unauthorized,
+            BridgeErrorCodeDto::CredentialUnavailable,
+            BridgeErrorCodeDto::AccountBoundUnavailable,
+            BridgeErrorCodeDto::EntitlementRequired,
+            BridgeErrorCodeDto::UpgradeRequired,
+            BridgeErrorCodeDto::Busy,
+            BridgeErrorCodeDto::LeaseLost,
+            BridgeErrorCodeDto::ClockSkew,
+            BridgeErrorCodeDto::CryptoUnavailable,
+            BridgeErrorCodeDto::StorageFailure,
+            BridgeErrorCodeDto::SyncFailure,
+            BridgeErrorCodeDto::Internal,
+        ];
+
+        for (kind, expected_code) in ClientErrorKind::ALL.into_iter().zip(expected) {
+            let mapped = BridgeErrorDto::from(SyncFailure::from(kind));
+            assert_eq!(mapped.code, expected_code);
+            assert_eq!(mapped.retryable, kind.retryable());
             assert!(mapped.arguments.is_empty());
         }
     }

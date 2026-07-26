@@ -37,6 +37,134 @@ Finder _accountScrollable() => find.byWidgetPredicate(
       widget is Scrollable && widget.axisDirection == AxisDirection.down,
 );
 
+const _typedFailure = BridgeErrorDto(
+  code: BridgeErrorCodeDto.accountBoundUnavailable,
+  arguments: [],
+  retryable: false,
+);
+
+enum _AccountFailurePoint {
+  accountLoad,
+  serverUrlLoad,
+  serverUrlSave,
+  register,
+  login,
+  logout,
+  organizationSafety,
+  syncStatus,
+}
+
+class _FailingAccountBridgeService extends FakeBridgeService {
+  _FailingAccountBridgeService(this.point, {this.failure = _typedFailure});
+
+  final _AccountFailurePoint point;
+  final Object failure;
+
+  Never _fail() => throw failure;
+
+  @override
+  Future<AccountSessionStateDto> getAccountSessionState() async {
+    if (point == _AccountFailurePoint.accountLoad) _fail();
+    return super.getAccountSessionState();
+  }
+
+  @override
+  Future<String> getSyncServerUrl() async {
+    if (point == _AccountFailurePoint.serverUrlLoad) _fail();
+    return super.getSyncServerUrl();
+  }
+
+  @override
+  Future<void> setSyncServerUrl({required String serverUrl}) async {
+    if (point == _AccountFailurePoint.serverUrlSave) _fail();
+    return super.setSyncServerUrl(serverUrl: serverUrl);
+  }
+
+  @override
+  Future<AccountAuthResultDto> accountRegister({
+    required String email,
+    required String password,
+    String? serverUrl,
+    String? deviceName,
+  }) async {
+    if (point == _AccountFailurePoint.register) _fail();
+    return super.accountRegister(
+      email: email,
+      password: password,
+      serverUrl: serverUrl,
+      deviceName: deviceName,
+    );
+  }
+
+  @override
+  Future<AccountAuthResultDto> accountLogin({
+    required String email,
+    required String password,
+    String? serverUrl,
+    String? deviceName,
+  }) async {
+    if (point == _AccountFailurePoint.login) _fail();
+    return super.accountLogin(
+      email: email,
+      password: password,
+      serverUrl: serverUrl,
+      deviceName: deviceName,
+    );
+  }
+
+  @override
+  Future<void> accountLogout() async {
+    if (point == _AccountFailurePoint.logout) _fail();
+    return super.accountLogout();
+  }
+
+  @override
+  Future<OrganizationSafetyStateDto> organizationSafetyNumber({
+    required String tenantId,
+    required String memberUserId,
+  }) async {
+    if (point == _AccountFailurePoint.organizationSafety) _fail();
+    return super.organizationSafetyNumber(
+      tenantId: tenantId,
+      memberUserId: memberUserId,
+    );
+  }
+
+  @override
+  Future<SyncStatusDto> getSyncStatus() async {
+    if (point == _AccountFailurePoint.syncStatus) {
+      return _syncFailureStatus;
+    }
+    return super.getSyncStatus();
+  }
+
+  @override
+  Future<SyncStatusDto> syncNow() async {
+    if (point == _AccountFailurePoint.syncStatus) {
+      return _syncFailureStatus;
+    }
+    return super.syncNow();
+  }
+
+  static const _syncFailureStatus = SyncStatusDto(
+    loggedIn: true,
+    running: false,
+    lastError: _typedFailure,
+    pushedCount: 0,
+    pushAckedCount: 0,
+    pushSupersededCount: 0,
+    pulledCount: 0,
+    appliedCount: 0,
+    deletedCount: 0,
+    decryptFailedCount: 0,
+    repushCount: 0,
+    missingKeyQuarantinedCount: 0,
+    corruptionQuarantinedCount: 0,
+    resolvedQuarantineCount: 0,
+    upgradeRequired: false,
+  );
+}
+
 void main() {
   testWidgets('shows signed-out account form', (tester) async {
     final fake = FakeBridgeService();
@@ -341,4 +469,158 @@ void main() {
 
     expect(fake.organizationSafetyConfirmCalls, 1);
   });
+
+  final typedFailureCases =
+      <
+        ({
+          String name,
+          _AccountFailurePoint point,
+          bool signedIn,
+          Future<void> Function(WidgetTester tester) act,
+        })
+      >[
+        (
+          name: 'account load',
+          point: _AccountFailurePoint.accountLoad,
+          signedIn: false,
+          act: (_) async {},
+        ),
+        (
+          name: 'server URL load',
+          point: _AccountFailurePoint.serverUrlLoad,
+          signedIn: false,
+          act: (_) async {},
+        ),
+        (
+          name: 'server URL save',
+          point: _AccountFailurePoint.serverUrlSave,
+          signedIn: false,
+          act: (tester) async {
+            await tester.enterText(
+              find.byType(TextField).last,
+              'http://127.0.0.1:4000',
+            );
+            await tester.scrollUntilVisible(
+              find.byTooltip('Save server URL'),
+              160,
+              scrollable: _accountScrollable(),
+            );
+            await tester.tap(find.byTooltip('Save server URL'));
+          },
+        ),
+        (
+          name: 'registration',
+          point: _AccountFailurePoint.register,
+          signedIn: false,
+          act: (tester) async {
+            await tester.tap(find.text('Register'));
+            await tester.pumpAndSettle();
+            await _enterCredentials(tester);
+            await tester.tap(
+              find.widgetWithText(FilledButton, 'Register').last,
+            );
+          },
+        ),
+        (
+          name: 'login',
+          point: _AccountFailurePoint.login,
+          signedIn: false,
+          act: (tester) async {
+            await _enterCredentials(tester);
+            await tester.tap(find.widgetWithText(FilledButton, 'Log in').last);
+          },
+        ),
+        (
+          name: 'logout',
+          point: _AccountFailurePoint.logout,
+          signedIn: true,
+          act: (tester) async {
+            await tester.scrollUntilVisible(
+              find.byKey(const ValueKey('account-logout')),
+              160,
+              scrollable: _accountScrollable(),
+            );
+            await tester.tap(find.byKey(const ValueKey('account-logout')));
+          },
+        ),
+        (
+          name: 'organization safety',
+          point: _AccountFailurePoint.organizationSafety,
+          signedIn: true,
+          act: (tester) async {
+            await tester.tap(
+              find.byKey(const ValueKey('organization-safety-open')),
+            );
+            await tester.pumpAndSettle();
+            await tester.enterText(
+              find.byKey(const ValueKey('organization-tenant-id')),
+              'tenant',
+            );
+            await tester.enterText(
+              find.byKey(const ValueKey('organization-member-id')),
+              'member',
+            );
+            await tester.tap(
+              find.byKey(const ValueKey('organization-safety-load')),
+            );
+          },
+        ),
+        (
+          name: 'sync status',
+          point: _AccountFailurePoint.syncStatus,
+          signedIn: true,
+          act: (_) async {},
+        ),
+      ];
+
+  for (final testCase in typedFailureCases) {
+    testWidgets('${testCase.name} localizes the typed bridge failure', (
+      tester,
+    ) async {
+      final fake = _FailingAccountBridgeService(testCase.point);
+      if (testCase.signedIn) {
+        await fake.accountLogin(
+          email: 'alice@example.com',
+          password: 'correct password',
+        );
+      }
+      await _pumpAccountScreen(tester, fake);
+      await testCase.act(tester);
+      await tester.pumpAndSettle();
+
+      final text = tester
+          .widgetList<Text>(find.byType(Text))
+          .map((widget) => widget.data)
+          .whereType<String>();
+      expect(
+        text,
+        contains(
+          'This device cannot access the account encryption keys. '
+          'Sign in again.',
+        ),
+        reason: testCase.name,
+      );
+    });
+  }
+
+  testWidgets(
+    'unknown account failure is fixed internal copy without payload',
+    (tester) async {
+      const secret = '/private/profile/alice/taskveil.db?token=secret';
+      final fake = _FailingAccountBridgeService(
+        _AccountFailurePoint.login,
+        failure: StateError(secret),
+      );
+      await _pumpAccountScreen(tester, fake);
+      await _enterCredentials(tester);
+      await tester.tap(find.widgetWithText(FilledButton, 'Log in').last);
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('Taskveil could not complete the operation.'),
+        findsOneWidget,
+      );
+      expect(find.textContaining(secret), findsNothing);
+    },
+  );
 }

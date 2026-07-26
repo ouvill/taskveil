@@ -10,6 +10,7 @@ import 'package:go_router/go_router.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:taskveil/src/core/bridge_service.dart';
 import 'package:taskveil/src/core/providers.dart';
+import 'package:taskveil/src/core/safe_startup_log.dart';
 import 'package:taskveil/src/generated/l10n/app_localizations.dart';
 import 'package:taskveil/src/notifications/reminder_notifications.dart';
 import 'package:taskveil/src/router.dart';
@@ -54,9 +55,7 @@ Future<void> main() async {
       await notificationService.initialize(notificationContent);
       reminderNotificationService = notificationService;
     } catch (error) {
-      debugPrint(
-        'Taskveil reminder notification initialization failed: $error',
-      );
+      logStartupFailure(StartupFailureEvent.reminderNotifications, error);
     }
     timerNotificationService = TimerNotificationService(
       FlutterLocalTimerNotificationGateway(plugin: localNotificationsPlugin),
@@ -69,13 +68,11 @@ Future<void> main() async {
         ),
       );
     } catch (error) {
-      debugPrint('Taskveil timer notification initialization failed: $error');
+      logStartupFailure(StartupFailureEvent.timerNotifications, error);
     }
-  } catch (error, stackTrace) {
+  } catch (error) {
     initializationError = error;
-    debugPrint(
-      'Taskveil native core initialization failed: $error\n$stackTrace',
-    );
+    logStartupFailure(StartupFailureEvent.nativeCore, error);
   }
 
   runApp(

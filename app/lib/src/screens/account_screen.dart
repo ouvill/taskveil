@@ -11,6 +11,7 @@ import 'package:taskveil/src/core/bridge_service.dart';
 import 'package:taskveil/src/core/providers.dart';
 import 'package:taskveil/src/generated/l10n/app_localizations.dart';
 import 'package:taskveil/src/rust/api.dart';
+import 'package:taskveil/src/ui/bridge_error_messages.dart';
 import 'package:taskveil/src/ui/states.dart';
 import 'package:taskveil/src/ui/header_actions.dart';
 import 'package:taskveil/src/ui/theme.dart';
@@ -106,6 +107,9 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
     final serverUrlAsync = ref.watch(syncServerUrlProvider);
     final syncStatusAsync = ref.watch(syncStatusProvider);
     final billingAsync = ref.watch(billingProvider);
+    final serverUrlError = serverUrlAsync.hasError
+        ? bridgeErrorMessage(l10n, serverUrlAsync.error!)
+        : null;
 
     serverUrlAsync.whenData((serverUrl) {
       if (_serverUrlController.text.isEmpty) {
@@ -118,7 +122,7 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
         child: accountAsync.when(
           loading: () => const AppLoadingState(),
           error: (error, stackTrace) =>
-              AppErrorState(message: l10n.accountLoadFailed),
+              AppErrorState(message: bridgeErrorMessage(l10n, error)),
           data: (account) {
             if (_restoringAccountFlow) {
               return const AppLoadingState();
@@ -272,6 +276,13 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
                         busy: _busy,
                         onSave: _saveServerUrl,
                       ),
+                      if (serverUrlError != null) ...[
+                        const SizedBox(height: AppSpacing.sm),
+                        Text(
+                          serverUrlError,
+                          style: TextStyle(color: colorScheme.error),
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -293,8 +304,10 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
       await ref
           .read(syncServerUrlProvider.notifier)
           .setServerUrl(_serverUrlController.text.trim());
-    } catch (_) {
-      setState(() => _error = l10n.accountRequestFailed);
+    } catch (error) {
+      if (mounted) {
+        setState(() => _error = bridgeErrorMessage(l10n, error));
+      }
     } finally {
       if (mounted) {
         setState(() => _busy = false);
@@ -358,9 +371,9 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
             break;
         }
       }
-    } catch (_) {
+    } catch (error) {
       if (mounted) {
-        setState(() => _error = l10n.accountRequestFailed);
+        setState(() => _error = bridgeErrorMessage(l10n, error));
       }
     } finally {
       if (mounted) {
@@ -384,9 +397,9 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
       if (mounted) {
         setState(() => _setNextRetryAt(pending.nextRetryAtMs));
       }
-    } catch (_) {
+    } catch (error) {
       if (mounted) {
-        setState(() => _error = l10n.accountRequestFailed);
+        setState(() => _error = bridgeErrorMessage(l10n, error));
       }
     } finally {
       if (mounted) {
@@ -432,9 +445,9 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
           _otpController.clear();
         });
       }
-    } catch (_) {
+    } catch (error) {
       if (mounted) {
-        setState(() => _error = l10n.accountRequestFailed);
+        setState(() => _error = bridgeErrorMessage(l10n, error));
       }
     } finally {
       if (mounted) {
@@ -444,7 +457,11 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
   }
 
   Future<void> _acknowledgeRecoveryKey() async {
-    setState(() => _busy = true);
+    final l10n = AppLocalizations.of(context)!;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
     try {
       await ref.read(accountProvider.notifier).registrationAckRecoveryKey();
       if (mounted) {
@@ -453,6 +470,10 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
           _registrationStep = _RegistrationStep.email;
           _registrationCanCancel = false;
         });
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() => _error = bridgeErrorMessage(l10n, error));
       }
     } finally {
       if (mounted) {
@@ -472,9 +493,9 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
       if (mounted) {
         setState(() => _recoveryKey = null);
       }
-    } catch (_) {
+    } catch (error) {
       if (mounted) {
-        setState(() => _error = l10n.accountRequestFailed);
+        setState(() => _error = bridgeErrorMessage(l10n, error));
       }
     } finally {
       if (mounted) {
@@ -1310,8 +1331,10 @@ class _OrganizationSafetyDialogState extends State<_OrganizationSafetyDialog> {
     });
     try {
       await operation();
-    } catch (_) {
-      if (mounted) setState(() => _error = l10n.organizationSafetyFailed);
+    } catch (error) {
+      if (mounted) {
+        setState(() => _error = bridgeErrorMessage(l10n, error));
+      }
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -1343,13 +1366,18 @@ class _SyncStatusSection extends StatelessWidget {
     final l10n = AppLocalizations.of(context)!;
     final status = syncStatusAsync.value;
     final running = status?.running ?? false;
-    final statusText = switch (status) {
-      null => l10n.accountSyncIdle,
-      SyncStatusDto(loggedIn: false) => l10n.accountSyncNotSignedIn,
-      SyncStatusDto(running: true) => l10n.accountSyncRunning,
-      SyncStatusDto(lastError: _?) => l10n.accountSyncFailed,
-      _ => l10n.accountSyncIdle,
-    };
+    final statusText = syncStatusAsync.hasError
+        ? bridgeErrorMessage(l10n, syncStatusAsync.error!)
+        : switch (status) {
+            null => l10n.accountSyncIdle,
+            SyncStatusDto(loggedIn: false) => l10n.accountSyncNotSignedIn,
+            SyncStatusDto(running: true) => l10n.accountSyncRunning,
+            SyncStatusDto(lastError: final error?) => bridgeErrorMessage(
+              l10n,
+              error,
+            ),
+            _ => l10n.accountSyncIdle,
+          };
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [

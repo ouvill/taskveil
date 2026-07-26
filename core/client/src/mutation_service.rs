@@ -114,6 +114,33 @@ pub enum ClientErrorKind {
     Internal,
 }
 
+impl ClientErrorKind {
+    pub const ALL: [Self; 15] = [
+        Self::InvalidInput,
+        Self::NotFound,
+        Self::Conflict,
+        Self::Unauthorized,
+        Self::CredentialUnavailable,
+        Self::AccountBoundUnavailable,
+        Self::EntitlementRequired,
+        Self::UpgradeRequired,
+        Self::Busy,
+        Self::LeaseLost,
+        Self::ClockSkew,
+        Self::CryptoUnavailable,
+        Self::StorageFailure,
+        Self::SyncFailure,
+        Self::Internal,
+    ];
+
+    pub const fn retryable(self) -> bool {
+        matches!(
+            self,
+            Self::Busy | Self::LeaseLost | Self::ClockSkew | Self::SyncFailure
+        )
+    }
+}
+
 impl ClientError {
     pub fn kind(&self) -> ClientErrorKind {
         match self {
@@ -127,7 +154,6 @@ impl ClientError {
                 | StorageError::DefaultListProtected { .. },
             )
             | Self::ProfileAlreadyBound
-            | Self::ProfileIdentityMismatch
             | Self::ActiveTimerConflict(_) => ClientErrorKind::Conflict,
             Self::Storage(
                 StorageError::ReminderTimeNotFuture
@@ -152,9 +178,9 @@ impl ClientError {
             Self::Storage(_) | Self::Io(_) => ClientErrorKind::StorageFailure,
             Self::Unauthorized => ClientErrorKind::Unauthorized,
             Self::CredentialUnavailable => ClientErrorKind::CredentialUnavailable,
-            Self::AccountBoundUnavailable | Self::IncompleteAccountState => {
-                ClientErrorKind::AccountBoundUnavailable
-            }
+            Self::AccountBoundUnavailable
+            | Self::ProfileIdentityMismatch
+            | Self::IncompleteAccountState => ClientErrorKind::AccountBoundUnavailable,
             Self::EntitlementRequired => ClientErrorKind::EntitlementRequired,
             Self::UpgradeRequired => ClientErrorKind::UpgradeRequired,
             Self::ClockSkewRetryable => ClientErrorKind::ClockSkew,
@@ -173,13 +199,7 @@ impl ClientError {
     }
 
     pub fn retryable(&self) -> bool {
-        matches!(
-            self.kind(),
-            ClientErrorKind::Busy
-                | ClientErrorKind::LeaseLost
-                | ClientErrorKind::ClockSkew
-                | ClientErrorKind::SyncFailure
-        )
+        self.kind().retryable()
     }
 }
 
@@ -595,6 +615,26 @@ mod tests {
             ClientError::AccountRequest.kind(),
             ClientErrorKind::Internal
         );
+        for error in [
+            ClientError::AccountBoundUnavailable,
+            ClientError::ProfileIdentityMismatch,
+            ClientError::IncompleteAccountState,
+        ] {
+            assert_eq!(error.kind(), ClientErrorKind::AccountBoundUnavailable);
+            assert!(!error.retryable());
+        }
+        for kind in ClientErrorKind::ALL {
+            assert_eq!(
+                kind.retryable(),
+                matches!(
+                    kind,
+                    ClientErrorKind::Busy
+                        | ClientErrorKind::LeaseLost
+                        | ClientErrorKind::ClockSkew
+                        | ClientErrorKind::SyncFailure
+                )
+            );
+        }
     }
 
     struct Fixture {

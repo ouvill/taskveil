@@ -460,64 +460,13 @@ fn finish_sync_run(
             state.last_error = None;
             state.last_summary = summary;
         }
-        Err(ClientError::UpgradeRequired) => {
-            state.last_failure_at = Some(timestamp);
-            state.last_error = Some(crate::SyncFailure::UpgradeRequired);
-        }
-        Err(error @ ClientError::Unauthorized) => {
-            state.last_failure_at = Some(timestamp);
-            state.last_error = Some(crate::SyncFailure::Unauthorized);
-            surfaced_error = Some(error);
-        }
-        Err(ClientError::EntitlementRequired) => {
-            state.last_failure_at = Some(timestamp);
-            state.last_error = Some(crate::SyncFailure::EntitlementRequired);
-            surfaced_error = Some(ClientError::EntitlementRequired);
-        }
-        Err(ClientError::SyncLeaseBusy) => {
-            state.last_failure_at = Some(timestamp);
-            state.last_error = Some(crate::SyncFailure::SyncLeaseBusy);
-            surfaced_error = Some(ClientError::SyncLeaseBusy);
-        }
-        Err(ClientError::LeaseLost) => {
-            state.last_failure_at = Some(timestamp);
-            state.last_error = Some(crate::SyncFailure::LeaseLost);
-            surfaced_error = Some(ClientError::LeaseLost);
-        }
-        Err(ClientError::DatabaseBusy) => {
-            state.last_failure_at = Some(timestamp);
-            state.last_error = Some(crate::SyncFailure::DatabaseBusy);
-            surfaced_error = Some(ClientError::DatabaseBusy);
-        }
-        Err(error @ ClientError::ClockSkewRetryable) => {
-            state.last_failure_at = Some(timestamp);
-            state.last_error = Some(crate::SyncFailure::ClockSkewRetryable);
-            surfaced_error = Some(error);
-        }
-        Err(error @ ClientError::CredentialUnavailable) => {
-            state.last_failure_at = Some(timestamp);
-            state.last_error = Some(crate::SyncFailure::CredentialUnavailable);
-            surfaced_error = Some(error);
-        }
-        Err(error @ ClientError::AccountBoundUnavailable) => {
-            state.last_failure_at = Some(timestamp);
-            state.last_error = Some(crate::SyncFailure::AccountBoundUnavailable);
-            surfaced_error = Some(error);
-        }
-        Err(error @ ClientError::ProfileBusy) => {
-            state.last_failure_at = Some(timestamp);
-            state.last_error = Some(crate::SyncFailure::ProfileBusy);
-            surfaced_error = Some(error);
-        }
-        Err(error @ ClientError::Busy) => {
-            state.last_failure_at = Some(timestamp);
-            state.last_error = Some(crate::SyncFailure::CredentialBusy);
-            surfaced_error = Some(error);
-        }
         Err(error) => {
+            let kind = error.kind();
             state.last_failure_at = Some(timestamp);
-            state.last_error = Some(crate::SyncFailure::SyncFailed);
-            surfaced_error = Some(error);
+            state.last_error = Some(kind.into());
+            if kind != crate::ClientErrorKind::UpgradeRequired {
+                surfaced_error = Some(error);
+            }
         }
     }
     (sync_status(logged_in, state), surfaced_error)
@@ -563,8 +512,17 @@ mod tests {
         let (status, surfaced_error) =
             finish_sync_run(true, &mut state, Err(ClientError::AccountRequest), 42);
 
-        assert_eq!(status.last_error, Some(crate::SyncFailure::SyncFailed));
+        assert_eq!(status.last_error, Some(crate::SyncFailure::Internal));
         assert!(matches!(surfaced_error, Some(ClientError::AccountRequest)));
+    }
+
+    #[test]
+    fn every_client_error_kind_has_the_same_sync_status_classification() {
+        for kind in crate::ClientErrorKind::ALL {
+            let failure = crate::SyncFailure::from(kind);
+            assert_eq!(failure.kind(), kind);
+            assert_eq!(failure.kind().retryable(), kind.retryable());
+        }
     }
 
     #[test]

@@ -106,16 +106,63 @@ pub struct SyncStatus {
 /// identifier, or user input. Frontends can safely map it to localized copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncFailure {
+    InvalidInput,
+    NotFound,
+    Conflict,
     Unauthorized,
-    UpgradeRequired,
-    EntitlementRequired,
-    SyncLeaseBusy,
-    LeaseLost,
-    DatabaseBusy,
-    ClockSkewRetryable,
     CredentialUnavailable,
     AccountBoundUnavailable,
-    ProfileBusy,
-    CredentialBusy,
-    SyncFailed,
+    EntitlementRequired,
+    UpgradeRequired,
+    Busy,
+    LeaseLost,
+    ClockSkew,
+    CryptoUnavailable,
+    StorageFailure,
+    SyncFailure,
+    Internal,
+}
+
+impl SyncFailure {
+    pub const fn kind(self) -> crate::ClientErrorKind {
+        match self {
+            Self::InvalidInput => crate::ClientErrorKind::InvalidInput,
+            Self::NotFound => crate::ClientErrorKind::NotFound,
+            Self::Conflict => crate::ClientErrorKind::Conflict,
+            Self::Unauthorized => crate::ClientErrorKind::Unauthorized,
+            Self::CredentialUnavailable => crate::ClientErrorKind::CredentialUnavailable,
+            Self::AccountBoundUnavailable => crate::ClientErrorKind::AccountBoundUnavailable,
+            Self::EntitlementRequired => crate::ClientErrorKind::EntitlementRequired,
+            Self::UpgradeRequired => crate::ClientErrorKind::UpgradeRequired,
+            Self::Busy => crate::ClientErrorKind::Busy,
+            Self::LeaseLost => crate::ClientErrorKind::LeaseLost,
+            Self::ClockSkew => crate::ClientErrorKind::ClockSkew,
+            Self::CryptoUnavailable => crate::ClientErrorKind::CryptoUnavailable,
+            Self::StorageFailure => crate::ClientErrorKind::StorageFailure,
+            Self::SyncFailure => crate::ClientErrorKind::SyncFailure,
+            Self::Internal => crate::ClientErrorKind::Internal,
+        }
+    }
+}
+
+impl From<crate::ClientErrorKind> for SyncFailure {
+    fn from(kind: crate::ClientErrorKind) -> Self {
+        match kind {
+            crate::ClientErrorKind::InvalidInput => Self::InvalidInput,
+            crate::ClientErrorKind::NotFound => Self::NotFound,
+            crate::ClientErrorKind::Conflict => Self::Conflict,
+            crate::ClientErrorKind::Unauthorized => Self::Unauthorized,
+            crate::ClientErrorKind::CredentialUnavailable => Self::CredentialUnavailable,
+            crate::ClientErrorKind::AccountBoundUnavailable => Self::AccountBoundUnavailable,
+            crate::ClientErrorKind::EntitlementRequired => Self::EntitlementRequired,
+            crate::ClientErrorKind::UpgradeRequired => Self::UpgradeRequired,
+            crate::ClientErrorKind::Busy => Self::Busy,
+            crate::ClientErrorKind::LeaseLost => Self::LeaseLost,
+            crate::ClientErrorKind::ClockSkew => Self::ClockSkew,
+            crate::ClientErrorKind::CryptoUnavailable => Self::CryptoUnavailable,
+            crate::ClientErrorKind::StorageFailure => Self::StorageFailure,
+            crate::ClientErrorKind::SyncFailure => Self::SyncFailure,
+            crate::ClientErrorKind::Internal => Self::Internal,
+        }
+    }
 }

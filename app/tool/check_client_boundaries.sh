@@ -9,6 +9,23 @@ fail() {
   status=1
 }
 
+for required_file in \
+  app/rust/Cargo.toml \
+  app/rust/src/api.rs \
+  app/rust/src/api/conversions.rs \
+  cli/Cargo.toml \
+  mcp-server/Cargo.toml; do
+  if [ ! -f "$root/$required_file" ]; then
+    fail "$root/$required_file: required boundary input is missing"
+  fi
+done
+if [ ! -d "$root/app/lib/src" ]; then
+  fail "$root/app/lib/src: required Dart boundary source is missing"
+fi
+if [ "$status" -ne 0 ]; then
+  exit "$status"
+fi
+
 for relative_manifest in cli/Cargo.toml mcp-server/Cargo.toml; do
   manifest="$root/$relative_manifest"
   if grep -E '^[[:space:]]*taskveil-' "$manifest" |
@@ -59,7 +76,7 @@ if grep -En 'pub[[:space:]]+fn[[:space:]]+(get_setting|set_setting)[[:space:]]*\
   fail 'app/rust/src/api.rs: raw string-key settings APIs must not cross the frontend boundary'
 fi
 
-if grep -En 'Result<[^>]*(>|[[:space:]]),[[:space:]]*String>|map_err\([^)]*to_string' \
+if grep -En 'Result<[^;{]*,[[:space:]]*String[[:space:]]*>|map_err\([^)]*to_string' \
   "$root/app/rust/src/api.rs" "$root/app/rust/src/api/conversions.rs" >/dev/null; then
   fail 'app/rust/src: public FRB failures must use BridgeErrorDto, not internal strings'
 fi
