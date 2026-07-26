@@ -3430,6 +3430,21 @@ async fn server_trusted_continuity_binds_proofs_and_guards_all_writes() {
     )
     .await
     .unwrap();
+    let completed_session_count: i64 = query(
+        "SELECT count(*) AS count FROM device_resync_sessions
+         WHERE tenant_id = $1 AND device_id = $2",
+    )
+    .bind(fixture.tenant_id)
+    .bind(fixture.auth.device_id)
+    .fetch_one(&fixture.admin_pool)
+    .await
+    .unwrap()
+    .try_get("count")
+    .unwrap();
+    assert_eq!(
+        completed_session_count, 0,
+        "a successful continuity ACK removes its completed resync session"
+    );
     assert!(sync::push(
         &fixture.pool,
         fixture.tenant_id,
@@ -3458,6 +3473,149 @@ async fn server_trusted_continuity_binds_proofs_and_guards_all_writes() {
     )
     .await
     .is_err());
+}
+
+#[tokio::test]
+async fn long_running_sync_and_resync_restarts_keep_continuity_rows_bounded() {
+    let fixture = Fixture::setup().await;
+    fixture.close_continuity().await;
+    let mut since: i64 = query(
+        "SELECT continuity_seq FROM tenant_device_continuity
+         WHERE tenant_id = $1 AND device_id = $2",
+    )
+    .bind(fixture.tenant_id)
+    .bind(fixture.auth.device_id)
+    .fetch_one(&fixture.admin_pool)
+    .await
+    .unwrap()
+    .try_get("continuity_seq")
+    .unwrap();
+    let mut previous_proof_id = None;
+
+    for counter in 0_u32..64 {
+        let result = sync::push(
+            &fixture.pool,
+            fixture.tenant_id,
+            fixture.auth.clone(),
+            PushRequest {
+                ops: vec![live_op(
+                    Uuid::now_v7(),
+                    None,
+                    fixture.revision_hlc(-2_000, counter),
+                    hlc(-2_100, counter, "bounded-retention"),
+                    b"bounded-retention",
+                )],
+            },
+        )
+        .await
+        .unwrap()
+        .results
+        .pop()
+        .unwrap();
+        assert_eq!(result.status, PushStatus::Accepted);
+
+        let page = sync::pull(
+            &fixture.pool,
+            fixture.tenant_id,
+            fixture.auth.clone(),
+            since,
+            Some(100),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!page.has_more);
+        assert!(page.next_since > since);
+        let proof = page.closure_proof.clone().unwrap();
+        if let Some(previous) = previous_proof_id {
+            assert_ne!(
+                proof.proof_id, previous,
+                "a new high-water replaces the current proof"
+            );
+        }
+        let replayed_page = sync::pull(
+            &fixture.pool,
+            fixture.tenant_id,
+            fixture.auth.clone(),
+            since,
+            Some(100),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            replayed_page.closure_proof.unwrap().proof_id,
+            proof.proof_id,
+            "the same closure reuses its current proof"
+        );
+        let first_ack = sync::ack_continuity(
+            &fixture.pool,
+            fixture.tenant_id,
+            fixture.auth.clone(),
+            taskveil_sync::protocol::ContinuityAckRequest {
+                proof: proof.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        let retried_ack = sync::ack_continuity(
+            &fixture.pool,
+            fixture.tenant_id,
+            fixture.auth.clone(),
+            taskveil_sync::protocol::ContinuityAckRequest {
+                proof: proof.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(retried_ack, first_ack);
+        since = page.next_since;
+        previous_proof_id = Some(proof.proof_id);
+    }
+
+    let proof_count: i64 = query(
+        "SELECT count(*) AS count FROM continuity_closure_proofs
+         WHERE tenant_id = $1 AND device_id = $2",
+    )
+    .bind(fixture.tenant_id)
+    .bind(fixture.auth.device_id)
+    .fetch_one(&fixture.admin_pool)
+    .await
+    .unwrap()
+    .try_get("count")
+    .unwrap();
+    assert_eq!(
+        proof_count, 1,
+        "normal sync frequency must not increase proof retention"
+    );
+
+    let mut latest_generation = 0;
+    for _ in 0..64 {
+        latest_generation = sync::begin_full_resync(
+            &fixture.pool,
+            &fixture.resync_tokens,
+            fixture.tenant_id,
+            fixture.auth.clone(),
+        )
+        .await
+        .unwrap()
+        .generation;
+    }
+    let session = query(
+        "SELECT count(*) AS count, max(generation) AS generation
+         FROM device_resync_sessions
+         WHERE tenant_id = $1 AND device_id = $2",
+    )
+    .bind(fixture.tenant_id)
+    .bind(fixture.auth.device_id)
+    .fetch_one(&fixture.admin_pool)
+    .await
+    .unwrap();
+    assert_eq!(session.try_get::<i64, _>("count").unwrap(), 1);
+    assert_eq!(
+        session.try_get::<Option<i64>, _>("generation").unwrap(),
+        Some(latest_generation)
+    );
 }
 
 #[tokio::test]

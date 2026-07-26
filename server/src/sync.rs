@@ -520,13 +520,14 @@ pub async fn pull(
 
     let mut tx = db::begin_tenant_transaction(pool, tenant_id).await?;
     ensure_device_continuity(&mut tx, tenant_id, auth.device_id).await?;
-    let continuity = sqlx::query!(
+    let (continuity_generation, required_generation) = sqlx::query_as::<_, (i64, i64)>(
         "SELECT continuity_generation, required_generation
          FROM tenant_device_continuity
-         WHERE tenant_id = $1 AND device_id = $2",
-        tenant_id,
-        auth.device_id
+         WHERE tenant_id = $1 AND device_id = $2
+         FOR UPDATE",
     )
+    .bind(tenant_id)
+    .bind(auth.device_id)
     .fetch_one(&mut *tx)
     .await?;
     let proof_generation = if let Some(generation) = generation {
@@ -541,15 +542,15 @@ pub async fn pull(
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| AppError::conflict("invalid resync generation"))?;
-        if generation != continuity.required_generation || !base_complete {
+        if generation != required_generation || !base_complete {
             return Err(AppError::conflict("resync base is incomplete"));
         }
         generation
     } else {
-        if continuity.continuity_generation != continuity.required_generation {
+        if continuity_generation != required_generation {
             return Err(AppError::gone("full resync required"));
         }
-        continuity.required_generation
+        required_generation
     };
     let high_water = sqlx::query_scalar!(
         "SELECT last_seq FROM tenant_seq WHERE tenant_id = $1",
@@ -591,34 +592,48 @@ pub async fn pull(
     };
 
     let closure_proof = if !has_more && next_since == high_water {
-        sqlx::query!(
-            "DELETE FROM continuity_closure_proofs
-             WHERE tenant_id = $1 AND device_id = $2 AND acknowledged_at IS NULL",
-            tenant_id,
-            auth.device_id
+        let candidate_proof_id = Uuid::now_v7();
+        let proof_id = sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO continuity_closure_proofs
+                 (proof_id, tenant_id, device_id, high_water, generation)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (tenant_id, device_id) DO UPDATE
+             SET proof_id = CASE
+                     WHEN continuity_closure_proofs.high_water = EXCLUDED.high_water
+                      AND continuity_closure_proofs.generation = EXCLUDED.generation
+                     THEN continuity_closure_proofs.proof_id
+                     ELSE EXCLUDED.proof_id
+                 END,
+                 high_water = EXCLUDED.high_water,
+                 generation = EXCLUDED.generation,
+                 acknowledged_at = CASE
+                     WHEN continuity_closure_proofs.high_water = EXCLUDED.high_water
+                      AND continuity_closure_proofs.generation = EXCLUDED.generation
+                     THEN continuity_closure_proofs.acknowledged_at
+                     ELSE NULL
+                 END,
+                 created_at = CASE
+                     WHEN continuity_closure_proofs.high_water = EXCLUDED.high_water
+                      AND continuity_closure_proofs.generation = EXCLUDED.generation
+                     THEN continuity_closure_proofs.created_at
+                     ELSE now()
+                 END
+             RETURNING proof_id",
         )
-        .execute(&mut *tx)
+        .bind(candidate_proof_id)
+        .bind(tenant_id)
+        .bind(auth.device_id)
+        .bind(high_water)
+        .bind(proof_generation)
+        .fetch_one(&mut *tx)
         .await?;
-        let proof = ClosureProof {
-            proof_id: Uuid::now_v7(),
+        Some(ClosureProof {
+            proof_id,
             tenant_id,
             device_id: auth.device_id,
             high_water,
             generation: proof_generation,
-        };
-        sqlx::query!(
-            "INSERT INTO continuity_closure_proofs
-             (proof_id, tenant_id, device_id, high_water, generation)
-             VALUES ($1, $2, $3, $4, $5)",
-            proof.proof_id,
-            proof.tenant_id,
-            proof.device_id,
-            proof.high_water,
-            proof.generation
-        )
-        .execute(&mut *tx)
-        .await?;
-        Some(proof)
+        })
     } else {
         None
     };
@@ -1406,6 +1421,16 @@ pub async fn ack_continuity(
          WHERE proof_id = $1",
         proof.proof_id
     )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "DELETE FROM device_resync_sessions
+         WHERE tenant_id = $1 AND device_id = $2 AND generation = $3
+           AND base_complete",
+    )
+    .bind(tenant_id)
+    .bind(auth.device_id)
+    .bind(proof.generation)
     .execute(&mut *tx)
     .await?;
     let continuity_seq = std::cmp::max(row.continuity_seq, proof.high_water);

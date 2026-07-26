@@ -365,3 +365,128 @@ async fn migrator_bootstraps_ledger_for_database_created_by_legacy_runner() {
     assert!(representative_legacy_data_is_present(&fixture.pool).await);
     assert_runtime_cannot_modify_migration_ledgers(&fixture).await;
 }
+
+#[tokio::test]
+async fn continuity_retention_migration_compacts_existing_proofs_before_unique_index() {
+    let fixture = Fixture::start().await;
+    for path in legacy_migration_paths() {
+        raw_sql(AssertSqlSafe(fs::read_to_string(path).unwrap()))
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+    }
+    seed_representative_legacy_data(&fixture.pool).await;
+    raw_sql(
+        "INSERT INTO tenant_device_continuity
+             (tenant_id, device_id, continuity_seq, continuity_generation,
+              required_generation, initialized)
+         VALUES
+             ('00000000-0000-0000-0000-000000000003',
+              '00000000-0000-0000-0000-000000000002',
+              10, 1, 1, true);
+
+         INSERT INTO continuity_closure_proofs
+             (proof_id, tenant_id, device_id, high_water, generation,
+              acknowledged_at, created_at)
+         VALUES
+             ('00000000-0000-0000-0000-000000000011',
+              '00000000-0000-0000-0000-000000000003',
+              '00000000-0000-0000-0000-000000000002',
+              8, 1, now() - interval '3 days', now() - interval '3 days'),
+             ('00000000-0000-0000-0000-000000000012',
+              '00000000-0000-0000-0000-000000000003',
+              '00000000-0000-0000-0000-000000000002',
+              10, 1, now() - interval '1 day', now() - interval '1 day'),
+             ('00000000-0000-0000-0000-000000000013',
+              '00000000-0000-0000-0000-000000000003',
+              '00000000-0000-0000-0000-000000000002',
+              11, 1, NULL, now() - interval '2 days');
+
+         INSERT INTO devices (id, user_id, device_name)
+         VALUES
+             ('00000000-0000-0000-0000-000000000020',
+              '00000000-0000-0000-0000-000000000001',
+              'Migration seed acknowledged device');
+
+         INSERT INTO tenant_device_continuity
+             (tenant_id, device_id, continuity_seq, continuity_generation,
+              required_generation, initialized)
+         VALUES
+             ('00000000-0000-0000-0000-000000000003',
+              '00000000-0000-0000-0000-000000000020',
+              10, 1, 1, true);
+
+         INSERT INTO continuity_closure_proofs
+             (proof_id, tenant_id, device_id, high_water, generation,
+              acknowledged_at, created_at)
+         VALUES
+             ('00000000-0000-0000-0000-000000000021',
+              '00000000-0000-0000-0000-000000000003',
+              '00000000-0000-0000-0000-000000000020',
+              8, 1, now() - interval '3 days', now() - interval '3 days'),
+             ('00000000-0000-0000-0000-000000000022',
+              '00000000-0000-0000-0000-000000000003',
+              '00000000-0000-0000-0000-000000000020',
+              10, 1, now() - interval '1 day', now() - interval '1 day');",
+    )
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+
+    let migration = migration_paths()
+        .into_iter()
+        .find(|path| migration_version(path) == 202607260004)
+        .unwrap();
+    raw_sql(AssertSqlSafe(fs::read_to_string(migration).unwrap()))
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+
+    let retained = query(
+        "SELECT proof_id::text AS proof_id,
+                acknowledged_at IS NULL AS unacknowledged
+         FROM continuity_closure_proofs
+         WHERE tenant_id = '00000000-0000-0000-0000-000000000003'
+           AND device_id = '00000000-0000-0000-0000-000000000002'",
+    )
+    .fetch_all(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!(retained.len(), 1);
+    assert_eq!(
+        retained[0].try_get::<String, _>("proof_id").unwrap(),
+        "00000000-0000-0000-0000-000000000013"
+    );
+    assert!(retained[0].try_get::<bool, _>("unacknowledged").unwrap());
+
+    let acknowledged = query(
+        "SELECT proof_id::text AS proof_id
+         FROM continuity_closure_proofs
+         WHERE tenant_id = '00000000-0000-0000-0000-000000000003'
+           AND device_id = '00000000-0000-0000-0000-000000000020'",
+    )
+    .fetch_all(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!(acknowledged.len(), 1);
+    assert_eq!(
+        acknowledged[0].try_get::<String, _>("proof_id").unwrap(),
+        "00000000-0000-0000-0000-000000000022"
+    );
+
+    let duplicate = query(
+        "INSERT INTO continuity_closure_proofs
+             (proof_id, tenant_id, device_id, high_water, generation)
+         VALUES
+             ('00000000-0000-0000-0000-000000000014',
+              '00000000-0000-0000-0000-000000000003',
+              '00000000-0000-0000-0000-000000000002',
+              12, 1)",
+    )
+    .execute(&fixture.pool)
+    .await;
+    assert!(
+        duplicate.is_err(),
+        "the migration must enforce one current proof per tenant/device"
+    );
+}
